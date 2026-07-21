@@ -48,21 +48,28 @@ fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    // Drain stdout concurrently: a child writing more than the OS pipe
+    // buffer would otherwise block forever and burn the whole timeout.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        stdout.read_to_string(&mut out).ok().map(|_| out)
+    });
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                let out = reader.join().ok().flatten();
                 if !status.success() {
                     return None;
                 }
-                let mut out = String::new();
-                child.stdout.take()?.read_to_string(&mut out).ok()?;
-                return Some(out);
+                return out;
             }
             Ok(None) => {
                 if start.elapsed() > GIT_TIMEOUT {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = reader.join();
                     return None;
                 }
                 std::thread::sleep(Duration::from_millis(5));
@@ -70,6 +77,7 @@ fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = reader.join();
                 return None;
             }
         }
