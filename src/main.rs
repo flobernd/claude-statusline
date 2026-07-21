@@ -3,6 +3,7 @@ mod format;
 mod bar;
 mod fit;
 mod schema;
+mod git;
 
 use clap::Parser;
 use std::io::Read;
