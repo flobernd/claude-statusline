@@ -5,6 +5,7 @@ mod fit;
 mod schema;
 mod git;
 mod transcript;
+mod sections;
 
 use clap::Parser;
 use std::io::Read;
