@@ -6,13 +6,24 @@ pub fn install() -> Result<()> {
     let path = super::settings_path();
     let mut settings = Map::new();
     if path.exists() {
-        if let Err(e) = std::fs::copy(&path, bak_path(&path)) {
+        let parsed = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+
+        // The .bak must hold the user's pre-install state, not our own
+        // previous entry: skip it when the current statusLine is already
+        // ours, so reinstalling never clobbers a genuine backup.
+        let current_is_ours = parsed
+            .as_ref()
+            .and_then(|v| v.get("statusLine"))
+            .and_then(|sl| sl.get("command"))
+            .and_then(|c| c.as_str())
+            .is_some_and(super::print_config::is_our_command);
+        if !current_is_ours && let Err(e) = std::fs::copy(&path, bak_path(&path)) {
             eprintln!("Warning: could not create backup: {e}");
         }
-        match std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        {
+
+        match parsed {
             Some(Value::Object(existing)) => settings = existing,
             _ => println!(
                 "Warning: could not parse existing settings.json; writing new settings with statusLine only (backup at {}).",
@@ -63,8 +74,17 @@ pub fn uninstall() -> Result<()> {
         .and_then(|v| v.get("statusLine").cloned())
         && Some(&previous) != removed.as_ref()
     {
-        settings.insert("statusLine".to_string(), previous);
-        restored = true;
+        // Never resurrect our own stale entry: a backup written by an
+        // earlier claude-statusline install is not the user's original
+        // config.
+        let previous_is_ours = previous
+            .get("command")
+            .and_then(|c| c.as_str())
+            .is_some_and(super::print_config::is_our_command);
+        if !previous_is_ours {
+            settings.insert("statusLine".to_string(), previous);
+            restored = true;
+        }
     }
     write_atomic(&path, &Value::Object(settings))?;
 

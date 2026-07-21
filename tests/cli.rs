@@ -286,6 +286,23 @@ fn install_preserves_other_keys_and_backs_up() {
 }
 
 #[test]
+fn reinstall_preserves_original_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{"statusLine": {"type": "command", "command": "other-tool"}}"#,
+    )
+    .unwrap();
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    let bak: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{}.bak", path.display())).unwrap())
+            .unwrap();
+    assert_eq!(bak["statusLine"]["command"], "other-tool");
+}
+
+#[test]
 fn uninstall_restores_previous_statusline_from_backup() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
@@ -300,6 +317,26 @@ fn uninstall_restores_previous_statusline_from_backup() {
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(v["statusLine"]["command"], "other-tool");
+}
+
+#[test]
+fn uninstall_never_restores_our_own_stale_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{"statusLine": {"type": "command", "command": "/old/claude-statusline"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        format!("{}.bak", path.display()),
+        r#"{"statusLine": {"type": "command", "command": "/older/claude-statusline"}}"#,
+    )
+    .unwrap();
+    assert!(run_with_settings(&["--uninstall"], &path).status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(v.get("statusLine").is_none());
 }
 
 #[test]
