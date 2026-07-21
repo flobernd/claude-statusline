@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 210" role="img" aria-label="claude-statusline">
+  <title>claude-statusline</title>
+
+  <g>
+    <rect x="80" y="14" width="120" height="82" rx="10" fill="#1a1b26" stroke="#565f89" stroke-width="2"/>
+    <circle cx="94" cy="27" r="3.2" fill="#f7768e"/>
+    <circle cx="104.5" cy="27" r="3.2" fill="#e0af68"/>
+    <circle cx="115" cy="27" r="3.2" fill="#9ece6a"/>
+
+    <rect x="92" y="37" width="64" height="3.5" rx="1.75" fill="#2f3549"/>
+    <rect x="92" y="45" width="78" height="3.5" rx="1.75" fill="#2f3549"/>
+    <rect x="92" y="53" width="52" height="3.5" rx="1.75" fill="#2f3549"/>
+
+    <rect x="92" y="64" width="24" height="6" rx="2" fill="#9ece6a"/>
+    <rect x="117" y="64" width="11" height="6" rx="2" fill="#565f89"/>
+    <rect x="132" y="64" width="16" height="6" rx="2" fill="#7aa2f7"/>
+    <rect x="152" y="64" width="12" height="6" rx="2" fill="#bb9af7"/>
+    <rect x="168" y="64" width="9" height="6" rx="2" fill="#565f89"/>
+
+    <rect x="92" y="76" width="20" height="6" rx="2" fill="#7dcfff"/>
+    <rect x="116" y="76" width="9" height="6" rx="2" fill="#e0af68"/>
+    <rect x="129" y="76" width="14" height="6" rx="2" fill="#565f89"/>
+    <rect x="147" y="76" width="12" height="6" rx="2" fill="#9ece6a"/>
+    <rect x="163" y="76" width="5" height="6" rx="1" fill="#c0caf5"/>
+  </g>
+
+  <text x="140" y="166" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="27" letter-spacing="-0.3">
+    <tspan fill="#a9b1d6" font-weight="500">claude-</tspan><tspan fill="#7aa2f7" font-weight="700">statusline</tspan>
+  </text>
+  <text x="140" y="190" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" letter-spacing="0.5" fill="#565f89">Tokyo Night statusline for Claude Code</text>
+</svg>
