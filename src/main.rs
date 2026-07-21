@@ -4,6 +4,7 @@ mod bar;
 mod fit;
 mod schema;
 mod git;
+mod transcript;
 
 use clap::Parser;
 use std::io::Read;
