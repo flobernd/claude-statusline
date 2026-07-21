@@ -204,3 +204,64 @@ fn print_config_corrupt_settings_exits_two() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stdout).contains("settings_state=unreadable"));
 }
+
+fn run_with_settings(args: &[&str], path: &std::path::Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_claude-statusline"))
+        .args(args)
+        .env("CLAUDE_STATUSLINE_SETTINGS_PATH", path)
+        .output()
+        .expect("binary runs")
+}
+
+#[test]
+fn install_preserves_other_keys_and_backs_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, r#"{"model": "opus", "statusLine": {"type": "command", "command": "other-tool"}}"#).unwrap();
+
+    let out = run_with_settings(&["--install"], &path);
+    assert!(out.status.success());
+
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(v["model"], "opus");
+    let cmd = v["statusLine"]["command"].as_str().unwrap();
+    assert!(cmd.contains("claude-statusline"));
+    assert_eq!(v["statusLine"]["refreshInterval"], 10);
+    // Backup holds the pre-install state.
+    let bak: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{}.bak", path.display())).unwrap()).unwrap();
+    assert_eq!(bak["statusLine"]["command"], "other-tool");
+}
+
+#[test]
+fn uninstall_restores_previous_statusline_from_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, r#"{"statusLine": {"type": "command", "command": "other-tool"}}"#).unwrap();
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    assert!(run_with_settings(&["--uninstall"], &path).status.success());
+
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(v["statusLine"]["command"], "other-tool");
+}
+
+#[test]
+fn uninstall_without_backup_removes_statusline() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, r#"{"keep": 1, "statusLine": {"type": "command", "command": "claude-statusline"}}"#).unwrap();
+    assert!(run_with_settings(&["--uninstall"], &path).status.success());
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(v.get("statusLine").is_none());
+    assert_eq!(v["keep"], 1);
+}
+
+#[test]
+fn install_then_print_config_reports_installed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    let out = run_with_settings(&["--print-config"], &path);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("installed=true"));
+}

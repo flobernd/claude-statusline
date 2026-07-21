@@ -37,8 +37,22 @@ fn main() {
     if cli.print_config {
         std::process::exit(commands::print_config::run());
     }
-    if cli.setup || cli.install || cli.uninstall {
-        // Wired up in later commits.
+    if cli.install {
+        if let Err(e) = commands::install::install() {
+            eprintln!("claude-statusline: install failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cli.uninstall {
+        if let Err(e) = commands::install::uninstall() {
+            eprintln!("claude-statusline: uninstall failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cli.setup {
+        // Wired up in the next commit.
         return;
     }
     let mut raw = String::new();
