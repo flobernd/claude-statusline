@@ -3,7 +3,7 @@ name = "claude-statusline"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Tokyo Night statusline for Claude Code"
+description = "Two-line statusline for Claude Code"
 
 [dependencies]
 anyhow = "1"

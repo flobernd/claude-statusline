@@ -15,7 +15,7 @@ use std::io::Read;
 #[command(
     name = "claude-statusline",
     version,
-    about = "Tokyo Night statusline for Claude Code"
+    about = "Two-line statusline for Claude Code"
 )]
 struct Cli {
     /// Interactive setup wizard
