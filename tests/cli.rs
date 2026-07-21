@@ -26,6 +26,10 @@ use std::process::Stdio;
 
 /// Run the binary with controlled env: NO_COLOR output, fixed width,
 /// HOME pointed at a temp dir so no real config or transcript leaks in.
+/// The working directory is also pinned to that temp dir: without it the
+/// child inherits cargo test's cwd (this crate's own git checkout), and a
+/// payload with no explicit workspace would pick up its branch as a false
+/// line2 chip.
 fn run_statusline(stdin_data: &str, width: &str, home: &std::path::Path) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_claude-statusline"))
         .env("NO_COLOR", "1")
@@ -33,6 +37,7 @@ fn run_statusline(stdin_data: &str, width: &str, home: &std::path::Path) -> std:
         .env("CLAUDE_STATUSLINE_WIDTH", width)
         .env("HOME", home)
         .env("USERPROFILE", home)
+        .current_dir(home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -78,6 +83,17 @@ fn undecodable_stdin_prints_question_mark() {
     assert!(out.status.success());
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "?");
     assert!(!out.stderr.is_empty());
+}
+
+#[test]
+fn payload_control_characters_never_reach_stdout() {
+    let home = tempfile::tempdir().unwrap();
+    let payload = r#"{"model": {"display_name": "evil[2Jwiped\nsecond"}}"#;
+    let out = run_statusline(payload, "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains('\u{1b}'));
+    assert_eq!(stdout.trim_end_matches('\n').lines().count(), 1);
+    assert!(stdout.contains("wiped"));
 }
 
 #[test]

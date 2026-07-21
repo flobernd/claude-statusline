@@ -9,6 +9,18 @@ pub const MAGENTA: Rgb = Rgb(0xbb, 0x9a, 0xf7);
 pub const YELLOW: Rgb = Rgb(0xe0, 0xaf, 0x68);
 pub const RED: Rgb = Rgb(0xf7, 0x76, 0x8e);
 
+/// Payload text reaches the terminal verbatim, so control characters
+/// (C0, DEL, C1) are stripped here at the single chokepoint every chip
+/// string flows through; otherwise a hostile display_name or directory
+/// name could inject escape sequences or break the line contract.
+///
+/// `char::is_control` alone covers C0, DEL, and C1 (U+0080-U+009F): all
+/// three ranges are the Unicode `Cc` category, verified against rustc's
+/// char tables, so no separate C1 range check is needed.
+fn sanitize(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
     pub colors: bool,
@@ -28,15 +40,17 @@ impl Style {
     }
 
     pub fn paint(&self, text: &str, c: Rgb) -> String {
+        let text = sanitize(text);
         if !self.colors || text.is_empty() {
-            return text.to_string();
+            return text;
         }
         format!("\x1b[38;2;{};{};{}m{}\x1b[0m", c.0, c.1, c.2, text)
     }
 
     pub fn paint_bold(&self, text: &str, c: Rgb) -> String {
+        let text = sanitize(text);
         if !self.colors || text.is_empty() {
-            return text.to_string();
+            return text;
         }
         format!("\x1b[1m\x1b[38;2;{};{};{}m{}\x1b[0m", c.0, c.1, c.2, text)
     }
@@ -113,5 +127,16 @@ mod tests {
         assert_eq!(FULL.link("https://e.com/\x07evil", "text"), "text");
         assert_eq!(FULL.link("https://e.com/\x1b[31m", "text"), "text");
         assert_eq!(FULL.link("", "text"), "text");
+    }
+
+    #[test]
+    fn paint_strips_control_characters_in_both_modes() {
+        assert_eq!(
+            FULL.paint("evil\x1b[2Jwiped", GREEN),
+            FULL.paint("evil[2Jwiped", GREEN)
+        );
+        assert_eq!(PLAIN.paint("evil\x1b[2Jwiped", GREEN), "evil[2Jwiped");
+        assert_eq!(PLAIN.paint("line1\nline2", GREEN), "line1line2");
+        assert_eq!(PLAIN.paint_bold("a\u{9c}b\u{7f}c", RED), "abc");
     }
 }
