@@ -136,10 +136,24 @@ pub fn collect(dir: &Path) -> GitInfo {
     info
 }
 
-/// Filled in by the state-detection change; separated so collect() can
-/// already reference it.
-fn detect_state(_dir: &Path, _git_dir: &Path) -> Option<GitState> {
-    None
+/// Operation state from git-dir markers; any operation with unmerged
+/// paths reports as Conflict instead of the operation name.
+fn detect_state(dir: &Path, git_dir: &Path) -> Option<GitState> {
+    let op = if git_dir.join("MERGE_HEAD").is_file() {
+        GitState::Merge
+    } else if git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir() {
+        GitState::Rebase
+    } else if git_dir.join("CHERRY_PICK_HEAD").is_file() {
+        GitState::CherryPick
+    } else if git_dir.join("REVERT_HEAD").is_file() {
+        GitState::Revert
+    } else {
+        return None;
+    };
+    match run_git(dir, &["diff", "--name-only", "--diff-filter=U"]) {
+        Some(out) if !out.trim().is_empty() => Some(GitState::Conflict),
+        _ => Some(op),
+    }
 }
 
 #[cfg(test)]
@@ -232,5 +246,54 @@ mod tests {
         assert!(info.linked_worktree);
         assert_eq!(info.branch.as_deref(), Some("feat/x"));
         assert_eq!(info.repo_name_fallback.as_deref(), Some("repo"));
+    }
+
+    #[test]
+    fn merge_conflict_reports_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        git(dir.path(), &["checkout", "-b", "other"]);
+        std::fs::write(dir.path().join("f.txt"), "theirs\n").unwrap();
+        git(dir.path(), &["commit", "-am", "theirs"]);
+        git(dir.path(), &["checkout", "main"]);
+        std::fs::write(dir.path().join("f.txt"), "ours\n").unwrap();
+        git(dir.path(), &["commit", "-am", "ours"]);
+        // The merge fails with conflicts; run without asserting success.
+        let _ = Command::new("git")
+            .args(["merge", "other"])
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let info = collect(dir.path());
+        assert_eq!(info.state, Some(GitState::Conflict));
+    }
+
+    #[test]
+    fn merge_marker_without_conflicts_reports_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let out = run_git(dir.path(), &["rev-parse", "--git-dir"]).unwrap();
+        let git_dir = resolve(dir.path(), out.trim());
+        std::fs::write(git_dir.join("MERGE_HEAD"), "0000\n").unwrap();
+        let info = collect(dir.path());
+        assert_eq!(info.state, Some(GitState::Merge));
+    }
+
+    #[test]
+    fn rebase_marker_reports_rebase() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let out = run_git(dir.path(), &["rev-parse", "--git-dir"]).unwrap();
+        let git_dir = resolve(dir.path(), out.trim());
+        std::fs::create_dir(git_dir.join("rebase-merge")).unwrap();
+        let info = collect(dir.path());
+        assert_eq!(info.state, Some(GitState::Rebase));
     }
 }
