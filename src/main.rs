@@ -33,11 +33,13 @@ struct Cli {
 }
 
 const LINE1_DROP: &[&str] = &["cache_age", "cache", "context_tokens", "effort", "model"];
+// The cwd chip is deliberately absent: like the branch chip it always
+// stays, per the product decision that the current directory is visible
+// at every width.
 const LINE2_DROP: &[&str] = &[
     "git_worktree",
     "git_sync",
     "git_stash",
-    "project",
     "worktree",
     "pr",
     "git_state",

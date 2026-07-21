@@ -135,18 +135,16 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
         .and_then(|r| r.name.clone())
         .or_else(|| c.git.repo_name_fallback.clone());
 
-    let project: Option<String> = ws
-        .and_then(|w| w.project_dir.as_deref())
-        .or_else(|| ws.and_then(|w| w.current_dir.as_deref()))
+    let cwd = ws
+        .and_then(|w| w.current_dir.as_deref())
         .or(c.payload.cwd.as_deref())
-        .map(basename)
+        .or_else(|| ws.and_then(|w| w.project_dir.as_deref()))
         .filter(|p| !p.is_empty());
-    if let Some(p) = project {
-        // Auto-hide when the branch chip already shows the same name.
-        let duplicate = c.git.branch.is_some() && repo_name.as_deref() == Some(p.as_str());
-        if !duplicate {
-            out.push(("project", s.paint(&p, CYAN)));
-        }
+    if let Some(path) = cwd {
+        out.push((
+            "cwd",
+            s.paint(&format!("\u{2302} {}", display_path(path)), CYAN),
+        ));
     }
 
     if let Some(branch) = c.git.branch.as_deref() {
@@ -244,11 +242,22 @@ fn review_token(state: &str) -> Option<(&'static str, crate::theme::Rgb)> {
     }
 }
 
-fn basename(p: &str) -> String {
-    std::path::Path::new(p.trim_end_matches(['/', '\\']))
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
+/// Home-prefixed paths render with the terminal-conventional tilde; the
+/// prefix only collapses at a separator boundary so /home/userx is never
+/// mistaken for /home/user.
+fn display_path(path: &str) -> String {
+    if let Some(home) = crate::schema::home_dir() {
+        let home = home.to_string_lossy();
+        if let Some(rest) = path.strip_prefix(home.as_ref()) {
+            if rest.is_empty() {
+                return "~".to_string();
+            }
+            if rest.starts_with('/') || rest.starts_with('\\') {
+                return format!("~{rest}");
+            }
+        }
+    }
+    path.to_string()
 }
 
 pub fn sample_payload() -> Payload {
@@ -473,20 +482,22 @@ mod tests {
     }
 
     #[test]
-    fn project_chip_hides_when_it_matches_repo_name() {
+    fn cwd_chip_always_opens_line2_with_full_path() {
         let payload = payload_with_repo();
         let git = git_on("main");
         let chips = line2(&ctx_of(&payload, &git));
-        assert_eq!(names_of(&chips), vec!["branch"]);
-        assert_eq!(chips[0].1, "\u{2387} myapp/main");
+        assert_eq!(names_of(&chips), vec!["cwd", "branch"]);
+        assert_eq!(chips[0].1, "\u{2302} /home/u/myapp");
+        assert_eq!(chips[1].1, "\u{2387} myapp/main");
     }
 
     #[test]
-    fn project_chip_shows_when_folder_differs_from_repo_name() {
+    fn cwd_chip_prefers_current_dir_over_project_dir() {
         let payload = parse_payload(
             r#"{
             "workspace": {
-                "project_dir": "/home/u/myapp-fix",
+                "current_dir": "/home/u/myapp/src",
+                "project_dir": "/home/u/myapp",
                 "repo": {"name": "myapp"}
             }
         }"#,
@@ -494,18 +505,29 @@ mod tests {
         .unwrap();
         let git = git_on("fix/links");
         let chips = line2(&ctx_of(&payload, &git));
-        assert_eq!(names_of(&chips), vec!["project", "branch"]);
-        assert_eq!(chips[0].1, "myapp-fix");
+        assert_eq!(names_of(&chips), vec!["cwd", "branch"]);
+        assert_eq!(chips[0].1, "\u{2302} /home/u/myapp/src");
         assert_eq!(chips[1].1, "\u{2387} myapp/fix/links");
     }
 
     #[test]
-    fn project_chip_shows_without_branch() {
+    fn cwd_chip_shows_without_branch_and_abbreviates_home() {
         let payload = payload_with_repo();
         let git = GitInfo::default();
         let chips = line2(&ctx_of(&payload, &git));
-        assert_eq!(names_of(&chips), vec!["project"]);
-        assert_eq!(chips[0].1, "myapp");
+        assert_eq!(names_of(&chips), vec!["cwd"]);
+        assert_eq!(chips[0].1, "\u{2302} /home/u/myapp");
+
+        assert_eq!(display_path("/definitely/not/home"), "/definitely/not/home");
+        if let Some(home) = crate::schema::home_dir() {
+            let home = home.to_string_lossy().into_owned();
+            assert_eq!(display_path(&home), "~");
+            assert_eq!(display_path(&format!("{home}/sub/dir")), "~/sub/dir");
+            assert_eq!(
+                display_path(&format!("{home}x/other")),
+                format!("{home}x/other")
+            );
+        }
     }
 
     #[test]
@@ -634,6 +656,7 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("ctx:420K/1M"));
+        assert!(lines[1].contains("\u{2302} "));
         assert!(lines[1].contains("\u{2387} myapp/feat/statusline"));
         assert!(lines[1].contains("PR#1234 ok"));
     }
