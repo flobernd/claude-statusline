@@ -265,3 +265,52 @@ fn install_then_print_config_reports_installed() {
     assert_eq!(out.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&out.stdout).contains("installed=true"));
 }
+
+fn run_setup(answer: &str, path: &std::path::Path) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_claude-statusline"))
+        .arg("--setup")
+        .env("CLAUDE_STATUSLINE_SETTINGS_PATH", path)
+        .env("NO_COLOR", "1")
+        .env_remove("FORCE_COLOR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("binary runs");
+    child.stdin.as_mut().unwrap().write_all(answer.as_bytes()).unwrap();
+    child.wait_with_output().expect("binary exits")
+}
+
+#[test]
+fn setup_confirm_installs_and_shows_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let out = run_setup("y\n", &path);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Preview:"));
+    assert!(stdout.contains("ctx:420K/1M"));
+    assert!(stdout.contains("\u{2387} myapp/feat/statusline"));
+    assert!(stdout.contains("Setup complete."));
+    assert!(path.exists());
+}
+
+#[test]
+fn setup_decline_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let out = run_setup("n\n", &path);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Setup cancelled."));
+    assert!(!path.exists());
+}
+
+#[test]
+fn setup_eof_cancels_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let out = run_setup("", &path);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Setup cancelled."));
+    assert!(!path.exists());
+}

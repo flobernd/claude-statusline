@@ -52,7 +52,10 @@ fn main() {
         return;
     }
     if cli.setup {
-        // Wired up in the next commit.
+        if let Err(e) = commands::setup::run() {
+            eprintln!("claude-statusline: setup failed: {e}");
+            std::process::exit(1);
+        }
         return;
     }
     let mut raw = String::new();
