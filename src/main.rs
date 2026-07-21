@@ -27,6 +27,10 @@ struct Cli {
     print_config: bool,
 }
 
+const LINE1_DROP: &[&str] = &["cache_age", "cache", "context_tokens", "effort", "model"];
+const LINE2_DROP: &[&str] = &["git_worktree", "git_sync", "git_stash", "project", "worktree", "pr", "git_state"];
+const SEP: &str = " \u{2502} ";
+
 fn main() {
     let cli = Cli::parse();
     if cli.setup || cli.install || cli.uninstall || cli.print_config {
@@ -37,5 +41,86 @@ fn main() {
     if std::io::stdin().read_to_string(&mut raw).is_err() {
         return;
     }
-    if raw.trim().is_empty() {}
+    if raw.trim().is_empty() {
+        return;
+    }
+    // The statusline must never surface a crash: a panic would splat a
+    // backtrace into the Claude Code footer on every render tick.
+    match std::panic::catch_unwind(|| render(&raw)) {
+        Ok(Some(output)) if !output.is_empty() => println!("{output}"),
+        Ok(_) => {}
+        Err(_) => eprintln!("claude-statusline: render error"),
+    }
+}
+
+fn terminal_width() -> usize {
+    let parse = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|w| (20..=4000).contains(w))
+    };
+    parse("CLAUDE_STATUSLINE_WIDTH").or_else(|| parse("COLUMNS")).unwrap_or(100)
+}
+
+fn render(raw: &str) -> Option<String> {
+    let Some(payload) = schema::parse_payload(raw) else {
+        eprintln!("claude-statusline: undecodable stdin payload");
+        return Some("?".to_string());
+    };
+
+    let config = schema::home_dir()
+        .map(|h| schema::load_config(&h.join(".claude").join("claude-statusline.json")))
+        .unwrap_or_default();
+    let style = theme::Style::from_env(config.clickable_links);
+    let width = terminal_width();
+
+    // A missing working directory only loses the git chips; Line 1 must
+    // still render, so this never aborts the whole pipeline.
+    let git_dir = payload
+        .workspace
+        .as_ref()
+        .and_then(|w| w.current_dir.clone())
+        .or_else(|| payload.cwd.clone())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    let git_info = match git_dir {
+        Some(dir) => git::collect(&dir),
+        None => git::GitInfo::default(),
+    };
+
+    let cache_age_ms = payload.transcript_path.as_deref().and_then(|p| {
+        let ts = transcript::last_assistant_timestamp_ms(p)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis() as i64;
+        Some(now - ts)
+    });
+
+    let ctx = sections::Ctx { payload: &payload, git: &git_info, cache_age_ms, style: &style };
+    let sep = style.paint(SEP, theme::COMMENT);
+    let sep_width = fit::visible_width(&sep);
+
+    let disabled = &config.disabled_sections;
+    let compose = |chips: Vec<(&'static str, String)>, drop: &[&str]| -> Option<String> {
+        let chips: Vec<(&'static str, String)> = chips
+            .into_iter()
+            .filter(|(name, _)| !disabled.iter().any(|d| d == name))
+            .collect();
+        let fitted = fit::fit_line(chips, sep_width, width, drop);
+        if fitted.is_empty() {
+            return None;
+        }
+        Some(fitted.into_iter().map(|(_, r)| r).collect::<Vec<_>>().join(&sep))
+    };
+
+    let lines: Vec<String> = [
+        compose(sections::line1(&ctx), LINE1_DROP),
+        compose(sections::line2(&ctx), LINE2_DROP),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    Some(lines.join("\n"))
 }
