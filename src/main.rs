@@ -33,17 +33,15 @@ struct Cli {
 }
 
 const LINE1_DROP: &[&str] = &["cache", "cache_age", "effort"];
-// The cwd chip is deliberately absent: like the branch chip it always
-// stays, per the product decision that the current directory is visible
-// at every width.
+// cwd, branch, and worktree are intentionally omitted so they never drop:
+// the location and active-worktree identity stay visible at any width.
 const LINE2_DROP: &[&str] = &[
     "git_worktree",
-    "git_sync",
     "git_stash",
-    "git_files",
-    "worktree",
-    "pr",
+    "git_sync",
     "git_state",
+    "git_files",
+    "pr",
 ];
 const SEP: &str = " \u{2502} ";
 
