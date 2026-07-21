@@ -15,7 +15,7 @@ pub fn bar_color(pct: f64) -> Rgb {
 pub fn render_bar(pct: f64, width: usize, style: &Style) -> String {
     let clamped = pct.clamp(0.0, 100.0);
     let color = bar_color(clamped);
-    let filled = width * (clamped as usize) / 100;
+    let filled = (width as f64 * clamped / 100.0) as usize;
     let empty = width - filled;
     format!(
         "[{}{}]",
@@ -61,5 +61,10 @@ mod tests {
         assert!(bar.contains("\x1b[38;2;86;95;137m")); // comment empty
         assert!(bar.starts_with('['));
         assert!(bar.ends_with(']'));
+    }
+
+    #[test]
+    fn fill_scales_before_truncation_for_non_divisor_widths() {
+        assert_eq!(render_bar(3.5, 30, &PLAIN), format!("[{}{}]", "\u{2588}", "\u{2591}".repeat(29)));
     }
 }
