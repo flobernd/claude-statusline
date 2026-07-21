@@ -6,8 +6,7 @@
   </picture>
 </div>
 
-A two-line statusline for [Claude Code](https://code.claude.com), rendered in the
-[Tokyo Night](https://github.com/folke/tokyonight.nvim) palette: context usage, token and
+A two-line statusline for [Claude Code](https://code.claude.com): context usage, token and
 prompt-cache metrics, model and effort level on the first line; project, git status, and pull
 request context on the second.
 
@@ -16,7 +15,7 @@ request context on the second.
 - Two fixed lines: context bar, absolute context tokens, token counts, prompt-cache hit ratio,
   cache age, model, and effort level on top; project, git branch with repo name, stash, sync,
   operation state, worktree indicators, and the open pull request below
-- Tokyo Night palette rendered as 24-bit truecolor, identical in every terminal;
+- 24-bit truecolor rendering, identical in every terminal regardless of its palette;
   `NO_COLOR` respected
 - Chips hide themselves when their data is absent: a clean repo shows a short line, a merge
   conflict or a cold prompt cache stands out
