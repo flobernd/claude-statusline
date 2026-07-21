@@ -45,11 +45,22 @@ fn main() {
         return;
     }
     // The statusline must never surface a crash: a panic would splat a
-    // backtrace into the Claude Code footer on every render tick.
+    // backtrace into the Claude Code footer on every render tick. The
+    // silent hook keeps the default handler from writing its own
+    // multi-line message; the payload text is folded into our single
+    // stderr line instead.
+    std::panic::set_hook(Box::new(|_| {}));
     match std::panic::catch_unwind(|| render(&raw)) {
         Ok(Some(output)) if !output.is_empty() => println!("{output}"),
         Ok(_) => {}
-        Err(_) => eprintln!("claude-statusline: render error"),
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            eprintln!("claude-statusline: render error: {msg}");
+        }
     }
 }
 
