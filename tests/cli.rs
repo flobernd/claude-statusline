@@ -69,7 +69,7 @@ fn renders_line1_from_sample_payload() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("ctx:420K/1M"), "stdout: {stdout}");
-    assert!(stdout.contains("in:412K out:18K"));
+    assert!(stdout.contains("in:424K out:18K"));
     assert!(stdout.contains("cache:46%"));
     assert!(stdout.contains("Sonnet 5"));
     assert!(stdout.contains("effort:xhigh"));
@@ -126,7 +126,7 @@ fn narrow_width_drops_low_priority_chips_but_keeps_bar_and_tokens() {
     let home = tempfile::tempdir().unwrap();
     let out = run_statusline(SAMPLE, "45", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("in:412K out:18K"));
+    assert!(stdout.contains("in:424K out:18K"));
     assert!(stdout.contains('['));
     assert!(!stdout.contains("cache_age"));
     assert!(!stdout.contains("Sonnet 5"));
@@ -146,7 +146,7 @@ fn disabled_sections_config_hides_chips() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("cache:46%"));
     assert!(!stdout.contains("effort:"));
-    assert!(stdout.contains("in:412K out:18K"));
+    assert!(stdout.contains("in:424K out:18K"));
 }
 
 #[test]

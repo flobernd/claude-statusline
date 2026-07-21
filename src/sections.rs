@@ -40,7 +40,18 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
         ));
     }
 
-    let input = usage.and_then(|u| u.input_tokens);
+    // Raw input_tokens is only the uncached remainder after the final
+    // cache breakpoint, which Claude Code keeps at the prompt end, so it
+    // reads as a constant handful of tokens. Fresh input (uncached plus
+    // newly cached) is the meaningful per-turn number: what this turn
+    // added on top of the replayed cache prefix.
+    let input = match (
+        usage.and_then(|u| u.input_tokens),
+        usage.and_then(|u| u.cache_creation_input_tokens),
+    ) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0.0).max(0.0) + b.unwrap_or(0.0).max(0.0)),
+    };
     let output = usage.and_then(|u| u.output_tokens);
     if input.is_some() || output.is_some() {
         let fmt = |v: Option<f64>| v.map_or("?".to_string(), |n| fmt_tokens(n.max(0.0) as u64));
@@ -255,9 +266,9 @@ pub fn sample_payload() -> Payload {
             "used_percentage": 42,
             "context_window_size": 1000000,
             "current_usage": {
-                "input_tokens": 412000, "output_tokens": 18500,
+                "input_tokens": 2, "output_tokens": 18500,
                 "cache_creation_input_tokens": 12000,
-                "cache_read_input_tokens": 365000
+                "cache_read_input_tokens": 407998
             }
         },
         "pr": {"number": 1234, "url": "https://github.com/user/myapp/pull/1234", "review_state": "approved"}
@@ -360,7 +371,7 @@ mod tests {
             ]
         );
         assert_eq!(text_of(&chips, "context_tokens"), "ctx:420K/1M");
-        assert_eq!(text_of(&chips, "tokens"), "in:412K out:18K");
+        assert_eq!(text_of(&chips, "tokens"), "in:424K out:18K");
         assert_eq!(text_of(&chips, "cache"), "cache:46%"); // 365000 / 789000
         assert_eq!(text_of(&chips, "cache_age"), "cache_age:1m12s");
         assert_eq!(text_of(&chips, "model"), "Sonnet 5");
