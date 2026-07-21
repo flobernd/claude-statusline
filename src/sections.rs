@@ -114,12 +114,16 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
         .and_then(|r| r.name.clone())
         .or_else(|| c.git.repo_name_fallback.clone());
 
+    // The branch chip already carries the repo name and location, so the
+    // cwd chip only earns its space outside a git repo, where none renders.
     let cwd = ws
         .and_then(|w| w.current_dir.as_deref())
         .or(c.payload.cwd.as_deref())
         .or_else(|| ws.and_then(|w| w.project_dir.as_deref()))
         .filter(|p| !p.is_empty());
-    if let Some(path) = cwd {
+    if c.git.branch.is_none()
+        && let Some(path) = cwd
+    {
         out.push((
             "cwd",
             s.paint(&format!("\u{2302} {}", display_path(path)), CYAN),
@@ -488,13 +492,12 @@ mod tests {
     }
 
     #[test]
-    fn cwd_chip_always_opens_line2_with_full_path() {
+    fn cwd_chip_suppressed_inside_git_repo() {
         let payload = payload_with_repo();
         let git = git_on("main");
         let chips = line2(&ctx_of(&payload, &git));
-        assert_eq!(names_of(&chips), vec!["cwd", "branch"]);
-        assert_eq!(chips[0].1, "\u{2302} /home/u/myapp");
-        assert_eq!(chips[1].1, "\u{2387} myapp/main");
+        assert_eq!(names_of(&chips), vec!["branch"]);
+        assert_eq!(chips[0].1, "\u{2387} myapp/main");
     }
 
     #[test]
@@ -509,11 +512,10 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let git = git_on("fix/links");
+        let git = GitInfo::default();
         let chips = line2(&ctx_of(&payload, &git));
-        assert_eq!(names_of(&chips), vec!["cwd", "branch"]);
+        assert_eq!(names_of(&chips), vec!["cwd"]);
         assert_eq!(chips[0].1, "\u{2302} /home/u/myapp/src");
-        assert_eq!(chips[1].1, "\u{2387} myapp/fix/links");
     }
 
     #[test]
@@ -684,7 +686,8 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("420K/1M"));
-        assert!(lines[1].contains("\u{2302} "));
+        // The sample sits on a branch, so the cwd chip is suppressed.
+        assert!(!lines[1].contains("\u{2302} "));
         assert!(lines[1].contains("\u{2387} myapp/feat/statusline"));
         assert!(lines[1].contains("+3 -1 ~7"));
         assert!(lines[1].contains("PR#1234 ok"));

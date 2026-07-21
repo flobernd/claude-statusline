@@ -181,14 +181,9 @@ fn line2_renders_from_temp_git_repo() {
     let out = run_statusline(&payload, "200", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("\u{2387} myrepo/main"), "stdout: {stdout}");
-    // The repo sits under the temp HOME, so the cwd chip abbreviates it.
-    // The separator after the tilde stays platform-native.
-    let line2 = stdout.lines().next().unwrap();
-    assert!(
-        line2.trim_start().starts_with("\u{2302} ~"),
-        "line2: {line2}"
-    );
-    assert!(line2.contains("myrepo"));
+    // Inside a git repo the branch chip carries the location, so the cwd
+    // chip is suppressed.
+    assert!(!stdout.contains('\u{2302}'), "stdout: {stdout}");
 }
 
 #[test]
