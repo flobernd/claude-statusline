@@ -1,3 +1,5 @@
+mod theme;
+
 use clap::Parser;
 use std::io::Read;
 
