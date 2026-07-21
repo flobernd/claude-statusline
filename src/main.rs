@@ -40,6 +40,7 @@ const LINE2_DROP: &[&str] = &[
     "git_worktree",
     "git_sync",
     "git_stash",
+    "git_files",
     "worktree",
     "pr",
     "git_state",

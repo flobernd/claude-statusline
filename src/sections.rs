@@ -174,6 +174,20 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
         ));
     }
 
+    if c.git.files_added > 0 || c.git.files_removed > 0 || c.git.files_changed > 0 {
+        let mut parts = Vec::new();
+        if c.git.files_added > 0 {
+            parts.push(s.paint(&format!("+{}", c.git.files_added), GREEN));
+        }
+        if c.git.files_removed > 0 {
+            parts.push(s.paint(&format!("-{}", c.git.files_removed), RED));
+        }
+        if c.git.files_changed > 0 {
+            parts.push(s.paint(&format!("~{}", c.git.files_changed), YELLOW));
+        }
+        out.push(("git_files", parts.join(" ")));
+    }
+
     if c.git.stash > 0 {
         out.push((
             "git_stash",
@@ -292,9 +306,11 @@ pub fn sample_git() -> GitInfo {
         ahead: 2,
         behind: 1,
         stash: 2,
-        state: None,
-        linked_worktree: false,
+        files_added: 3,
+        files_removed: 1,
+        files_changed: 7,
         repo_name_fallback: Some("myapp".to_string()),
+        ..GitInfo::default()
     }
 }
 
@@ -575,7 +591,7 @@ mod tests {
             stash: 3,
             state: Some(crate::git::GitState::Conflict),
             linked_worktree: true,
-            repo_name_fallback: None,
+            ..GitInfo::default()
         };
         let chips = line2(&ctx_of(&payload, &git));
         assert_eq!(
@@ -592,6 +608,28 @@ mod tests {
         assert_eq!(chips[2].1, "sync:+2/-1");
         assert_eq!(chips[3].1, "conflict");
         assert_eq!(chips[4].1, "gwt");
+    }
+
+    #[test]
+    fn git_files_chip_after_branch_with_partial_counts() {
+        let payload = parse_payload("{}").unwrap();
+        let git = GitInfo {
+            branch: Some("main".to_string()),
+            files_added: 2,
+            files_changed: 5,
+            ..GitInfo::default()
+        };
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(names_of(&chips), vec!["branch", "git_files"]);
+        assert_eq!(chips[1].1, "+2 ~5");
+
+        let git = GitInfo {
+            files_removed: 4,
+            ..GitInfo::default()
+        };
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(chips[0].0, "git_files");
+        assert_eq!(chips[0].1, "-4");
     }
 
     #[test]
@@ -658,6 +696,7 @@ mod tests {
         assert!(lines[0].contains("ctx:420K/1M"));
         assert!(lines[1].contains("\u{2302} "));
         assert!(lines[1].contains("\u{2387} myapp/feat/statusline"));
+        assert!(lines[1].contains("+3 -1 ~7"));
         assert!(lines[1].contains("PR#1234 ok"));
     }
 }

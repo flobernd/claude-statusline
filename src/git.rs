@@ -11,6 +11,9 @@ pub struct GitInfo {
     pub ahead: u32,
     pub behind: u32,
     pub stash: u32,
+    pub files_added: u32,
+    pub files_removed: u32,
+    pub files_changed: u32,
     pub state: Option<GitState>,
     pub linked_worktree: bool,
     pub repo_name_fallback: Option<String>,
@@ -95,7 +98,7 @@ fn resolve(dir: &Path, p: &str) -> PathBuf {
 
 pub fn collect(dir: &Path) -> GitInfo {
     let mut info = GitInfo::default();
-    let (head, sync, stash) = std::thread::scope(|s| {
+    let (head, sync, stash, status) = std::thread::scope(|s| {
         let head = s.spawn(|| {
             run_git(
                 dir,
@@ -116,10 +119,12 @@ pub fn collect(dir: &Path) -> GitInfo {
                 &["rev-list", "--walk-reflogs", "--count", "refs/stash"],
             )
         });
+        let status = s.spawn(|| run_git(dir, &["status", "--porcelain"]));
         (
             head.join().unwrap_or(None),
             sync.join().unwrap_or(None),
             stash.join().unwrap_or(None),
+            status.join().unwrap_or(None),
         )
     });
 
@@ -148,10 +153,32 @@ pub fn collect(dir: &Path) -> GitInfo {
     if let Some(out) = stash {
         info.stash = out.trim().parse().unwrap_or(0);
     }
+    if let Some(out) = status {
+        (info.files_added, info.files_removed, info.files_changed) = parse_status_counts(&out);
+    }
     if let Some(gd) = git_dir {
         info.state = detect_state(dir, &gd);
     }
     info
+}
+
+/// Working-tree file counts from porcelain status lines. Each entry is
+/// classified once by its two-letter XY code: new files (untracked or
+/// staged adds) count as added, deletions as removed, everything else
+/// (modified, renamed, type change, unmerged) as changed.
+fn parse_status_counts(out: &str) -> (u32, u32, u32) {
+    let (mut added, mut removed, mut changed) = (0, 0, 0);
+    for line in out.lines() {
+        let Some(code) = line.get(..2) else { continue };
+        if code == "??" || code.contains('A') {
+            added += 1;
+        } else if code.contains('D') {
+            removed += 1;
+        } else {
+            changed += 1;
+        }
+    }
+    (added, removed, changed)
 }
 
 /// Operation state from git-dir markers; any operation with unmerged
@@ -270,6 +297,25 @@ mod tests {
         assert!(info.linked_worktree);
         assert_eq!(info.branch.as_deref(), Some("feat/x"));
         assert_eq!(info.repo_name_fallback.as_deref(), Some("repo"));
+    }
+
+    #[test]
+    fn status_counts_classification() {
+        let out = "?? new.txt\nA  staged.txt\n M mod.rs\nD  gone.rs\nR  a -> b\nMM both.rs\n";
+        assert_eq!(parse_status_counts(out), (2, 1, 3));
+        assert_eq!(parse_status_counts(""), (0, 0, 0));
+    }
+
+    #[test]
+    fn dirty_worktree_file_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("new.txt"), "n\n").unwrap();
+        std::fs::write(dir.path().join("f.txt"), "changed\n").unwrap();
+        let info = collect(dir.path());
+        assert_eq!(info.files_added, 1);
+        assert_eq!(info.files_changed, 1);
+        assert_eq!(info.files_removed, 0);
     }
 
     #[test]

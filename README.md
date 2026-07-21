@@ -14,7 +14,8 @@ git status, and pull request context on the second.
 
 - Two fixed lines: context bar, absolute context tokens, token counts, prompt-cache hit ratio,
   cache age, model, and effort level on top; working directory, git branch with repo name,
-  stash, sync, operation state, worktree indicators, and the open pull request below
+  working tree file counts, stash, sync, operation state, worktree indicators, and the open
+  pull request below
 - 24-bit truecolor rendering, identical in every terminal regardless of its palette;
   `NO_COLOR` respected
 - Chips hide themselves when their data is absent: a clean repo shows a short line, a merge
@@ -55,7 +56,7 @@ Optional file `~/.claude/claude-statusline.json`:
 
 `clickable_links` toggles the OSC 8 hyperlinks. `disabled_sections` hides chips by name:
 `bar`, `context_tokens`, `tokens`, `cache`, `cache_age`, `model`, `effort`, `cwd`,
-`branch`, `git_stash`, `git_sync`, `git_state`, `git_worktree`, `pr`, `worktree`.
+`branch`, `git_files`, `git_stash`, `git_sync`, `git_state`, `git_worktree`, `pr`, `worktree`.
 
 ## Uninstall
 
