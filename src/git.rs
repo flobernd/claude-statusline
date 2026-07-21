@@ -94,10 +94,25 @@ pub fn collect(dir: &Path) -> GitInfo {
     let mut info = GitInfo::default();
     let (head, sync, stash) = std::thread::scope(|s| {
         let head = s.spawn(|| {
-            run_git(dir, &["rev-parse", "--abbrev-ref", "HEAD", "--git-dir", "--git-common-dir"])
+            run_git(
+                dir,
+                &[
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "HEAD",
+                    "--git-dir",
+                    "--git-common-dir",
+                ],
+            )
         });
-        let sync = s.spawn(|| run_git(dir, &["rev-list", "--count", "--left-right", "HEAD...@{u}"]));
-        let stash = s.spawn(|| run_git(dir, &["rev-list", "--walk-reflogs", "--count", "refs/stash"]));
+        let sync =
+            s.spawn(|| run_git(dir, &["rev-list", "--count", "--left-right", "HEAD...@{u}"]));
+        let stash = s.spawn(|| {
+            run_git(
+                dir,
+                &["rev-list", "--walk-reflogs", "--count", "refs/stash"],
+            )
+        });
         (
             head.join().unwrap_or(None),
             sync.join().unwrap_or(None),
@@ -225,7 +240,10 @@ mod tests {
         std::fs::create_dir(&origin).unwrap();
         init_repo(&origin);
         let clone = dir.path().join("clone");
-        git(dir.path(), &["clone", origin.to_str().unwrap(), clone.to_str().unwrap()]);
+        git(
+            dir.path(),
+            &["clone", origin.to_str().unwrap(), clone.to_str().unwrap()],
+        );
         std::fs::write(clone.join("g.txt"), "x\n").unwrap();
         git(&clone, &["add", "g.txt"]);
         git(&clone, &["commit", "-m", "local work"]);
@@ -241,7 +259,10 @@ mod tests {
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
         let wt = dir.path().join("wt");
-        git(&repo, &["worktree", "add", wt.to_str().unwrap(), "-b", "feat/x"]);
+        git(
+            &repo,
+            &["worktree", "add", wt.to_str().unwrap(), "-b", "feat/x"],
+        );
         let info = collect(&wt);
         assert!(info.linked_worktree);
         assert_eq!(info.branch.as_deref(), Some("feat/x"));

@@ -38,7 +38,12 @@ fn run_statusline(stdin_data: &str, width: &str, home: &std::path::Path) -> std:
         .stderr(Stdio::piped())
         .spawn()
         .expect("binary runs");
-    child.stdin.as_mut().unwrap().write_all(stdin_data.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin_data.as_bytes())
+        .unwrap();
     child.wait_with_output().expect("binary exits")
 }
 
@@ -217,19 +222,25 @@ fn run_with_settings(args: &[&str], path: &std::path::Path) -> std::process::Out
 fn install_preserves_other_keys_and_backs_up() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
-    std::fs::write(&path, r#"{"model": "opus", "statusLine": {"type": "command", "command": "other-tool"}}"#).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"model": "opus", "statusLine": {"type": "command", "command": "other-tool"}}"#,
+    )
+    .unwrap();
 
     let out = run_with_settings(&["--install"], &path);
     assert!(out.status.success());
 
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(v["model"], "opus");
     let cmd = v["statusLine"]["command"].as_str().unwrap();
     assert!(cmd.contains("claude-statusline"));
     assert_eq!(v["statusLine"]["refreshInterval"], 10);
     // Backup holds the pre-install state.
     let bak: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(format!("{}.bak", path.display())).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(format!("{}.bak", path.display())).unwrap())
+            .unwrap();
     assert_eq!(bak["statusLine"]["command"], "other-tool");
 }
 
@@ -237,11 +248,16 @@ fn install_preserves_other_keys_and_backs_up() {
 fn uninstall_restores_previous_statusline_from_backup() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
-    std::fs::write(&path, r#"{"statusLine": {"type": "command", "command": "other-tool"}}"#).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"statusLine": {"type": "command", "command": "other-tool"}}"#,
+    )
+    .unwrap();
     assert!(run_with_settings(&["--install"], &path).status.success());
     assert!(run_with_settings(&["--uninstall"], &path).status.success());
 
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(v["statusLine"]["command"], "other-tool");
 }
 
@@ -249,9 +265,14 @@ fn uninstall_restores_previous_statusline_from_backup() {
 fn uninstall_without_backup_removes_statusline() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
-    std::fs::write(&path, r#"{"keep": 1, "statusLine": {"type": "command", "command": "claude-statusline"}}"#).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"keep": 1, "statusLine": {"type": "command", "command": "claude-statusline"}}"#,
+    )
+    .unwrap();
     assert!(run_with_settings(&["--uninstall"], &path).status.success());
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert!(v.get("statusLine").is_none());
     assert_eq!(v["keep"], 1);
 }
@@ -277,7 +298,12 @@ fn run_setup(answer: &str, path: &std::path::Path) -> std::process::Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("binary runs");
-    child.stdin.as_mut().unwrap().write_all(answer.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(answer.as_bytes())
+        .unwrap();
     child.wait_with_output().expect("binary exits")
 }
 

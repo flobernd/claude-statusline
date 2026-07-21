@@ -28,7 +28,10 @@ pub fn render_bar(pct: f64, width: usize, style: &Style) -> String {
 mod tests {
     use super::*;
 
-    const PLAIN: Style = Style { colors: false, links: false };
+    const PLAIN: Style = Style {
+        colors: false,
+        links: false,
+    };
 
     #[test]
     fn color_bands() {
@@ -42,20 +45,38 @@ mod tests {
 
     #[test]
     fn fill_proportional_to_percentage() {
-        assert_eq!(render_bar(42.0, 20, &PLAIN), format!("[{}{}]", "\u{2588}".repeat(8), "\u{2591}".repeat(12)));
-        assert_eq!(render_bar(0.0, 20, &PLAIN), format!("[{}]", "\u{2591}".repeat(20)));
-        assert_eq!(render_bar(100.0, 20, &PLAIN), format!("[{}]", "\u{2588}".repeat(20)));
+        assert_eq!(
+            render_bar(42.0, 20, &PLAIN),
+            format!("[{}{}]", "\u{2588}".repeat(8), "\u{2591}".repeat(12))
+        );
+        assert_eq!(
+            render_bar(0.0, 20, &PLAIN),
+            format!("[{}]", "\u{2591}".repeat(20))
+        );
+        assert_eq!(
+            render_bar(100.0, 20, &PLAIN),
+            format!("[{}]", "\u{2588}".repeat(20))
+        );
     }
 
     #[test]
     fn out_of_range_percentages_clamp() {
-        assert_eq!(render_bar(-5.0, 10, &PLAIN), format!("[{}]", "\u{2591}".repeat(10)));
-        assert_eq!(render_bar(400.0, 10, &PLAIN), format!("[{}]", "\u{2588}".repeat(10)));
+        assert_eq!(
+            render_bar(-5.0, 10, &PLAIN),
+            format!("[{}]", "\u{2591}".repeat(10))
+        );
+        assert_eq!(
+            render_bar(400.0, 10, &PLAIN),
+            format!("[{}]", "\u{2588}".repeat(10))
+        );
     }
 
     #[test]
     fn colored_bar_uses_band_color_for_fill_and_comment_for_empty() {
-        let full = Style { colors: true, links: false };
+        let full = Style {
+            colors: true,
+            links: false,
+        };
         let bar = render_bar(90.0, 10, &full);
         assert!(bar.contains("\x1b[38;2;247;118;142m")); // red fill
         assert!(bar.contains("\x1b[38;2;86;95;137m")); // comment empty
@@ -65,6 +86,9 @@ mod tests {
 
     #[test]
     fn fill_scales_before_truncation_for_non_divisor_widths() {
-        assert_eq!(render_bar(3.5, 30, &PLAIN), format!("[{}{}]", "\u{2588}", "\u{2591}".repeat(29)));
+        assert_eq!(
+            render_bar(3.5, 30, &PLAIN),
+            format!("[{}{}]", "\u{2588}", "\u{2591}".repeat(29))
+        );
     }
 }

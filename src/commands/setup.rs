@@ -2,7 +2,10 @@ use anyhow::Result;
 use std::io::{BufRead, Write};
 
 pub fn run() -> Result<()> {
-    println!("claude-statusline v{} setup wizard", env!("CARGO_PKG_VERSION"));
+    println!(
+        "claude-statusline v{} setup wizard",
+        env!("CARGO_PKG_VERSION")
+    );
     println!();
     println!("Preview:");
     let style = crate::theme::Style::from_env(true);

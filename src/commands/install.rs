@@ -61,11 +61,10 @@ pub fn uninstall() -> Result<()> {
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .and_then(|v| v.get("statusLine").cloned())
+        && Some(&previous) != removed.as_ref()
     {
-        if Some(&previous) != removed.as_ref() {
-            settings.insert("statusLine".to_string(), previous);
-            restored = true;
-        }
+        settings.insert("statusLine".to_string(), previous);
+        restored = true;
     }
     write_atomic(&path, &Value::Object(settings))?;
 

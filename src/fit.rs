@@ -78,8 +78,14 @@ mod tests {
 
     #[test]
     fn osc8_links_are_invisible_with_both_terminators() {
-        assert_eq!(visible_width("\x1b]8;;https://e.com\x1b\\text\x1b]8;;\x1b\\"), 4);
-        assert_eq!(visible_width("\x1b]8;;https://e.com\x07text\x1b]8;;\x07"), 4);
+        assert_eq!(
+            visible_width("\x1b]8;;https://e.com\x1b\\text\x1b]8;;\x1b\\"),
+            4
+        );
+        assert_eq!(
+            visible_width("\x1b]8;;https://e.com\x07text\x1b]8;;\x07"),
+            4
+        );
     }
 
     #[test]

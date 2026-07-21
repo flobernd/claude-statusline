@@ -16,8 +16,16 @@ pub fn run() -> i32 {
             Some(v) => {
                 state = "ok";
                 if let Some(sl) = v.get("statusLine").and_then(|s| s.as_object()) {
-                    sl_type = sl.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                    command = sl.get("command").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                    sl_type = sl
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    command = sl
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if let Some(r) = sl
                         .get("refreshInterval")
                         .and_then(|r| r.as_f64())
@@ -56,10 +64,7 @@ pub fn run() -> i32 {
 /// basename so absolute paths and bare names both count.
 pub fn is_our_command(command: &str) -> bool {
     let first = first_token(command);
-    let base = first
-        .split(|c| c == '/' || c == '\\')
-        .last()
-        .unwrap_or("");
+    let base = first.split(['/', '\\']).next_back().unwrap_or("");
     base.strip_suffix(".exe").unwrap_or(base) == "claude-statusline"
 }
 
@@ -82,7 +87,9 @@ mod tests {
         assert!(is_our_command("claude-statusline"));
         assert!(is_our_command("/usr/local/bin/claude-statusline"));
         assert!(is_our_command("C:\\tools\\claude-statusline.exe"));
-        assert!(is_our_command("\"C:\\Program Files\\claude-statusline.exe\""));
+        assert!(is_our_command(
+            "\"C:\\Program Files\\claude-statusline.exe\""
+        ));
     }
 
     #[test]

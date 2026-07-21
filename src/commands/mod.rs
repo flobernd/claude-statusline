@@ -13,5 +13,8 @@ pub fn settings_path() -> PathBuf {
             return PathBuf::from(s.into_owned());
         }
     }
-    crate::schema::home_dir().unwrap_or_default().join(".claude").join("settings.json")
+    crate::schema::home_dir()
+        .unwrap_or_default()
+        .join(".claude")
+        .join("settings.json")
 }

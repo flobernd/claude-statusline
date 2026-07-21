@@ -46,7 +46,11 @@ pub fn last_assistant_ts_under(path: &str, allowed_root: &Path) -> Option<i64> {
         if !is_assistant {
             continue;
         }
-        if let Some(ts) = v.get("timestamp").and_then(|t| t.as_str()).and_then(parse_iso8601_ms) {
+        if let Some(ts) = v
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .and_then(parse_iso8601_ms)
+        {
             return Some(ts);
         }
     }
@@ -56,9 +60,18 @@ pub fn last_assistant_ts_under(path: &str, allowed_root: &Path) -> Option<i64> {
 /// Parse "YYYY-MM-DDTHH:MM:SS(.fff...)Z" (or "+00:00") to epoch ms.
 /// Other offsets are rejected; Claude Code always emits UTC.
 pub fn parse_iso8601_ms(s: &str) -> Option<i64> {
-    let s = s.strip_suffix('Z').or_else(|| s.strip_suffix("+00:00")).unwrap_or(s);
+    let s = s
+        .strip_suffix('Z')
+        .or_else(|| s.strip_suffix("+00:00"))
+        .unwrap_or(s);
     let b = s.as_bytes();
-    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+    if b.len() < 19
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
         return None;
     }
     let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse().ok() };
@@ -107,8 +120,14 @@ mod tests {
     #[test]
     fn iso8601_vectors() {
         assert_eq!(parse_iso8601_ms("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_iso8601_ms("2026-07-02T23:00:49.920Z"), Some(1_783_033_249_920));
-        assert_eq!(parse_iso8601_ms("2026-01-01T00:00:00+00:00"), Some(1_767_225_600_000));
+        assert_eq!(
+            parse_iso8601_ms("2026-07-02T23:00:49.920Z"),
+            Some(1_783_033_249_920)
+        );
+        assert_eq!(
+            parse_iso8601_ms("2026-01-01T00:00:00+00:00"),
+            Some(1_767_225_600_000)
+        );
     }
 
     #[test]
@@ -127,7 +146,10 @@ mod tests {
         assert_eq!(parse_iso8601_ms("2026-07-02T-3:00:49Z"), None);
         // A naive timestamp with no suffix stays accepted as UTC, matching
         // the suffix-free non-fractional branch.
-        assert_eq!(parse_iso8601_ms("2026-07-02T23:00:49.920"), Some(1_783_033_249_920));
+        assert_eq!(
+            parse_iso8601_ms("2026-07-02T23:00:49.920"),
+            Some(1_783_033_249_920)
+        );
     }
 
     fn write_transcript(dir: &Path, name: &str, lines: &[&str]) -> String {
@@ -139,29 +161,40 @@ mod tests {
     #[test]
     fn newest_assistant_timestamp_wins() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_transcript(dir.path(), "s.jsonl", &[
-            r#"{"type":"assistant","timestamp":"2026-07-02T22:00:00Z","message":{"role":"assistant"}}"#,
-            r#"{"type":"user","timestamp":"2026-07-02T22:30:00Z","message":{"role":"user"}}"#,
-            r#"{"type":"assistant","timestamp":"2026-07-02T23:00:49.920Z","message":{"role":"assistant"}}"#,
-        ]);
-        assert_eq!(last_assistant_ts_under(&path, dir.path()), Some(1_783_033_249_920));
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"assistant","timestamp":"2026-07-02T22:00:00Z","message":{"role":"assistant"}}"#,
+                r#"{"type":"user","timestamp":"2026-07-02T22:30:00Z","message":{"role":"user"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-07-02T23:00:49.920Z","message":{"role":"assistant"}}"#,
+            ],
+        );
+        assert_eq!(
+            last_assistant_ts_under(&path, dir.path()),
+            Some(1_783_033_249_920)
+        );
     }
 
     #[test]
     fn outer_role_fallback_is_accepted() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_transcript(dir.path(), "s.jsonl", &[
-            r#"{"role":"assistant","timestamp":"1970-01-01T00:00:00Z"}"#,
-        ]);
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[r#"{"role":"assistant","timestamp":"1970-01-01T00:00:00Z"}"#],
+        );
         assert_eq!(last_assistant_ts_under(&path, dir.path()), Some(0));
     }
 
     #[test]
     fn no_assistant_message_is_none() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_transcript(dir.path(), "s.jsonl", &[
-            r#"{"type":"user","timestamp":"2026-07-02T22:30:00Z","message":{"role":"user"}}"#,
-        ]);
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[r#"{"type":"user","timestamp":"2026-07-02T22:30:00Z","message":{"role":"user"}}"#],
+        );
         assert_eq!(last_assistant_ts_under(&path, dir.path()), None);
     }
 
@@ -179,9 +212,11 @@ mod tests {
     fn path_outside_allowed_root_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
-        let path = write_transcript(other.path(), "s.jsonl", &[
-            r#"{"role":"assistant","timestamp":"1970-01-01T00:00:00Z"}"#,
-        ]);
+        let path = write_transcript(
+            other.path(),
+            "s.jsonl",
+            &[r#"{"role":"assistant","timestamp":"1970-01-01T00:00:00Z"}"#],
+        );
         assert_eq!(last_assistant_ts_under(&path, dir.path()), None);
     }
 

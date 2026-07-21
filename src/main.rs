@@ -1,18 +1,22 @@
-mod theme;
-mod format;
 mod bar;
-mod fit;
-mod schema;
-mod git;
-mod transcript;
-mod sections;
 mod commands;
+mod fit;
+mod format;
+mod git;
+mod schema;
+mod sections;
+mod theme;
+mod transcript;
 
 use clap::Parser;
 use std::io::Read;
 
 #[derive(Parser)]
-#[command(name = "claude-statusline", version, about = "Tokyo Night statusline for Claude Code")]
+#[command(
+    name = "claude-statusline",
+    version,
+    about = "Tokyo Night statusline for Claude Code"
+)]
 struct Cli {
     /// Interactive setup wizard
     #[arg(long)]
@@ -29,7 +33,15 @@ struct Cli {
 }
 
 const LINE1_DROP: &[&str] = &["cache_age", "cache", "context_tokens", "effort", "model"];
-const LINE2_DROP: &[&str] = &["git_worktree", "git_sync", "git_stash", "project", "worktree", "pr", "git_state"];
+const LINE2_DROP: &[&str] = &[
+    "git_worktree",
+    "git_sync",
+    "git_stash",
+    "project",
+    "worktree",
+    "pr",
+    "git_state",
+];
 const SEP: &str = " \u{2502} ";
 
 fn main() {
@@ -92,7 +104,9 @@ fn terminal_width() -> usize {
             .and_then(|v| v.trim().parse::<usize>().ok())
             .filter(|w| (20..=4000).contains(w))
     };
-    parse("CLAUDE_STATUSLINE_WIDTH").or_else(|| parse("COLUMNS")).unwrap_or(100)
+    parse("CLAUDE_STATUSLINE_WIDTH")
+        .or_else(|| parse("COLUMNS"))
+        .unwrap_or(100)
 }
 
 fn render(raw: &str) -> Option<String> {
@@ -130,7 +144,12 @@ fn render(raw: &str) -> Option<String> {
         Some(now - ts)
     });
 
-    let ctx = sections::Ctx { payload: &payload, git: &git_info, cache_age_ms, style: &style };
+    let ctx = sections::Ctx {
+        payload: &payload,
+        git: &git_info,
+        cache_age_ms,
+        style: &style,
+    };
     let sep = style.paint(SEP, theme::COMMENT);
     let sep_width = fit::visible_width(&sep);
 
@@ -144,7 +163,13 @@ fn render(raw: &str) -> Option<String> {
         if fitted.is_empty() {
             return None;
         }
-        Some(fitted.into_iter().map(|(_, r)| r).collect::<Vec<_>>().join(&sep))
+        Some(
+            fitted
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect::<Vec<_>>()
+                .join(&sep),
+        )
     };
 
     let lines: Vec<String> = [

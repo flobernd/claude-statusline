@@ -56,7 +56,9 @@ impl Workspace {
     /// Upstream docs type git_worktree as a string but older payloads used
     /// a bool; any non-null value means "inside a linked worktree".
     pub fn git_worktree_present(&self) -> bool {
-        self.git_worktree.as_ref().is_some_and(|v| !v.is_null() && v.as_bool() != Some(false))
+        self.git_worktree
+            .as_ref()
+            .is_some_and(|v| !v.is_null() && v.as_bool() != Some(false))
     }
 }
 
@@ -133,7 +135,10 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { clickable_links: true, disabled_sections: Vec::new() }
+        Config {
+            clickable_links: true,
+            disabled_sections: Vec::new(),
+        }
     }
 }
 
@@ -142,7 +147,10 @@ pub fn load_config(path: &Path) -> Config {
         Ok(text) => match serde_json::from_str(&text) {
             Ok(config) => config,
             Err(e) => {
-                eprintln!("claude-statusline: ignoring malformed config {}: {e}", path.display());
+                eprintln!(
+                    "claude-statusline: ignoring malformed config {}: {e}",
+                    path.display()
+                );
                 Config::default()
             }
         },
@@ -190,7 +198,10 @@ mod tests {
         assert_eq!(p.model.unwrap().display_name.as_deref(), Some("Sonnet 5"));
         let cw = p.context_window.unwrap();
         assert_eq!(cw.used_percentage, Some(42.0));
-        assert_eq!(cw.current_usage.unwrap().cache_read_input_tokens, Some(365_000.0));
+        assert_eq!(
+            cw.current_usage.unwrap().cache_read_input_tokens,
+            Some(365_000.0)
+        );
         assert_eq!(p.effort.unwrap().level.as_deref(), Some("xhigh"));
         assert_eq!(p.pr.as_ref().unwrap().number, Some(86));
         assert!(p.workspace.unwrap().git_worktree_present());

@@ -33,7 +33,10 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
         let used = (win * p / 100.0).round() as u64;
         out.push((
             "context_tokens",
-            s.paint(&format!("ctx:{}/{}", fmt_tokens(used), fmt_tokens(win as u64)), COMMENT),
+            s.paint(
+                &format!("ctx:{}/{}", fmt_tokens(used), fmt_tokens(win as u64)),
+                COMMENT,
+            ),
         ));
     }
 
@@ -63,14 +66,22 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
             if ratio > 0 {
                 out.push((
                     "cache",
-                    format!("{}{}", s.paint("cache:", COMMENT), s.paint(&format!("{ratio}%"), GREEN)),
+                    format!(
+                        "{}{}",
+                        s.paint("cache:", COMMENT),
+                        s.paint(&format!("{ratio}%"), GREEN)
+                    ),
                 ));
             }
         }
     }
 
     if let Some(age) = c.cache_age_ms.filter(|a| *a >= 0) {
-        let color = if age >= CACHE_AGE_WARN_MS { YELLOW } else { COMMENT };
+        let color = if age >= CACHE_AGE_WARN_MS {
+            YELLOW
+        } else {
+            COMMENT
+        };
         out.push((
             "cache_age",
             format!(
@@ -81,7 +92,12 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
         ));
     }
 
-    if let Some(name) = c.payload.model.as_ref().and_then(|m| m.display_name.as_deref()) {
+    if let Some(name) = c
+        .payload
+        .model
+        .as_ref()
+        .and_then(|m| m.display_name.as_deref())
+    {
         out.push(("model", s.paint(name, MAGENTA)));
     }
 
@@ -123,7 +139,11 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
     }
 
     if let Some(branch) = c.git.branch.as_deref() {
-        let branch_color = if branch == "main" || branch == "master" { GREEN } else { MAGENTA };
+        let branch_color = if branch == "main" || branch == "master" {
+            GREEN
+        } else {
+            MAGENTA
+        };
         let text = match repo_name.as_deref() {
             Some(r) => format!(
                 "{}{}",
@@ -136,14 +156,20 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
             (Some(h), Some(o), Some(n)) => Some(format!("https://{h}/{o}/{n}")),
             _ => None,
         });
-        out.push(("branch", match url {
-            Some(u) => s.link(&u, &text),
-            None => text,
-        }));
+        out.push((
+            "branch",
+            match url {
+                Some(u) => s.link(&u, &text),
+                None => text,
+            },
+        ));
     }
 
     if c.git.stash > 0 {
-        out.push(("git_stash", s.paint(&format!("stash:{}", c.git.stash), YELLOW)));
+        out.push((
+            "git_stash",
+            s.paint(&format!("stash:{}", c.git.stash), YELLOW),
+        ));
     }
 
     if c.git.ahead > 0 || c.git.behind > 0 {
@@ -154,11 +180,18 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
         if c.git.behind > 0 {
             parts.push(format!("-{}", c.git.behind));
         }
-        out.push(("git_sync", s.paint(&format!("sync:{}", parts.join("/")), COMMENT)));
+        out.push((
+            "git_sync",
+            s.paint(&format!("sync:{}", parts.join("/")), COMMENT),
+        ));
     }
 
     if let Some(state) = c.git.state {
-        let color = if state == crate::git::GitState::Conflict { RED } else { YELLOW };
+        let color = if state == crate::git::GitState::Conflict {
+            RED
+        } else {
+            YELLOW
+        };
         out.push(("git_state", s.paint_bold(state.label(), color)));
     }
 
@@ -166,25 +199,25 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
         out.push(("git_worktree", s.paint("gwt", YELLOW)));
     }
 
-    if let Some(pr) = c.payload.pr.as_ref() {
-        if let Some(number) = pr.number {
-            let mut text = s.paint(&format!("PR#{number}"), CYAN);
-            if let Some(url) = pr.url.as_deref() {
-                text = s.link(url, &text);
-            }
-            // The state token stays outside the link so the clickable
-            // target is exactly "PR#N".
-            if let Some((label, color)) = pr.review_state.as_deref().and_then(review_token) {
-                text = format!("{text} {}", s.paint(label, color));
-            }
-            out.push(("pr", text));
+    if let Some(pr) = c.payload.pr.as_ref()
+        && let Some(number) = pr.number
+    {
+        let mut text = s.paint(&format!("PR#{number}"), CYAN);
+        if let Some(url) = pr.url.as_deref() {
+            text = s.link(url, &text);
         }
+        // The state token stays outside the link so the clickable
+        // target is exactly "PR#N".
+        if let Some((label, color)) = pr.review_state.as_deref().and_then(review_token) {
+            text = format!("{text} {}", s.paint(label, color));
+        }
+        out.push(("pr", text));
     }
 
-    if let Some(wt) = c.payload.worktree.as_ref() {
-        if let Some(branch) = wt.branch.as_deref().or(wt.name.as_deref()) {
-            out.push(("worktree", s.paint(&format!("wt:{branch}"), YELLOW)));
-        }
+    if let Some(wt) = c.payload.worktree.as_ref()
+        && let Some(branch) = wt.branch.as_deref().or(wt.name.as_deref())
+    {
+        out.push(("worktree", s.paint(&format!("wt:{branch}"), YELLOW)));
     }
 
     out
@@ -248,10 +281,19 @@ pub fn sample_git() -> GitInfo {
 pub fn preview(style: &Style) -> String {
     let payload = sample_payload();
     let git = sample_git();
-    let ctx = Ctx { payload: &payload, git: &git, cache_age_ms: Some(72_000), style };
+    let ctx = Ctx {
+        payload: &payload,
+        git: &git,
+        cache_age_ms: Some(72_000),
+        style,
+    };
     let sep = style.paint(" \u{2502} ", COMMENT);
     let join = |chips: Vec<(&'static str, String)>| {
-        chips.into_iter().map(|(_, r)| r).collect::<Vec<_>>().join(&sep)
+        chips
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect::<Vec<_>>()
+            .join(&sep)
     };
     format!("{}\n{}", join(line1(&ctx)), join(line2(&ctx)))
 }
@@ -261,10 +303,18 @@ mod tests {
     use super::*;
     use crate::schema::parse_payload;
 
-    pub(crate) const PLAIN: Style = Style { colors: false, links: false };
+    pub(crate) const PLAIN: Style = Style {
+        colors: false,
+        links: false,
+    };
 
     pub(crate) fn ctx_of<'a>(payload: &'a Payload, git: &'a GitInfo) -> Ctx<'a> {
-        Ctx { payload, git, cache_age_ms: None, style: &PLAIN }
+        Ctx {
+            payload,
+            git,
+            cache_age_ms: None,
+            style: &PLAIN,
+        }
     }
 
     fn names(chips: &[(&'static str, String)]) -> Vec<&'static str> {
@@ -299,7 +349,15 @@ mod tests {
         let chips = line1(&c);
         assert_eq!(
             names(&chips),
-            vec!["bar", "context_tokens", "tokens", "cache", "cache_age", "model", "effort"]
+            vec![
+                "bar",
+                "context_tokens",
+                "tokens",
+                "cache",
+                "cache_age",
+                "model",
+                "effort"
+            ]
         );
         assert_eq!(text_of(&chips, "context_tokens"), "ctx:420K/1M");
         assert_eq!(text_of(&chips, "tokens"), "in:412K out:18K");
@@ -319,7 +377,8 @@ mod tests {
     #[test]
     fn medium_and_low_effort_render_dim_but_visible() {
         for level in ["medium", "low"] {
-            let payload = parse_payload(&format!(r#"{{"effort": {{"level": "{level}"}}}}"#)).unwrap();
+            let payload =
+                parse_payload(&format!(r#"{{"effort": {{"level": "{level}"}}}}"#)).unwrap();
             let git = GitInfo::default();
             let chips = line1(&ctx_of(&payload, &git));
             assert_eq!(text_of(&chips, "effort"), &format!("effort:{level}"));
@@ -335,10 +394,9 @@ mod tests {
 
     #[test]
     fn missing_output_tokens_renders_question_mark() {
-        let payload = parse_payload(
-            r#"{"context_window": {"current_usage": {"input_tokens": 5000}}}"#,
-        )
-        .unwrap();
+        let payload =
+            parse_payload(r#"{"context_window": {"current_usage": {"input_tokens": 5000}}}"#)
+                .unwrap();
         let git = GitInfo::default();
         let chips = line1(&ctx_of(&payload, &git));
         assert_eq!(text_of(&chips, "tokens"), "in:5K out:?");
@@ -362,7 +420,10 @@ mod tests {
         c.cache_age_ms = Some(-3_000);
         assert!(line1(&c).is_empty());
 
-        let colored = Style { colors: true, links: false };
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
         let mut c = ctx_of(&payload, &git);
         c.style = &colored;
         c.cache_age_ms = Some(CACHE_AGE_WARN_MS);
@@ -394,7 +455,10 @@ mod tests {
     }
 
     fn git_on(branch: &str) -> GitInfo {
-        GitInfo { branch: Some(branch.to_string()), ..GitInfo::default() }
+        GitInfo {
+            branch: Some(branch.to_string()),
+            ..GitInfo::default()
+        }
     }
 
     #[test]
@@ -447,14 +511,24 @@ mod tests {
 
     #[test]
     fn feature_branch_uses_magenta_and_main_uses_green() {
-        let colored = Style { colors: true, links: false };
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
         let payload = parse_payload("{}").unwrap();
-        for (branch, rgb) in [("main", "158;206;106"), ("master", "158;206;106"), ("feat/x", "187;154;247")] {
+        for (branch, rgb) in [
+            ("main", "158;206;106"),
+            ("master", "158;206;106"),
+            ("feat/x", "187;154;247"),
+        ] {
             let git = git_on(branch);
             let mut c = ctx_of(&payload, &git);
             c.style = &colored;
             let chips = line2(&c);
-            assert!(chips[0].1.contains(&format!("\x1b[38;2;{rgb}m")), "branch {branch}");
+            assert!(
+                chips[0].1.contains(&format!("\x1b[38;2;{rgb}m")),
+                "branch {branch}"
+            );
         }
     }
 
@@ -471,7 +545,16 @@ mod tests {
             repo_name_fallback: None,
         };
         let chips = line2(&ctx_of(&payload, &git));
-        assert_eq!(names_of(&chips), vec!["branch", "git_stash", "git_sync", "git_state", "git_worktree"]);
+        assert_eq!(
+            names_of(&chips),
+            vec![
+                "branch",
+                "git_stash",
+                "git_sync",
+                "git_state",
+                "git_worktree"
+            ]
+        );
         assert_eq!(chips[1].1, "stash:3");
         assert_eq!(chips[2].1, "sync:+2/-1");
         assert_eq!(chips[3].1, "conflict");
@@ -481,10 +564,18 @@ mod tests {
     #[test]
     fn sync_omits_zero_side() {
         let payload = parse_payload("{}").unwrap();
-        let git = GitInfo { branch: Some("main".to_string()), ahead: 2, ..GitInfo::default() };
+        let git = GitInfo {
+            branch: Some("main".to_string()),
+            ahead: 2,
+            ..GitInfo::default()
+        };
         let chips = line2(&ctx_of(&payload, &git));
         assert!(chips.iter().any(|(_, r)| r == "sync:+2"));
-        let git = GitInfo { branch: Some("main".to_string()), behind: 4, ..GitInfo::default() };
+        let git = GitInfo {
+            branch: Some("main".to_string()),
+            behind: 4,
+            ..GitInfo::default()
+        };
         let chips = line2(&ctx_of(&payload, &git));
         assert!(chips.iter().any(|(_, r)| r == "sync:-4"));
     }
@@ -499,17 +590,25 @@ mod tests {
         let chips = line2(&ctx_of(&payload, &git));
         assert_eq!(chips[0].1, "PR#86 ok");
 
-        let linked = Style { colors: true, links: true };
+        let linked = Style {
+            colors: true,
+            links: true,
+        };
         let mut c = ctx_of(&payload, &git);
         c.style = &linked;
         let chips = line2(&c);
-        assert!(chips[0].1.contains("\x1b]8;;https://github.com/u/r/pull/86\x1b\\"));
+        assert!(
+            chips[0]
+                .1
+                .contains("\x1b]8;;https://github.com/u/r/pull/86\x1b\\")
+        );
         assert!(chips[0].1.ends_with("\x1b[0m")); // state token outside the link
     }
 
     #[test]
     fn worktree_chip_prefers_branch_over_name() {
-        let payload = parse_payload(r#"{"worktree": {"name": "fix", "branch": "fix/bug-123"}}"#).unwrap();
+        let payload =
+            parse_payload(r#"{"worktree": {"name": "fix", "branch": "fix/bug-123"}}"#).unwrap();
         let git = GitInfo::default();
         let chips = line2(&ctx_of(&payload, &git));
         assert_eq!(chips[0].1, "wt:fix/bug-123");

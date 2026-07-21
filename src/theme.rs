@@ -21,7 +21,10 @@ impl Style {
     pub fn from_env(clickable_links: bool) -> Self {
         let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
         let colors = set("FORCE_COLOR") || !set("NO_COLOR");
-        Style { colors, links: colors && clickable_links }
+        Style {
+            colors,
+            links: colors && clickable_links,
+        }
     }
 
     pub fn paint(&self, text: &str, c: Rgb) -> String {
@@ -45,7 +48,10 @@ impl Style {
         if !self.links || url.is_empty() {
             return text.to_string();
         }
-        if url.chars().any(|ch| (ch as u32) < 0x20 || ch == '\u{7f}' || ch == '\u{9c}') {
+        if url
+            .chars()
+            .any(|ch| (ch as u32) < 0x20 || ch == '\u{7f}' || ch == '\u{9c}')
+        {
             return text.to_string();
         }
         format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, text)
@@ -56,8 +62,14 @@ impl Style {
 mod tests {
     use super::*;
 
-    const PLAIN: Style = Style { colors: false, links: false };
-    const FULL: Style = Style { colors: true, links: true };
+    const PLAIN: Style = Style {
+        colors: false,
+        links: false,
+    };
+    const FULL: Style = Style {
+        colors: true,
+        links: true,
+    };
 
     #[test]
     fn paint_disabled_returns_plain_text() {
@@ -72,7 +84,10 @@ mod tests {
 
     #[test]
     fn paint_bold_prefixes_bold_sgr() {
-        assert_eq!(FULL.paint_bold("hi", RED), "\x1b[1m\x1b[38;2;247;118;142mhi\x1b[0m");
+        assert_eq!(
+            FULL.paint_bold("hi", RED),
+            "\x1b[1m\x1b[38;2;247;118;142mhi\x1b[0m"
+        );
     }
 
     #[test]
