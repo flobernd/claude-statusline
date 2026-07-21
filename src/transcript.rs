@@ -64,13 +64,20 @@ pub fn parse_iso8601_ms(s: &str) -> Option<i64> {
     let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse().ok() };
     let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
     let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+    if !(1..=12).contains(&mo)
+        || !(1..=31).contains(&d)
+        || !(0..=23).contains(&h)
+        || !(0..=59).contains(&mi)
+        || !(0..=60).contains(&sec)
+    {
         return None;
     }
     let millis: i64 = match b.get(19) {
         Some(b'.') => {
             let frac: String = s[20..].chars().take_while(|c| c.is_ascii_digit()).collect();
-            if frac.is_empty() {
+            // Anything after the fractional digits (an offset, garbage)
+            // means this is not the plain UTC shape we accept.
+            if frac.is_empty() || 20 + frac.len() != s.len() {
                 return None;
             }
             format!("{frac:0<3}")[..3].parse().ok()?
@@ -111,6 +118,16 @@ mod tests {
         assert_eq!(parse_iso8601_ms("2026-13-01T00:00:00Z"), None);
         assert_eq!(parse_iso8601_ms("2026-07-02 23:00:49Z"), None);
         assert_eq!(parse_iso8601_ms("2026-07-02T23:00:49+02:00"), None);
+    }
+
+    #[test]
+    fn iso8601_requires_full_consumption_after_fraction() {
+        assert_eq!(parse_iso8601_ms("2026-07-02T23:00:49.920+02:00"), None);
+        assert_eq!(parse_iso8601_ms("1970-01-01T00:00:00.123abc"), None);
+        assert_eq!(parse_iso8601_ms("2026-07-02T-3:00:49Z"), None);
+        // A naive timestamp with no suffix stays accepted as UTC, matching
+        // the suffix-free non-fractional branch.
+        assert_eq!(parse_iso8601_ms("2026-07-02T23:00:49.920"), Some(1_783_033_249_920));
     }
 
     fn write_transcript(dir: &Path, name: &str, lines: &[&str]) -> String {
