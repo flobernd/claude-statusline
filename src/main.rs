@@ -70,10 +70,11 @@ fn main() {
         }
         return;
     }
-    let mut raw = String::new();
-    if std::io::stdin().read_to_string(&mut raw).is_err() {
+    let mut raw_bytes = Vec::new();
+    if std::io::stdin().read_to_end(&mut raw_bytes).is_err() {
         return;
     }
+    let raw = String::from_utf8_lossy(&raw_bytes);
     if raw.trim().is_empty() {
         return;
     }

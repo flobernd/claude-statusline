@@ -86,6 +86,31 @@ fn undecodable_stdin_prints_question_mark() {
 }
 
 #[test]
+fn non_utf8_stdin_prints_question_mark() {
+    let home = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_claude-statusline"))
+        .env("NO_COLOR", "1")
+        .env("CLAUDE_STATUSLINE_WIDTH", "200")
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("binary runs");
+    use std::io::Write as _;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"\xff\xfe{")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "?");
+}
+
+#[test]
 fn payload_control_characters_never_reach_stdout() {
     let home = tempfile::tempdir().unwrap();
     let payload = r#"{"model": {"display_name": "evil[2Jwiped\nsecond"}}"#;
