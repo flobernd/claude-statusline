@@ -3,7 +3,7 @@ name = "claude-statusline"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Two-line statusline for Claude Code"
+description = "Cross-platform statusline for Claude Code CLI"
 
 [dependencies]
 anyhow = "1"

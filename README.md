@@ -6,15 +6,15 @@
   </picture>
 </div>
 
-A two-line statusline for [Claude Code](https://code.claude.com): context usage, token and
-prompt-cache metrics, model and effort level on the first line; project, git status, and pull
-request context on the second.
+A cross-platform statusline for the [Claude Code](https://code.claude.com) CLI: context usage,
+token and prompt-cache metrics, model and effort level on the first line; working directory,
+git status, and pull request context on the second.
 
 ## Features
 
 - Two fixed lines: context bar, absolute context tokens, token counts, prompt-cache hit ratio,
-  cache age, model, and effort level on top; project, git branch with repo name, stash, sync,
-  operation state, worktree indicators, and the open pull request below
+  cache age, model, and effort level on top; working directory, git branch with repo name,
+  stash, sync, operation state, worktree indicators, and the open pull request below
 - 24-bit truecolor rendering, identical in every terminal regardless of its palette;
   `NO_COLOR` respected
 - Chips hide themselves when their data is absent: a clean repo shows a short line, a merge
@@ -54,7 +54,7 @@ Optional file `~/.claude/claude-statusline.json`:
 ```
 
 `clickable_links` toggles the OSC 8 hyperlinks. `disabled_sections` hides chips by name:
-`bar`, `context_tokens`, `tokens`, `cache`, `cache_age`, `model`, `effort`, `project`,
+`bar`, `context_tokens`, `tokens`, `cache`, `cache_age`, `model`, `effort`, `cwd`,
 `branch`, `git_stash`, `git_sync`, `git_state`, `git_worktree`, `pr`, `worktree`.
 
 ## Uninstall
