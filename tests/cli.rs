@@ -161,3 +161,46 @@ fn cache_age_renders_from_transcript_under_home() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("cache_age:"), "stdout: {stdout}");
 }
+
+fn print_config(settings: Option<&str>) -> (std::process::Output, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    if let Some(content) = settings {
+        std::fs::write(&path, content).unwrap();
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_claude-statusline"))
+        .arg("--print-config")
+        .env("CLAUDE_STATUSLINE_SETTINGS_PATH", &path)
+        .output()
+        .expect("binary runs");
+    (out, dir)
+}
+
+#[test]
+fn print_config_missing_settings_reports_not_installed() {
+    let (out, _dir) = print_config(None);
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("installed=false"));
+    assert!(stdout.contains("settings_state=missing"));
+}
+
+#[test]
+fn print_config_installed_reports_zero() {
+    let (out, _dir) = print_config(Some(
+        r#"{"statusLine": {"type": "command", "command": "/opt/claude-statusline", "refreshInterval": 10}}"#,
+    ));
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("installed=true"));
+    assert!(stdout.contains("command=/opt/claude-statusline"));
+    assert!(stdout.contains("refreshInterval=10"));
+    assert!(stdout.contains("settings_state=ok"));
+}
+
+#[test]
+fn print_config_corrupt_settings_exits_two() {
+    let (out, _dir) = print_config(Some("{broken"));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("settings_state=unreadable"));
+}

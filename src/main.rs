@@ -6,6 +6,7 @@ mod schema;
 mod git;
 mod transcript;
 mod sections;
+mod commands;
 
 use clap::Parser;
 use std::io::Read;
@@ -33,8 +34,11 @@ const SEP: &str = " \u{2502} ";
 
 fn main() {
     let cli = Cli::parse();
-    if cli.setup || cli.install || cli.uninstall || cli.print_config {
-        // Lifecycle commands are wired up in later commits.
+    if cli.print_config {
+        std::process::exit(commands::print_config::run());
+    }
+    if cli.setup || cli.install || cli.uninstall {
+        // Wired up in later commits.
         return;
     }
     let mut raw = String::new();
