@@ -1,5 +1,6 @@
 mod theme;
 mod format;
+mod bar;
 
 use clap::Parser;
 use std::io::Read;
