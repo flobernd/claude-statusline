@@ -2,6 +2,7 @@ mod theme;
 mod format;
 mod bar;
 mod fit;
+mod schema;
 
 use clap::Parser;
 use std::io::Read;
