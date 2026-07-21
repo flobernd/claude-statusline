@@ -2,7 +2,7 @@ use crate::bar::render_bar;
 use crate::format::{fmt_duration, fmt_tokens};
 use crate::git::GitInfo;
 use crate::schema::Payload;
-use crate::theme::{BLUE, COMMENT, GREEN, MAGENTA, Style, YELLOW};
+use crate::theme::{BLUE, COMMENT, CYAN, GREEN, MAGENTA, RED, Style, YELLOW};
 
 /// Display heuristic: past five minutes the prompt cache is likely cold.
 pub const CACHE_AGE_WARN_MS: i64 = 5 * 60 * 1000;
@@ -99,6 +99,163 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
     out
 }
 
+pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    let s = c.style;
+    let ws = c.payload.workspace.as_ref();
+    let repo = ws.and_then(|w| w.repo.as_ref());
+    let repo_name: Option<String> = repo
+        .and_then(|r| r.name.clone())
+        .or_else(|| c.git.repo_name_fallback.clone());
+
+    let project: Option<String> = ws
+        .and_then(|w| w.project_dir.as_deref())
+        .or_else(|| ws.and_then(|w| w.current_dir.as_deref()))
+        .or(c.payload.cwd.as_deref())
+        .map(basename)
+        .filter(|p| !p.is_empty());
+    if let Some(p) = project {
+        // Auto-hide when the branch chip already shows the same name.
+        let duplicate = c.git.branch.is_some() && repo_name.as_deref() == Some(p.as_str());
+        if !duplicate {
+            out.push(("project", s.paint(&p, CYAN)));
+        }
+    }
+
+    if let Some(branch) = c.git.branch.as_deref() {
+        let branch_color = if branch == "main" || branch == "master" { GREEN } else { MAGENTA };
+        let text = match repo_name.as_deref() {
+            Some(r) => format!(
+                "{}{}",
+                s.paint(&format!("\u{2387} {r}"), CYAN),
+                s.paint(&format!("/{branch}"), branch_color)
+            ),
+            None => s.paint(&format!("\u{2387} {branch}"), branch_color),
+        };
+        let url = repo.and_then(|r| match (&r.host, &r.owner, &r.name) {
+            (Some(h), Some(o), Some(n)) => Some(format!("https://{h}/{o}/{n}")),
+            _ => None,
+        });
+        out.push(("branch", match url {
+            Some(u) => s.link(&u, &text),
+            None => text,
+        }));
+    }
+
+    if c.git.stash > 0 {
+        out.push(("git_stash", s.paint(&format!("stash:{}", c.git.stash), YELLOW)));
+    }
+
+    if c.git.ahead > 0 || c.git.behind > 0 {
+        let mut parts: Vec<String> = Vec::new();
+        if c.git.ahead > 0 {
+            parts.push(format!("+{}", c.git.ahead));
+        }
+        if c.git.behind > 0 {
+            parts.push(format!("-{}", c.git.behind));
+        }
+        out.push(("git_sync", s.paint(&format!("sync:{}", parts.join("/")), COMMENT)));
+    }
+
+    if let Some(state) = c.git.state {
+        let color = if state == crate::git::GitState::Conflict { RED } else { YELLOW };
+        out.push(("git_state", s.paint_bold(state.label(), color)));
+    }
+
+    if ws.is_some_and(|w| w.git_worktree_present()) || c.git.linked_worktree {
+        out.push(("git_worktree", s.paint("gwt", YELLOW)));
+    }
+
+    if let Some(pr) = c.payload.pr.as_ref() {
+        if let Some(number) = pr.number {
+            let mut text = s.paint(&format!("PR#{number}"), CYAN);
+            if let Some(url) = pr.url.as_deref() {
+                text = s.link(url, &text);
+            }
+            // The state token stays outside the link so the clickable
+            // target is exactly "PR#N".
+            if let Some((label, color)) = pr.review_state.as_deref().and_then(review_token) {
+                text = format!("{text} {}", s.paint(label, color));
+            }
+            out.push(("pr", text));
+        }
+    }
+
+    if let Some(wt) = c.payload.worktree.as_ref() {
+        if let Some(branch) = wt.branch.as_deref().or(wt.name.as_deref()) {
+            out.push(("worktree", s.paint(&format!("wt:{branch}"), YELLOW)));
+        }
+    }
+
+    out
+}
+
+fn review_token(state: &str) -> Option<(&'static str, crate::theme::Rgb)> {
+    match state {
+        "approved" => Some(("ok", GREEN)),
+        "changes_requested" => Some(("chg", RED)),
+        "pending" => Some(("rev", YELLOW)),
+        "draft" => Some(("draft", COMMENT)),
+        _ => None,
+    }
+}
+
+fn basename(p: &str) -> String {
+    std::path::Path::new(p.trim_end_matches(['/', '\\']))
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+pub fn sample_payload() -> Payload {
+    crate::schema::parse_payload(
+        r#"{
+        "cwd": "/home/user/projects/myapp",
+        "model": {"display_name": "Sonnet 5"},
+        "effort": {"level": "high"},
+        "workspace": {
+            "current_dir": "/home/user/projects/myapp",
+            "project_dir": "/home/user/projects/myapp",
+            "repo": {"host": "github.com", "owner": "user", "name": "myapp"}
+        },
+        "context_window": {
+            "used_percentage": 42,
+            "context_window_size": 1000000,
+            "current_usage": {
+                "input_tokens": 412000, "output_tokens": 18500,
+                "cache_creation_input_tokens": 12000,
+                "cache_read_input_tokens": 365000
+            }
+        },
+        "pr": {"number": 1234, "url": "https://github.com/user/myapp/pull/1234", "review_state": "approved"}
+    }"#,
+    )
+    .expect("sample payload is valid")
+}
+
+pub fn sample_git() -> GitInfo {
+    GitInfo {
+        branch: Some("feat/statusline".to_string()),
+        ahead: 2,
+        behind: 1,
+        stash: 2,
+        state: None,
+        linked_worktree: false,
+        repo_name_fallback: Some("myapp".to_string()),
+    }
+}
+
+pub fn preview(style: &Style) -> String {
+    let payload = sample_payload();
+    let git = sample_git();
+    let ctx = Ctx { payload: &payload, git: &git, cache_age_ms: Some(72_000), style };
+    let sep = style.paint(" \u{2502} ", COMMENT);
+    let join = |chips: Vec<(&'static str, String)>| {
+        chips.into_iter().map(|(_, r)| r).collect::<Vec<_>>().join(&sep)
+    };
+    format!("{}\n{}", join(line1(&ctx)), join(line2(&ctx)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +268,10 @@ mod tests {
     }
 
     fn names(chips: &[(&'static str, String)]) -> Vec<&'static str> {
+        chips.iter().map(|(n, _)| *n).collect()
+    }
+
+    fn names_of(chips: &[(&'static str, String)]) -> Vec<&'static str> {
         chips.iter().map(|(n, _)| *n).collect()
     }
 
@@ -218,5 +379,152 @@ mod tests {
         let git = GitInfo::default();
         let chips = line1(&ctx_of(&payload, &git));
         assert_eq!(text_of(&chips, "context_tokens"), "ctx:1M/1M");
+    }
+
+    fn payload_with_repo() -> Payload {
+        parse_payload(
+            r#"{
+            "workspace": {
+                "project_dir": "/home/u/myapp",
+                "repo": {"host": "github.com", "owner": "u", "name": "myapp"}
+            }
+        }"#,
+        )
+        .unwrap()
+    }
+
+    fn git_on(branch: &str) -> GitInfo {
+        GitInfo { branch: Some(branch.to_string()), ..GitInfo::default() }
+    }
+
+    #[test]
+    fn project_chip_hides_when_it_matches_repo_name() {
+        let payload = payload_with_repo();
+        let git = git_on("main");
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(names_of(&chips), vec!["branch"]);
+        assert_eq!(chips[0].1, "\u{2387} myapp/main");
+    }
+
+    #[test]
+    fn project_chip_shows_when_folder_differs_from_repo_name() {
+        let payload = parse_payload(
+            r#"{
+            "workspace": {
+                "project_dir": "/home/u/myapp-fix",
+                "repo": {"name": "myapp"}
+            }
+        }"#,
+        )
+        .unwrap();
+        let git = git_on("fix/links");
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(names_of(&chips), vec!["project", "branch"]);
+        assert_eq!(chips[0].1, "myapp-fix");
+        assert_eq!(chips[1].1, "\u{2387} myapp/fix/links");
+    }
+
+    #[test]
+    fn project_chip_shows_without_branch() {
+        let payload = payload_with_repo();
+        let git = GitInfo::default();
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(names_of(&chips), vec!["project"]);
+        assert_eq!(chips[0].1, "myapp");
+    }
+
+    #[test]
+    fn branch_falls_back_to_git_repo_name() {
+        let payload = parse_payload("{}").unwrap();
+        let git = GitInfo {
+            branch: Some("main".to_string()),
+            repo_name_fallback: Some("localrepo".to_string()),
+            ..GitInfo::default()
+        };
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(chips[0].1, "\u{2387} localrepo/main");
+    }
+
+    #[test]
+    fn feature_branch_uses_magenta_and_main_uses_green() {
+        let colored = Style { colors: true, links: false };
+        let payload = parse_payload("{}").unwrap();
+        for (branch, rgb) in [("main", "158;206;106"), ("master", "158;206;106"), ("feat/x", "187;154;247")] {
+            let git = git_on(branch);
+            let mut c = ctx_of(&payload, &git);
+            c.style = &colored;
+            let chips = line2(&c);
+            assert!(chips[0].1.contains(&format!("\x1b[38;2;{rgb}m")), "branch {branch}");
+        }
+    }
+
+    #[test]
+    fn stash_sync_state_and_gwt_chips() {
+        let payload = parse_payload("{}").unwrap();
+        let git = GitInfo {
+            branch: Some("main".to_string()),
+            ahead: 2,
+            behind: 1,
+            stash: 3,
+            state: Some(crate::git::GitState::Conflict),
+            linked_worktree: true,
+            repo_name_fallback: None,
+        };
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(names_of(&chips), vec!["branch", "git_stash", "git_sync", "git_state", "git_worktree"]);
+        assert_eq!(chips[1].1, "stash:3");
+        assert_eq!(chips[2].1, "sync:+2/-1");
+        assert_eq!(chips[3].1, "conflict");
+        assert_eq!(chips[4].1, "gwt");
+    }
+
+    #[test]
+    fn sync_omits_zero_side() {
+        let payload = parse_payload("{}").unwrap();
+        let git = GitInfo { branch: Some("main".to_string()), ahead: 2, ..GitInfo::default() };
+        let chips = line2(&ctx_of(&payload, &git));
+        assert!(chips.iter().any(|(_, r)| r == "sync:+2"));
+        let git = GitInfo { branch: Some("main".to_string()), behind: 4, ..GitInfo::default() };
+        let chips = line2(&ctx_of(&payload, &git));
+        assert!(chips.iter().any(|(_, r)| r == "sync:-4"));
+    }
+
+    #[test]
+    fn pr_chip_with_review_state_and_link() {
+        let payload = parse_payload(
+            r#"{"pr": {"number": 86, "url": "https://github.com/u/r/pull/86", "review_state": "approved"}}"#,
+        )
+        .unwrap();
+        let git = GitInfo::default();
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(chips[0].1, "PR#86 ok");
+
+        let linked = Style { colors: true, links: true };
+        let mut c = ctx_of(&payload, &git);
+        c.style = &linked;
+        let chips = line2(&c);
+        assert!(chips[0].1.contains("\x1b]8;;https://github.com/u/r/pull/86\x1b\\"));
+        assert!(chips[0].1.ends_with("\x1b[0m")); // state token outside the link
+    }
+
+    #[test]
+    fn worktree_chip_prefers_branch_over_name() {
+        let payload = parse_payload(r#"{"worktree": {"name": "fix", "branch": "fix/bug-123"}}"#).unwrap();
+        let git = GitInfo::default();
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(chips[0].1, "wt:fix/bug-123");
+        let payload = parse_payload(r#"{"worktree": {"name": "fix"}}"#).unwrap();
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(chips[0].1, "wt:fix");
+    }
+
+    #[test]
+    fn preview_contains_both_lines() {
+        let text = preview(&PLAIN);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("ctx:420K/1M"));
+        assert!(lines[1].contains("\u{2387} myapp/feat/statusline"));
+        assert!(lines[1].contains("PR#1234 ok"));
     }
 }
