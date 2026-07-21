@@ -32,7 +32,7 @@ struct Cli {
     print_config: bool,
 }
 
-const LINE1_DROP: &[&str] = &["cache_age", "cache", "context_tokens", "effort", "model"];
+const LINE1_DROP: &[&str] = &["cache", "cache_age", "effort"];
 // The cwd chip is deliberately absent: like the branch chip it always
 // stays, per the product decision that the current directory is visible
 // at every width.

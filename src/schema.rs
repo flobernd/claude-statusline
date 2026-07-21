@@ -87,8 +87,6 @@ pub struct Usage {
     #[serde(default, deserialize_with = "lenient")]
     pub input_tokens: Option<f64>,
     #[serde(default, deserialize_with = "lenient")]
-    pub output_tokens: Option<f64>,
-    #[serde(default, deserialize_with = "lenient")]
     pub cache_creation_input_tokens: Option<f64>,
     #[serde(default, deserialize_with = "lenient")]
     pub cache_read_input_tokens: Option<f64>,

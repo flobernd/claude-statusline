@@ -68,8 +68,7 @@ fn renders_line1_from_sample_payload() {
     let out = run_statusline(SAMPLE, "200", home.path());
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("ctx:420K/1M"), "stdout: {stdout}");
-    assert!(stdout.contains("in:424K out:18K"));
+    assert!(stdout.contains("420K/1M (42%)"), "stdout: {stdout}");
     assert!(stdout.contains("cache:46%"));
     assert!(stdout.contains("Sonnet 5"));
     assert!(stdout.contains("effort:xhigh"));
@@ -122,14 +121,13 @@ fn payload_control_characters_never_reach_stdout() {
 }
 
 #[test]
-fn narrow_width_drops_low_priority_chips_but_keeps_bar_and_tokens() {
+fn narrow_width_drops_cache_but_keeps_protected_chips() {
     let home = tempfile::tempdir().unwrap();
     let out = run_statusline(SAMPLE, "45", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("in:424K out:18K"));
-    assert!(stdout.contains('['));
-    assert!(!stdout.contains("cache_age"));
-    assert!(!stdout.contains("Sonnet 5"));
+    assert!(stdout.contains("420K/1M (42%)"), "stdout: {stdout}"); // context_tokens protected
+    assert!(stdout.contains("Sonnet 5"), "stdout: {stdout}"); // model protected
+    assert!(!stdout.contains("cache:46%"), "stdout: {stdout}"); // cache drops first
 }
 
 #[test]
@@ -146,7 +144,7 @@ fn disabled_sections_config_hides_chips() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("cache:46%"));
     assert!(!stdout.contains("effort:"));
-    assert!(stdout.contains("in:424K out:18K"));
+    assert!(stdout.contains("420K/1M"));
 }
 
 #[test]
@@ -404,7 +402,7 @@ fn setup_confirm_installs_and_shows_preview() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Preview:"));
-    assert!(stdout.contains("ctx:420K/1M"));
+    assert!(stdout.contains("420K/1M"));
     assert!(stdout.contains("\u{2387} myapp/feat/statusline"));
     assert!(stdout.contains("Setup complete."));
     assert!(path.exists());

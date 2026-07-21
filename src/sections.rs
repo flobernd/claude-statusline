@@ -1,4 +1,3 @@
-use crate::bar::render_bar;
 use crate::format::{fmt_duration, fmt_tokens};
 use crate::git::GitInfo;
 use crate::schema::Payload;
@@ -22,47 +21,22 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
     let window = cw.and_then(|w| w.context_window_size).filter(|w| *w > 0.0);
     let usage = cw.and_then(|w| w.current_usage.as_ref());
 
-    if let Some(p) = pct {
-        out.push(("bar", render_bar(p, 20, s)));
-    }
-
     if let (Some(p), Some(win)) = (pct, window) {
         let p = p.clamp(0.0, 100.0);
-        // Derived from the percentage so the chip always agrees with the
-        // bar beside it; the token fields are not the documented fill.
+        // Derived from the percentage, not the raw token fields, which are
+        // only the uncached tail and never the documented context fill.
         let used = (win * p / 100.0).round() as u64;
         out.push((
             "context_tokens",
-            s.paint(
-                &format!("ctx:{}/{}", fmt_tokens(used), fmt_tokens(win as u64)),
-                COMMENT,
-            ),
-        ));
-    }
-
-    // Raw input_tokens is only the uncached remainder after the final
-    // cache breakpoint, which Claude Code keeps at the prompt end, so it
-    // reads as a constant handful of tokens. Fresh input (uncached plus
-    // newly cached) is the meaningful per-turn number: what this turn
-    // added on top of the replayed cache prefix.
-    let input = match (
-        usage.and_then(|u| u.input_tokens),
-        usage.and_then(|u| u.cache_creation_input_tokens),
-    ) {
-        (None, None) => None,
-        (a, b) => Some(a.unwrap_or(0.0).max(0.0) + b.unwrap_or(0.0).max(0.0)),
-    };
-    let output = usage.and_then(|u| u.output_tokens);
-    if input.is_some() || output.is_some() {
-        let fmt = |v: Option<f64>| v.map_or("?".to_string(), |n| fmt_tokens(n.max(0.0) as u64));
-        out.push((
-            "tokens",
             format!(
-                "{}{} {}{}",
-                s.paint("in:", COMMENT),
-                s.paint(&fmt(input), BLUE),
-                s.paint("out:", COMMENT),
-                s.paint(&fmt(output), BLUE),
+                "{}{}{}{}{}{}{}",
+                s.paint("\u{2630} ", COMMENT),
+                s.paint(&fmt_tokens(used), BLUE),
+                s.paint("/", COMMENT),
+                s.paint(&fmt_tokens(win as u64), BLUE),
+                s.paint(" (", COMMENT),
+                s.paint(&format!("{}%", p.round() as u64), crate::bar::bar_color(p)),
+                s.paint(")", COMMENT),
             ),
         ));
     }
@@ -385,22 +359,39 @@ mod tests {
         let chips = line1(&c);
         assert_eq!(
             names(&chips),
-            vec![
-                "bar",
-                "context_tokens",
-                "tokens",
-                "cache",
-                "cache_age",
-                "model",
-                "effort"
-            ]
+            vec!["context_tokens", "cache", "cache_age", "model", "effort"]
         );
-        assert_eq!(text_of(&chips, "context_tokens"), "ctx:420K/1M");
-        assert_eq!(text_of(&chips, "tokens"), "in:424K out:18K");
+        assert_eq!(text_of(&chips, "context_tokens"), "\u{2630} 420K/1M (42%)");
         assert_eq!(text_of(&chips, "cache"), "cache:46%"); // 365000 / 789000
         assert_eq!(text_of(&chips, "cache_age"), "cache_age:1m12s");
         assert_eq!(text_of(&chips, "model"), "Sonnet 5");
         assert_eq!(text_of(&chips, "effort"), "effort:xhigh");
+    }
+
+    #[test]
+    fn context_tokens_paint_numbers_blue_and_labels_comment() {
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
+        let payload = parse_payload(
+            r#"{"context_window": {"used_percentage": 42, "context_window_size": 1000000}}"#,
+        )
+        .unwrap();
+        let git = GitInfo::default();
+        let mut c = ctx_of(&payload, &git);
+        c.style = &colored;
+        let chips = line1(&c);
+        assert_eq!(
+            text_of(&chips, "context_tokens"),
+            "\x1b[38;2;86;95;137m\u{2630} \x1b[0m\
+             \x1b[38;2;122;162;247m420K\x1b[0m\
+             \x1b[38;2;86;95;137m/\x1b[0m\
+             \x1b[38;2;122;162;247m1M\x1b[0m\
+             \x1b[38;2;86;95;137m (\x1b[0m\
+             \x1b[38;2;158;206;106m42%\x1b[0m\
+             \x1b[38;2;86;95;137m)\x1b[0m"
+        );
     }
 
     #[test]
@@ -425,17 +416,7 @@ mod tests {
     fn unknown_effort_level_hides_chip() {
         let payload = parse_payload(r#"{"effort": {"level": "ultrathink"}}"#).unwrap();
         let git = GitInfo::default();
-        assert!(line1(&ctx_of(&payload, &git)).is_empty());
-    }
-
-    #[test]
-    fn missing_output_tokens_renders_question_mark() {
-        let payload =
-            parse_payload(r#"{"context_window": {"current_usage": {"input_tokens": 5000}}}"#)
-                .unwrap();
-        let git = GitInfo::default();
-        let chips = line1(&ctx_of(&payload, &git));
-        assert_eq!(text_of(&chips, "tokens"), "in:5K out:?");
+        assert!(!names(&line1(&ctx_of(&payload, &git))).contains(&"effort"));
     }
 
     #[test]
@@ -475,7 +456,7 @@ mod tests {
         .unwrap();
         let git = GitInfo::default();
         let chips = line1(&ctx_of(&payload, &git));
-        assert_eq!(text_of(&chips, "context_tokens"), "ctx:1M/1M");
+        assert_eq!(text_of(&chips, "context_tokens"), "\u{2630} 1M/1M (100%)");
     }
 
     fn payload_with_repo() -> Payload {
@@ -693,7 +674,7 @@ mod tests {
         let text = preview(&PLAIN);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("ctx:420K/1M"));
+        assert!(lines[0].contains("420K/1M"));
         assert!(lines[1].contains("\u{2302} "));
         assert!(lines[1].contains("\u{2387} myapp/feat/statusline"));
         assert!(lines[1].contains("+3 -1 ~7"));
