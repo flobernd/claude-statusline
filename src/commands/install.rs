@@ -28,7 +28,7 @@ pub fn install() -> Result<()> {
     // refreshInterval keeps cache_age live between assistant messages.
     settings.insert(
         "statusLine".to_string(),
-        json!({"type": "command", "command": exe, "refreshInterval": 10}),
+        json!({"type": "command", "command": command_string(&exe), "refreshInterval": 10}),
     );
     write_atomic(&path, &Value::Object(settings))?;
 
@@ -81,6 +81,17 @@ fn bak_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.bak", path.display()))
 }
 
+/// Claude Code passes the command through a shell, so a path containing
+/// whitespace must be quoted; print_config's first_token already parses
+/// the quoted form back.
+fn command_string(exe: &str) -> String {
+    if exe.contains(char::is_whitespace) {
+        format!("\"{exe}\"")
+    } else {
+        exe.to_string()
+    }
+}
+
 /// Temp file plus rename: a crash mid-write must never leave the user's
 /// Claude Code settings truncated.
 fn write_atomic(path: &Path, value: &Value) -> Result<()> {
@@ -95,4 +106,25 @@ fn write_atomic(path: &Path, value: &Value) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_path_is_unchanged() {
+        assert_eq!(
+            command_string("/usr/local/bin/claude-statusline"),
+            "/usr/local/bin/claude-statusline"
+        );
+    }
+
+    #[test]
+    fn path_with_space_is_quoted() {
+        assert_eq!(
+            command_string("C:\\Program Files\\claude-statusline.exe"),
+            "\"C:\\Program Files\\claude-statusline.exe\""
+        );
+    }
 }
