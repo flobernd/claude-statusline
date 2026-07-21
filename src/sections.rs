@@ -5,6 +5,9 @@ use crate::theme::{BLUE, COMMENT, CYAN, GREEN, MAGENTA, RED, Style, YELLOW};
 
 /// Display heuristic: past five minutes the prompt cache is likely cold.
 pub const CACHE_AGE_WARN_MS: i64 = 5 * 60 * 1000;
+/// The one-hour cache TTL is the hard ceiling: past it the prompt cache has
+/// certainly expired, so the age is flagged more severely than "cold".
+pub const CACHE_AGE_EXPIRE_MS: i64 = 60 * 60 * 1000;
 
 pub struct Ctx<'a> {
     pub payload: &'a Payload,
@@ -62,7 +65,9 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
     }
 
     if let Some(age) = c.cache_age_ms.filter(|a| *a >= 0) {
-        let color = if age >= CACHE_AGE_WARN_MS {
+        let color = if age >= CACHE_AGE_EXPIRE_MS {
+            RED
+        } else if age >= CACHE_AGE_WARN_MS {
             YELLOW
         } else {
             COMMENT
@@ -435,7 +440,7 @@ mod tests {
         let git = GitInfo::default();
         let mut c = ctx_of(&payload, &git);
         c.cache_age_ms = Some(-3_000);
-        assert!(line1(&c).is_empty());
+        assert!(!names(&line1(&c)).contains(&"cache_age"));
 
         let colored = Style {
             colors: true,
@@ -446,6 +451,10 @@ mod tests {
         c.cache_age_ms = Some(CACHE_AGE_WARN_MS);
         let chips = line1(&c);
         assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;224;175;104m")); // yellow
+
+        c.cache_age_ms = Some(CACHE_AGE_EXPIRE_MS);
+        let chips = line1(&c);
+        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;247;118;142m")); // red past 1h
     }
 
     #[test]
