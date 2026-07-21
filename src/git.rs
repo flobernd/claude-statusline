@@ -43,6 +43,9 @@ fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
     let mut child = Command::new("git")
         .args(args)
         .current_dir(dir)
+        // A statusline must never take even optional locks in the repo it
+        // observes: that would contend with the user's own git commands.
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

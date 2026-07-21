@@ -25,7 +25,7 @@ pub fn install() -> Result<()> {
 
         match parsed {
             Some(Value::Object(existing)) => settings = existing,
-            _ => println!(
+            _ => eprintln!(
                 "Warning: could not parse existing settings.json; writing new settings with statusLine only (backup at {}).",
                 bak_path(&path).display()
             ),
@@ -58,8 +58,7 @@ pub fn uninstall() -> Result<()> {
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok());
     let Some(Value::Object(mut settings)) = parsed else {
-        println!("Error: could not read {}", path.display());
-        return Ok(());
+        anyhow::bail!("could not read {}", path.display());
     };
     if !settings.contains_key("statusLine") {
         println!("claude-statusline is not installed (no statusLine in settings).");

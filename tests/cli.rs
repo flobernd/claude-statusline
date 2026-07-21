@@ -365,12 +365,18 @@ fn install_then_print_config_reports_installed() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("installed=true"));
 }
 
+/// HOME/USERPROFILE are pinned to the settings dir: setup's preview now
+/// reads ~/.claude/claude-statusline.json for the clickable-links config,
+/// and without an override that would fall through to the real user home.
 fn run_setup(answer: &str, path: &std::path::Path) -> std::process::Output {
+    let home = path.parent().expect("settings path has a parent dir");
     let mut child = Command::new(env!("CARGO_BIN_EXE_claude-statusline"))
         .arg("--setup")
         .env("CLAUDE_STATUSLINE_SETTINGS_PATH", path)
         .env("NO_COLOR", "1")
         .env_remove("FORCE_COLOR")
+        .env("HOME", home)
+        .env("USERPROFILE", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

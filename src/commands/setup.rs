@@ -8,7 +8,13 @@ pub fn run() -> Result<()> {
     );
     println!();
     println!("Preview:");
-    let style = crate::theme::Style::from_env(true);
+    let clickable = crate::schema::home_dir()
+        .map(|h| {
+            crate::schema::load_config(&h.join(".claude").join("claude-statusline.json"))
+                .clickable_links
+        })
+        .unwrap_or(true);
+    let style = crate::theme::Style::from_env(clickable);
     for line in crate::sections::preview(&style).lines() {
         println!("  {line}");
     }
