@@ -11,7 +11,6 @@ pub struct SubagentPayload {
     #[serde(default, deserialize_with = "lenient")]
     pub columns: Option<f64>,
     #[serde(default, deserialize_with = "lenient")]
-    #[allow(dead_code)]
     pub cwd: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     tasks: Option<Vec<serde_json::Value>>,
@@ -41,7 +40,6 @@ pub struct Task {
     #[serde(default, rename = "tokenCount", deserialize_with = "lenient")]
     pub token_count: Option<f64>,
     #[serde(default, deserialize_with = "lenient")]
-    #[allow(dead_code)]
     pub cwd: Option<String>,
 }
 
@@ -314,7 +312,6 @@ pub enum TaskLocation {
     Dir(String), // last path component of the task cwd
 }
 
-#[allow(dead_code)]
 fn last_component(path: &str) -> String {
     path.trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
@@ -324,7 +321,6 @@ fn last_component(path: &str) -> String {
         .to_string()
 }
 
-#[allow(dead_code)]
 pub fn resolve_location(
     task_cwd: Option<&str>,
     session_cwd: Option<&str>,
@@ -368,6 +364,22 @@ pub fn render(raw: &str, config: &Config, style: &Style, fallback_width: usize) 
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
+    let session_cwd = payload.cwd.clone().or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+    });
+    // One cache for the whole invocation: sibling tasks in the same repo or
+    // worktree reuse a single git lookup instead of spawning one each.
+    let mut cache: std::collections::HashMap<String, Option<(String, String)>> =
+        std::collections::HashMap::new();
+    let mut lookup = |cwd: &str| {
+        cache
+            .entry(cwd.to_string())
+            .or_insert_with(|| crate::git::branch_location(std::path::Path::new(cwd)))
+            .clone()
+    };
+
     let mut lines: Vec<String> = Vec::new();
     for task in payload.parsed_tasks() {
         // Other task types keep Claude Code's default row.
@@ -377,15 +389,14 @@ pub fn render(raw: &str, config: &Config, style: &Style, fallback_width: usize) 
         let Some(id) = task.id.as_deref().filter(|i| !i.is_empty()) else {
             continue;
         };
-        // Location resolution is not wired in yet, so every row renders as
-        // if the task shares the session's location.
+        let location = resolve_location(task.cwd.as_deref(), session_cwd.as_deref(), &mut lookup);
         let Some(content) = render_row(
             &task,
             columns,
             style,
             &config.subagent_disabled_sections,
             now_ms,
-            &TaskLocation::Same,
+            &location,
         ) else {
             continue;
         };

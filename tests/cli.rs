@@ -519,6 +519,71 @@ fn subagent_disabled_sections_hide_chips_end_to_end() {
 }
 
 #[test]
+fn subagent_location_chip_for_worktree_task() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = home.path().join("myrepo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    };
+    git(&["init", "-b", "main"]);
+    std::fs::write(repo.join("f.txt"), "x\n").unwrap();
+    git(&["add", "f.txt"]);
+    git(&["commit", "-m", "init"]);
+    let wt = home.path().join("wt-fix");
+    git(&["worktree", "add", &wt.to_string_lossy(), "-b", "fix-1"]);
+
+    let payload = format!(
+        r#"{{"columns": 200, "cwd": {repo:?}, "tasks": [
+            {{"id": "t1", "type": "local_agent", "name": "Explore", "cwd": {wt:?}}},
+            {{"id": "t2", "type": "local_agent", "name": "Local", "cwd": {repo:?}}}
+        ]}}"#,
+        repo = repo.to_string_lossy(),
+        wt = wt.to_string_lossy()
+    );
+    let out = run_subagent(&payload, home.path(), false);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let rows: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(rows[0]["content"], "Explore \u{2502} \u{2387} myrepo/fix-1");
+    assert_eq!(rows[1]["content"], "Local"); // same location: no chip
+}
+
+#[test]
+fn subagent_location_chip_for_plain_directory_task() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = home.path().join("scratch-dir");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let payload = format!(
+        r#"{{"columns": 200, "cwd": {home:?}, "tasks": [
+            {{"id": "t1", "type": "local_agent", "name": "builder", "cwd": {scratch:?}}}
+        ]}}"#,
+        home = home.path().to_string_lossy(),
+        scratch = scratch.to_string_lossy()
+    );
+    let out = run_subagent(&payload, home.path(), false);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert_eq!(v["content"], "builder \u{2502} \u{2302} scratch-dir");
+}
+
+#[test]
 fn subagent_undecodable_payload_emits_nothing_but_logs() {
     let home = tempfile::tempdir().unwrap();
     let out = run_subagent("{definitely not json", home.path(), false);

@@ -123,7 +123,9 @@ const HEAD_ARGS: &[&str] = &[
     "--git-common-dir",
 ];
 
-#[allow(dead_code)]
+/// Repo name comes from the common dir's parent, not the checkout directory,
+/// so a linked worktree reports the main repository rather than its own
+/// checkout folder.
 pub fn branch_location(dir: &Path) -> Option<(String, String)> {
     let info = head_info(dir, run_git(dir, HEAD_ARGS))?;
     let repo = info
