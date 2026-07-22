@@ -4,7 +4,7 @@ use crate::bar::bar_color;
 use crate::format::{fmt_duration, fmt_tokens};
 use crate::schema::Config;
 use crate::schema::lenient;
-use crate::theme::{BLUE, COMMENT, CYAN, MAGENTA, Style};
+use crate::theme::{BLUE, COMMENT, MAGENTA, Style, WHITE};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct SubagentPayload {
@@ -84,7 +84,7 @@ pub fn row_chips(task: &Task, style: &Style, now_ms: i64) -> Vec<(&'static str, 
 
     let name = name_text(task);
     if let Some(n) = name.as_deref() {
-        out.push(("name", s.paint(n, CYAN)));
+        out.push(("name", s.paint(n, WHITE)));
     }
 
     if let Some(a) = activity_text(task, name.as_deref()) {
@@ -221,7 +221,7 @@ pub fn render_row(
         );
     }
     if let Some(n) = name.as_deref() {
-        shrink_chip(&mut chips, "name", n, CYAN, 1, false, &budget);
+        shrink_chip(&mut chips, "name", n, WHITE, 1, false, &budget);
     }
 
     Some(
@@ -479,6 +479,16 @@ mod tests {
     #[test]
     fn empty_task_renders_no_chips() {
         assert!(row_chips(&task("{}"), &PLAIN, 0).is_empty());
+    }
+
+    #[test]
+    fn name_chip_renders_white() {
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
+        let chips = row_chips(&task(r#"{"name": "Explore"}"#), &colored, 0);
+        assert!(text_of(&chips, "name").starts_with("\x1b[38;2;255;255;255m"));
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub const GREEN: Rgb = Rgb(0x9e, 0xce, 0x6a);
 pub const MAGENTA: Rgb = Rgb(0xbb, 0x9a, 0xf7);
 pub const YELLOW: Rgb = Rgb(0xe0, 0xaf, 0x68);
 pub const RED: Rgb = Rgb(0xf7, 0x76, 0x8e);
+pub const WHITE: Rgb = Rgb(0xff, 0xff, 0xff);
 
 /// Payload text reaches the terminal verbatim, so control characters
 /// (C0, DEL, C1) are stripped here at the single chokepoint every chip
