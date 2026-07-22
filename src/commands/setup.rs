@@ -34,8 +34,22 @@ pub fn run() -> Result<()> {
         return Ok(());
     }
 
+    print!("Also install the subagent status line (one row per running agent task)? [y/N]: ");
+    std::io::stdout().flush()?;
+    let mut sub_answer = String::new();
+    // EOF counts as the default "no": the main install must still happen.
+    let _ = std::io::stdin().lock().read_line(&mut sub_answer);
+    let with_subagent = matches!(sub_answer.trim().to_lowercase().as_str(), "y" | "yes");
+    if with_subagent {
+        println!();
+        println!("Subagent row preview:");
+        for line in crate::subagent::preview(&style).lines() {
+            println!("  {line}");
+        }
+    }
+
     println!();
-    super::install::install(false)?;
+    super::install::install(with_subagent)?;
     println!();
     println!("Setup complete.");
     println!("Uninstall any time with: claude-statusline --uninstall");

@@ -233,6 +233,23 @@ pub fn render_row(
     )
 }
 
+pub fn sample_task() -> Task {
+    serde_json::from_str(
+        r#"{
+        "id": "t1", "type": "local_agent", "name": "Explore",
+        "label": "Searching for callers", "startTime": 0,
+        "model": "claude-sonnet-5", "contextWindowSize": 200000,
+        "tokenCount": 82000
+    }"#,
+    )
+    .expect("sample task is valid")
+}
+
+pub fn preview(style: &Style) -> String {
+    // Fixed now_ms so the sample elapsed chip is stable: 1m23s.
+    render_row(&sample_task(), 100, style, &[], 83_000).unwrap_or_default()
+}
+
 pub fn render(raw: &str, config: &Config, style: &Style, fallback_width: usize) -> Option<String> {
     let Some(payload) = parse_payload(raw) else {
         eprintln!("claude-statusline: undecodable subagent payload");
@@ -462,6 +479,14 @@ mod tests {
     #[test]
     fn empty_task_renders_no_chips() {
         assert!(row_chips(&task("{}"), &PLAIN, 0).is_empty());
+    }
+
+    #[test]
+    fn preview_renders_the_sample_row() {
+        assert_eq!(
+            preview(&PLAIN),
+            "Explore \u{2502} Searching for callers \u{2502} 82K/200K (41%) \u{2502} 1m23s \u{2502} claude-sonnet-5"
+        );
     }
 
     fn row_at(columns: usize) -> String {

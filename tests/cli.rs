@@ -401,6 +401,9 @@ fn setup_confirm_installs_and_shows_preview() {
     assert!(stdout.contains("\u{2387} myapp/feat/statusline"));
     assert!(stdout.contains("Setup complete."));
     assert!(path.exists());
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(v.get("subagentStatusLine").is_none());
 }
 
 #[test]
@@ -597,4 +600,31 @@ fn print_config_reports_subagent_entry() {
     assert!(stdout.contains("subagent_type=command"));
     assert!(stdout.contains("subagent_refreshInterval=5"));
     assert!(stdout.contains("installed=false"));
+}
+
+#[test]
+fn setup_with_subagent_installs_both_and_previews_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let out = run_setup("y\ny\n", &path);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Subagent row preview:"), "stdout: {stdout}");
+    assert!(stdout.contains("82K/200K (41%)"));
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(v.get("statusLine").is_some());
+    assert!(v.get("subagentStatusLine").is_some());
+}
+
+#[test]
+fn setup_declining_subagent_installs_main_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let out = run_setup("y\nn\n", &path);
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(v.get("statusLine").is_some());
+    assert!(v.get("subagentStatusLine").is_none());
 }
