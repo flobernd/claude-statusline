@@ -10,6 +10,13 @@ A cross-platform statusline for the [Claude Code](https://code.claude.com) CLI: 
 token and prompt-cache metrics, model and effort level on the first line; working directory,
 git status, and pull request context on the second.
 
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/statusline-dark.svg">
+    <img src="assets/statusline-light.svg" alt="Statusline previews in a plain directory, a git repository, and a linked worktree">
+  </picture>
+</div>
+
 ## Features
 
 - Two fixed lines: context bar, absolute context tokens, token counts, prompt-cache hit ratio,
@@ -49,9 +56,10 @@ previous configuration. Restart Claude Code afterwards. For a non-interactive in
 The wizard also offers the optional subagent status line, which renders one
 row per running agent task in the agent panel:
 
-```text
-Explore │ Searching for callers │ 82K/200K (41%) │ 1m23s │ claude-sonnet-5
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/statusline-subagent-dark.svg">
+  <img src="assets/statusline-subagent-light.svg" alt="Subagent status line: one row per running agent task">
+</picture>
 
 Rows adapt to the panel width, shortening and then hiding the activity text
 before dropping chips. On Claude Code versions without per-task model data
