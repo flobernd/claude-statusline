@@ -272,6 +272,57 @@ pub fn preview(style: &Style) -> String {
     render_row(&sample_task(), 100, style, &[], 83_000, None).unwrap_or_default()
 }
 
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum TaskLocation {
+    /// Same location as the session: no chip.
+    Same,
+    Repo {
+        repo: String,
+        branch: String,
+    },
+    Dir(String), // last path component of the task cwd
+}
+
+#[allow(dead_code)]
+fn last_component(path: &str) -> String {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|c| !c.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+#[allow(dead_code)]
+pub fn resolve_location(
+    task_cwd: Option<&str>,
+    session_cwd: Option<&str>,
+    lookup: &mut dyn FnMut(&str) -> Option<(String, String)>,
+) -> TaskLocation {
+    let Some(task_cwd) = task_cwd.filter(|c| !c.is_empty()) else {
+        return TaskLocation::Same;
+    };
+    if Some(task_cwd) == session_cwd {
+        return TaskLocation::Same;
+    }
+    let task_loc = lookup(task_cwd);
+    let session_loc = match session_cwd {
+        Some(c) => lookup(c),
+        None => None,
+    };
+    match task_loc {
+        Some((repo, branch)) => {
+            if session_loc.as_ref() == Some(&(repo.clone(), branch.clone())) {
+                TaskLocation::Same
+            } else {
+                TaskLocation::Repo { repo, branch }
+            }
+        }
+        None => TaskLocation::Dir(last_component(task_cwd)),
+    }
+}
+
 pub fn render(raw: &str, config: &Config, style: &Style, fallback_width: usize) -> Option<String> {
     let Some(payload) = parse_payload(raw) else {
         eprintln!("claude-statusline: undecodable subagent payload");
@@ -631,5 +682,51 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         assert!(render_row(&task(FULL_TASK), 200, &PLAIN, &all, 24_000, None).is_none());
+    }
+
+    #[test]
+    fn location_same_for_missing_equal_or_same_branch_cwd() {
+        let mut repo_everywhere = |_: &str| Some(("myrepo".to_string(), "main".to_string()));
+        assert!(matches!(
+            resolve_location(None, Some("/a"), &mut repo_everywhere),
+            TaskLocation::Same
+        ));
+        assert!(matches!(
+            resolve_location(Some("/a"), Some("/a"), &mut repo_everywhere),
+            TaskLocation::Same
+        ));
+        // Different dirs inside the same repo and branch stay quiet.
+        assert!(matches!(
+            resolve_location(Some("/a/src"), Some("/a"), &mut repo_everywhere),
+            TaskLocation::Same
+        ));
+    }
+
+    #[test]
+    fn location_repo_when_branch_differs() {
+        let mut lookup = |cwd: &str| match cwd {
+            "/repo" => Some(("myrepo".to_string(), "master".to_string())),
+            _ => Some(("myrepo".to_string(), "fix-1".to_string())),
+        };
+        match resolve_location(Some("/repo/.wt/fix-1"), Some("/repo"), &mut lookup) {
+            TaskLocation::Repo { repo, branch } => {
+                assert_eq!(repo, "myrepo");
+                assert_eq!(branch, "fix-1");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn location_dir_uses_last_path_component() {
+        let mut no_repo = |_: &str| None;
+        match resolve_location(Some("/tmp/scratch-dir"), Some("/home/u"), &mut no_repo) {
+            TaskLocation::Dir(d) => assert_eq!(d, "scratch-dir"),
+            other => panic!("unexpected: {other:?}"),
+        }
+        match resolve_location(Some("C:\\work\\jobs"), Some("/home/u"), &mut no_repo) {
+            TaskLocation::Dir(d) => assert_eq!(d, "jobs"),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }
