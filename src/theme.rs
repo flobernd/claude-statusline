@@ -17,7 +17,7 @@ pub const RED: Rgb = Rgb(0xf7, 0x76, 0x8e);
 /// `char::is_control` alone covers C0, DEL, and C1 (U+0080-U+009F): all
 /// three ranges are the Unicode `Cc` category, verified against rustc's
 /// char tables, so no separate C1 range check is needed.
-fn sanitize(text: &str) -> String {
+pub(crate) fn sanitize(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
