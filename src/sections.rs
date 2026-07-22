@@ -98,7 +98,7 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
             _ => None, // outside the documented enum: hide
         };
         if let Some(color) = color {
-            out.push(("effort", s.paint_bold(&format!("effort:{level}"), color)));
+            out.push(("effort", s.paint_bold(level, color)));
         }
     }
 
@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(text_of(&chips, "cache"), "cache:46%"); // 365000 / 789000
         assert_eq!(text_of(&chips, "cache_age"), "cache_age:1m12s");
         assert_eq!(text_of(&chips, "model"), "Sonnet 5");
-        assert_eq!(text_of(&chips, "effort"), "effort:xhigh");
+        assert_eq!(text_of(&chips, "effort"), "xhigh");
     }
 
     #[test]
@@ -417,7 +417,7 @@ mod tests {
                 parse_payload(&format!(r#"{{"effort": {{"level": "{level}"}}}}"#)).unwrap();
             let git = GitInfo::default();
             let chips = line1(&ctx_of(&payload, &git));
-            assert_eq!(text_of(&chips, "effort"), &format!("effort:{level}"));
+            assert_eq!(text_of(&chips, "effort"), level);
         }
     }
 

@@ -71,7 +71,7 @@ fn renders_line1_from_sample_payload() {
     assert!(stdout.contains("420K/1M (42%)"), "stdout: {stdout}");
     assert!(stdout.contains("cache:46%"));
     assert!(stdout.contains("Sonnet 5"));
-    assert!(stdout.contains("effort:xhigh"));
+    assert!(stdout.contains("\u{2502} xhigh"), "stdout: {stdout}");
     assert!(stdout.contains(" \u{2502} "));
 }
 
@@ -143,7 +143,7 @@ fn disabled_sections_config_hides_chips() {
     let out = run_statusline(SAMPLE, "200", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("cache:46%"));
-    assert!(!stdout.contains("effort:"));
+    assert!(!stdout.contains("xhigh"));
     assert!(stdout.contains("420K/1M"));
 }
 
