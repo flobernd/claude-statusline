@@ -129,6 +129,7 @@ pub fn parse_payload(raw: &str) -> Option<Payload> {
 pub struct Config {
     pub clickable_links: bool,
     pub disabled_sections: Vec<String>,
+    pub subagent_disabled_sections: Vec<String>,
 }
 
 impl Default for Config {
@@ -136,6 +137,7 @@ impl Default for Config {
         Config {
             clickable_links: true,
             disabled_sections: Vec::new(),
+            subagent_disabled_sections: Vec::new(),
         }
     }
 }
@@ -261,5 +263,22 @@ mod tests {
         std::fs::write(&path, "{broken").unwrap();
         let c = load_config(&path);
         assert!(c.clickable_links);
+    }
+
+    #[test]
+    fn subagent_disabled_sections_parse_and_default_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude-statusline.json");
+        assert!(load_config(&path).subagent_disabled_sections.is_empty());
+
+        std::fs::write(
+            &path,
+            r#"{"subagent_disabled_sections": ["activity", "effort"]}"#,
+        )
+        .unwrap();
+        let c = load_config(&path);
+        assert_eq!(c.subagent_disabled_sections, vec!["activity", "effort"]);
+        // The new key must not disturb the other defaults.
+        assert!(c.clickable_links && c.disabled_sections.is_empty());
     }
 }
