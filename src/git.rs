@@ -96,21 +96,48 @@ fn resolve(dir: &Path, p: &str) -> PathBuf {
     joined.canonicalize().unwrap_or(joined)
 }
 
+struct HeadInfo {
+    branch: String,
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+}
+
+fn head_info(dir: &Path, out: Option<String>) -> Option<HeadInfo> {
+    let out = out?;
+    let lines: Vec<&str> = out.lines().collect();
+    if lines.len() < 3 || lines[0].is_empty() {
+        return None;
+    }
+    Some(HeadInfo {
+        branch: lines[0].to_string(),
+        git_dir: resolve(dir, lines[1]),
+        common_dir: resolve(dir, lines[2]),
+    })
+}
+
+const HEAD_ARGS: &[&str] = &[
+    "rev-parse",
+    "--abbrev-ref",
+    "HEAD",
+    "--git-dir",
+    "--git-common-dir",
+];
+
+#[allow(dead_code)]
+pub fn branch_location(dir: &Path) -> Option<(String, String)> {
+    let info = head_info(dir, run_git(dir, HEAD_ARGS))?;
+    let repo = info
+        .common_dir
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())?;
+    Some((repo, info.branch))
+}
+
 pub fn collect(dir: &Path) -> GitInfo {
     let mut info = GitInfo::default();
     let (head, sync, stash, status) = std::thread::scope(|s| {
-        let head = s.spawn(|| {
-            run_git(
-                dir,
-                &[
-                    "rev-parse",
-                    "--abbrev-ref",
-                    "HEAD",
-                    "--git-dir",
-                    "--git-common-dir",
-                ],
-            )
-        });
+        let head = s.spawn(|| run_git(dir, HEAD_ARGS));
         let sync =
             s.spawn(|| run_git(dir, &["rev-list", "--count", "--left-right", "HEAD...@{u}"]));
         let stash = s.spawn(|| {
@@ -129,19 +156,15 @@ pub fn collect(dir: &Path) -> GitInfo {
     });
 
     let mut git_dir: Option<PathBuf> = None;
-    if let Some(out) = head {
-        let lines: Vec<&str> = out.lines().collect();
-        if lines.len() >= 3 && !lines[0].is_empty() {
-            info.branch = Some(lines[0].to_string());
-            let gd = resolve(dir, lines[1]);
-            let common = resolve(dir, lines[2]);
-            info.linked_worktree = gd != common;
-            info.repo_name_fallback = common
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().into_owned());
-            git_dir = Some(gd);
-        }
+    if let Some(h) = head_info(dir, head) {
+        info.branch = Some(h.branch);
+        info.linked_worktree = h.git_dir != h.common_dir;
+        info.repo_name_fallback = h
+            .common_dir
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        git_dir = Some(h.git_dir);
     }
     if let Some(out) = sync {
         let mut parts = out.split_whitespace();
@@ -365,5 +388,37 @@ mod tests {
         std::fs::create_dir(git_dir.join("rebase-merge")).unwrap();
         let info = collect(dir.path());
         assert_eq!(info.state, Some(GitState::Rebase));
+    }
+
+    #[test]
+    fn branch_location_in_repo_and_non_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("myrepo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        assert_eq!(
+            branch_location(&repo),
+            Some(("myrepo".to_string(), "main".to_string()))
+        );
+        let plain = dir.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        assert_eq!(branch_location(&plain), None);
+    }
+
+    #[test]
+    fn branch_location_in_linked_worktree_names_main_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let wt = dir.path().join("wt");
+        git(
+            &repo,
+            &["worktree", "add", wt.to_str().unwrap(), "-b", "feat/x"],
+        );
+        assert_eq!(
+            branch_location(&wt),
+            Some(("repo".to_string(), "feat/x".to_string()))
+        );
     }
 }
