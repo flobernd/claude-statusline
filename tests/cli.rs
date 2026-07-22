@@ -519,6 +519,20 @@ fn subagent_disabled_sections_hide_chips_end_to_end() {
 }
 
 #[test]
+fn subagent_wt_marker_for_isolated_task_cwd() {
+    let home = tempfile::tempdir().unwrap();
+    let payload = r#"{
+        "columns": 200, "cwd": "/home/u/proj",
+        "tasks": [{"id": "t1", "type": "local_agent", "name": "Explore",
+                   "cwd": "/home/u/proj-wt/fix"}]
+    }"#;
+    let out = run_subagent(payload, home.path(), false);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert_eq!(v["content"], "Explore \u{2502} wt");
+}
+
+#[test]
 fn subagent_undecodable_payload_emits_nothing_but_logs() {
     let home = tempfile::tempdir().unwrap();
     let out = run_subagent("{definitely not json", home.path(), false);
