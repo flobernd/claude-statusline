@@ -55,8 +55,8 @@ Optional file `~/.claude/claude-statusline.json`:
 ```
 
 `clickable_links` toggles the OSC 8 hyperlinks. `disabled_sections` hides chips by name:
-`bar`, `context_tokens`, `tokens`, `cache`, `cache_age`, `model`, `effort`, `cwd`,
-`branch`, `git_files`, `git_stash`, `git_sync`, `git_state`, `git_worktree`, `pr`, `worktree`.
+`context_tokens`, `cache`, `cache_age`, `model`, `effort`, `cwd`, `branch`, `git_files`,
+`git_stash`, `git_sync`, `git_state`, `git_worktree`, `pr`, `worktree`.
 
 ## Uninstall
 
