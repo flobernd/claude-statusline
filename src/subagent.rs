@@ -134,6 +134,106 @@ pub fn row_chips(task: &Task, style: &Style, now_ms: i64) -> Vec<(&'static str, 
     out
 }
 
+const SEP: &str = " \u{2502} ";
+const DROP: &[&str] = &["effort", "model", "context_tokens", "elapsed"];
+/// Below this many kept characters a truncated activity is noise.
+const MIN_ACTIVITY: usize = 6;
+
+fn row_width(chips: &[(&'static str, String)], sep_width: usize) -> usize {
+    chips
+        .iter()
+        .map(|(_, r)| crate::fit::visible_width(r))
+        .sum::<usize>()
+        + sep_width * chips.len().saturating_sub(1)
+}
+
+/// Geometry shared by every shrink pass over one row.
+struct RowBudget<'a> {
+    columns: usize,
+    sep_width: usize,
+    style: &'a Style,
+}
+
+/// Shrink one chip's text to recover the overflow, ellipsis-terminated;
+/// the chip is removed instead when it would fall below its minimum.
+fn shrink_chip(
+    chips: &mut Vec<(&'static str, String)>,
+    chip: &'static str,
+    raw: &str,
+    color: crate::theme::Rgb,
+    min_keep: usize,
+    drop_when_short: bool,
+    b: &RowBudget,
+) {
+    let over = row_width(chips, b.sep_width).saturating_sub(b.columns);
+    if over == 0 {
+        return;
+    }
+    let Some(pos) = chips.iter().position(|(n, _)| *n == chip) else {
+        return;
+    };
+    let width = crate::fit::visible_width(&chips[pos].1);
+    let keep = width.saturating_sub(over + 1); // one cell for the ellipsis
+    if keep < min_keep && drop_when_short {
+        chips.remove(pos);
+        return;
+    }
+    let text: String = raw
+        .chars()
+        .take(keep.max(min_keep))
+        .chain(std::iter::once('\u{2026}'))
+        .collect();
+    chips[pos].1 = b.style.paint(&text, color);
+}
+
+pub fn render_row(
+    task: &Task,
+    columns: usize,
+    style: &Style,
+    disabled: &[String],
+    now_ms: i64,
+) -> Option<String> {
+    let chips: Vec<(&'static str, String)> = row_chips(task, style, now_ms)
+        .into_iter()
+        .filter(|(name, _)| !disabled.iter().any(|d| d == name))
+        .collect();
+    if chips.is_empty() {
+        return None;
+    }
+    let sep = style.paint(SEP, COMMENT);
+    let sep_width = crate::fit::visible_width(&sep);
+    let mut chips = crate::fit::fit_line(chips, sep_width, columns, DROP);
+
+    let budget = RowBudget {
+        columns,
+        sep_width,
+        style,
+    };
+    let name = name_text(task);
+    if let Some(a) = activity_text(task, name.as_deref()) {
+        shrink_chip(
+            &mut chips,
+            "activity",
+            &a,
+            COMMENT,
+            MIN_ACTIVITY,
+            true,
+            &budget,
+        );
+    }
+    if let Some(n) = name.as_deref() {
+        shrink_chip(&mut chips, "name", n, CYAN, 1, false, &budget);
+    }
+
+    Some(
+        chips
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect::<Vec<_>>()
+            .join(&sep),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +419,74 @@ mod tests {
     #[test]
     fn empty_task_renders_no_chips() {
         assert!(row_chips(&task("{}"), &PLAIN, 0).is_empty());
+    }
+
+    fn row_at(columns: usize) -> String {
+        render_row(&task(FULL_TASK), columns, &PLAIN, &[], 24_000).unwrap()
+    }
+
+    #[test]
+    fn wide_row_renders_all_chips_joined() {
+        assert_eq!(
+            row_at(81),
+            "Explore \u{2502} Reading the source tree \u{2502} 82K/200K (41%) \u{2502} 23s \u{2502} claude-sonnet-5 \u{2502} high"
+        );
+    }
+
+    #[test]
+    fn chips_drop_in_spec_order_under_pressure() {
+        let r = row_at(80); // forces effort out (74 fits)
+        assert!(
+            !r.contains("high") && r.contains("claude-sonnet-5"),
+            "row: {r}"
+        );
+        let r = row_at(73); // then model (56 fits)
+        assert!(
+            !r.contains("claude-sonnet-5") && r.contains("82K/200K"),
+            "row: {r}"
+        );
+        let r = row_at(55); // then context_tokens (39 fits)
+        assert!(!r.contains("82K/200K") && r.contains("23s"), "row: {r}");
+        let r = row_at(38); // then elapsed (33 fits)
+        assert!(
+            !r.contains("23s") && r.contains("Reading the source tree"),
+            "row: {r}"
+        );
+    }
+
+    #[test]
+    fn activity_truncates_with_ellipsis_then_drops() {
+        let r = row_at(30);
+        assert_eq!(r, "Explore \u{2502} Reading the source \u{2026}");
+        assert_eq!(crate::fit::visible_width(&r), 30);
+        // Fewer than 6 chars would remain: the chip goes instead.
+        assert_eq!(row_at(12), "Explore");
+    }
+
+    #[test]
+    fn name_truncates_as_last_resort_but_never_drops() {
+        let r = render_row(&task(r#"{"name": "Explore"}"#), 5, &PLAIN, &[], 0).unwrap();
+        assert_eq!(r, "Expl\u{2026}");
+    }
+
+    #[test]
+    fn disabled_sections_filter_chips_and_empty_row_is_none() {
+        let disabled = vec!["activity".to_string(), "model".to_string()];
+        let r = render_row(&task(FULL_TASK), 200, &PLAIN, &disabled, 24_000).unwrap();
+        assert!(!r.contains("Reading") && !r.contains("claude-sonnet-5"));
+        assert!(r.contains("Explore") && r.contains("82K/200K"));
+
+        let all: Vec<String> = [
+            "name",
+            "activity",
+            "context_tokens",
+            "elapsed",
+            "model",
+            "effort",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert!(render_row(&task(FULL_TASK), 200, &PLAIN, &all, 24_000).is_none());
     }
 }
