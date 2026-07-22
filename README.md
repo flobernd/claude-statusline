@@ -53,9 +53,9 @@ row per running agent task in the agent panel:
 Explore │ Searching for callers │ 82K/200K (41%) │ 1m23s │ claude-sonnet-5
 ```
 
-Rows adapt to the panel width, dropping chips before shortening the activity
-text. On Claude Code versions without per-task model data the metric chips
-hide and rows fall back to name, activity, and elapsed time. For a
+Rows adapt to the panel width, shortening and then hiding the activity text
+before dropping chips. On Claude Code versions without per-task model data
+the metric chips hide and rows fall back to name, activity, and elapsed time. For a
 non-interactive install use `--install --with-subagent-statusline`.
 
 ## Configuration

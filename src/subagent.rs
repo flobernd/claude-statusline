@@ -192,7 +192,7 @@ pub fn render_row(
     disabled: &[String],
     now_ms: i64,
 ) -> Option<String> {
-    let chips: Vec<(&'static str, String)> = row_chips(task, style, now_ms)
+    let mut chips: Vec<(&'static str, String)> = row_chips(task, style, now_ms)
         .into_iter()
         .filter(|(name, _)| !disabled.iter().any(|d| d == name))
         .collect();
@@ -201,13 +201,14 @@ pub fn render_row(
     }
     let sep = style.paint(SEP, COMMENT);
     let sep_width = crate::fit::visible_width(&sep);
-    let mut chips = crate::fit::fit_line(chips, sep_width, columns, DROP);
-
     let budget = RowBudget {
         columns,
         sep_width,
         style,
     };
+
+    // The activity text is the first thing to give way: it shrinks to its
+    // floor and then disappears before any metric chip is touched.
     let name = name_text(task);
     if let Some(a) = activity_text(task, name.as_deref()) {
         shrink_chip(
@@ -220,6 +221,8 @@ pub fn render_row(
             &budget,
         );
     }
+    let mut chips = crate::fit::fit_line(chips, sep_width, columns, DROP);
+
     if let Some(n) = name.as_deref() {
         shrink_chip(&mut chips, "name", n, WHITE, 1, false, &budget);
     }
@@ -512,33 +515,41 @@ mod tests {
     }
 
     #[test]
-    fn chips_drop_in_spec_order_under_pressure() {
-        let r = row_at(80); // forces effort out (74 fits)
-        assert!(
-            !r.contains("high") && r.contains("claude-sonnet-5"),
-            "row: {r}"
+    fn activity_gives_way_before_any_chip() {
+        // One cell over: the activity shrinks, every chip stays.
+        let r = row_at(80);
+        assert!(r.contains('\u{2026}') && r.contains("high"), "row: {r}");
+        assert_eq!(crate::fit::visible_width(&r), 80);
+        // At its 6-char floor the chips are still intact.
+        let r = row_at(65);
+        assert_eq!(
+            r,
+            "Explore \u{2502} Readin\u{2026} \u{2502} 82K/200K (41%) \u{2502} 23s \u{2502} claude-sonnet-5 \u{2502} high"
         );
-        let r = row_at(73); // then model (56 fits)
-        assert!(
-            !r.contains("claude-sonnet-5") && r.contains("82K/200K"),
-            "row: {r}"
-        );
-        let r = row_at(55); // then context_tokens (39 fits)
-        assert!(!r.contains("82K/200K") && r.contains("23s"), "row: {r}");
-        let r = row_at(38); // then elapsed (33 fits)
-        assert!(
-            !r.contains("23s") && r.contains("Reading the source tree"),
-            "row: {r}"
+        // Below the floor the whole activity chip goes before any metric.
+        let r = row_at(64);
+        assert_eq!(
+            r,
+            "Explore \u{2502} 82K/200K (41%) \u{2502} 23s \u{2502} claude-sonnet-5 \u{2502} high"
         );
     }
 
     #[test]
-    fn activity_truncates_with_ellipsis_then_drops() {
-        let r = row_at(30);
-        assert_eq!(r, "Explore \u{2502} Reading the source \u{2026}");
-        assert_eq!(crate::fit::visible_width(&r), 30);
-        // Fewer than 6 chars would remain: the chip goes instead.
-        assert_eq!(row_at(12), "Explore");
+    fn chips_drop_in_spec_order_after_activity() {
+        let r = row_at(54); // effort drops once the activity is gone (48 fits)
+        assert!(
+            !r.contains("high") && r.contains("claude-sonnet-5"),
+            "row: {r}"
+        );
+        let r = row_at(47); // then model (30 fits)
+        assert!(
+            !r.contains("claude-sonnet-5") && r.contains("82K/200K"),
+            "row: {r}"
+        );
+        let r = row_at(29); // then context_tokens (13 fits)
+        assert!(!r.contains("82K/200K") && r.contains("23s"), "row: {r}");
+        let r = row_at(12); // then elapsed (7 fits)
+        assert_eq!(r, "Explore");
     }
 
     #[test]

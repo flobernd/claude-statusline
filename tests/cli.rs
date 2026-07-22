@@ -497,11 +497,9 @@ fn subagent_payload_columns_bound_each_row() {
     let out = run_subagent(&narrow, home.path(), false);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let v: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    // At 30 columns the activity goes first, then the model chip.
     let content = v["content"].as_str().unwrap();
-    assert!(!content.contains("claude-sonnet-5"), "content: {content}");
-    assert!(!content.contains("82K"), "content: {content}");
-    assert!(content.contains('\u{2026}'), "content: {content}");
-    assert!(content.chars().count() <= 30, "content: {content}");
+    assert_eq!(content, "Explore \u{2502} 82K/200K (41%)");
 }
 
 #[test]
