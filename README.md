@@ -83,8 +83,8 @@ Optional file `~/.claude/claude-statusline.json`:
 claude-statusline --uninstall
 ```
 
-This removes the `statusLine` entry and restores the previous configuration when a backup
-exists.
+This removes the `statusLine` and `subagentStatusLine` entries installed by claude-statusline
+and restores the previous configuration when a backup exists.
 
 ## License
 

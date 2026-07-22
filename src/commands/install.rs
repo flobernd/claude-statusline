@@ -22,7 +22,7 @@ pub fn install(with_subagent: bool) -> Result<()> {
                 .map(super::print_config::is_our_command)
         };
         let current_is_ours = entry_is_ours("statusLine") == Some(true)
-            && entry_is_ours("subagentStatusLine").unwrap_or(true);
+            && (!with_subagent || entry_is_ours("subagentStatusLine").unwrap_or(true));
         if !current_is_ours && let Err(e) = std::fs::copy(&path, bak_path(&path)) {
             eprintln!("Warning: could not create backup: {e}");
         }
@@ -74,22 +74,36 @@ pub fn uninstall() -> Result<()> {
     let Some(Value::Object(mut settings)) = parsed else {
         anyhow::bail!("could not read {}", path.display());
     };
-    if !settings.contains_key("statusLine") && !settings.contains_key("subagentStatusLine") {
-        println!("claude-statusline is not installed (no statusLine in settings).");
+
+    let entry_is_ours = |settings: &Map<String, Value>, key: &str| {
+        settings
+            .get(key)
+            .and_then(|sl| sl.get("command"))
+            .and_then(|c| c.as_str())
+            .is_some_and(super::print_config::is_our_command)
+    };
+    // Only take an entry that is ours: a foreign statusLine/subagentStatusLine
+    // written by another tool must survive uninstall untouched.
+    let mut removed: Vec<(&str, Value)> = Vec::new();
+    for key in ["statusLine", "subagentStatusLine"] {
+        if entry_is_ours(&settings, key)
+            && let Some(value) = settings.remove(key)
+        {
+            removed.push((key, value));
+        }
+    }
+    if removed.is_empty() {
+        println!("claude-statusline is not installed (no claude-statusline entries in settings).");
         return Ok(());
     }
 
-    let removed = [
-        ("statusLine", settings.remove("statusLine")),
-        ("subagentStatusLine", settings.remove("subagentStatusLine")),
-    ];
     let backup: Option<Value> = std::fs::read_to_string(bak_path(&path))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
     let mut restored = false;
     for (key, removed_entry) in removed {
         if let Some(previous) = backup.as_ref().and_then(|v| v.get(key).cloned())
-            && Some(&previous) != removed_entry.as_ref()
+            && previous != removed_entry
         {
             // Never resurrect our own stale entry: a backup written by an
             // earlier claude-statusline install is not the user's original
