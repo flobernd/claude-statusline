@@ -525,3 +525,76 @@ fn subagent_undecodable_payload_emits_nothing_but_logs() {
     assert!(out.stdout.is_empty());
     assert!(!out.stderr.is_empty());
 }
+
+#[test]
+fn install_with_subagent_writes_both_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let out = run_with_settings(&["--install", "--with-subagent-statusline"], &path);
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(
+        v["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("claude-statusline")
+    );
+    let sub = &v["subagentStatusLine"];
+    assert_eq!(sub["type"], "command");
+    assert_eq!(sub["refreshInterval"], 5);
+    let cmd = sub["command"].as_str().unwrap();
+    assert!(cmd.contains("claude-statusline"));
+    assert!(cmd.ends_with(" --subagent-statusline"), "command: {cmd}");
+}
+
+#[test]
+fn plain_install_leaves_foreign_subagent_entry_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{"subagentStatusLine": {"type": "command", "command": "other-tool"}}"#,
+    )
+    .unwrap();
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(v["subagentStatusLine"]["command"], "other-tool");
+}
+
+#[test]
+fn uninstall_removes_subagent_entry_and_restores_foreign_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{"subagentStatusLine": {"type": "command", "command": "other-sub"}}"#,
+    )
+    .unwrap();
+    assert!(
+        run_with_settings(&["--install", "--with-subagent-statusline"], &path)
+            .status
+            .success()
+    );
+    assert!(run_with_settings(&["--uninstall"], &path).status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(v["subagentStatusLine"]["command"], "other-sub");
+    assert!(v.get("statusLine").is_none());
+}
+
+#[test]
+fn print_config_reports_subagent_entry() {
+    let (out, _dir) = print_config(Some(
+        r#"{"subagentStatusLine": {"type": "command", "command": "/opt/claude-statusline --subagent-statusline", "refreshInterval": 5}}"#,
+    ));
+    // Exit code stays keyed to the main entry, which is absent here.
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("subagent_installed=true"));
+    assert!(stdout.contains("subagent_command=/opt/claude-statusline --subagent-statusline"));
+    assert!(stdout.contains("subagent_type=command"));
+    assert!(stdout.contains("subagent_refreshInterval=5"));
+    assert!(stdout.contains("installed=false"));
+}

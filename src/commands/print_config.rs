@@ -6,6 +6,10 @@ pub fn run() -> i32 {
     let mut command = String::new();
     let mut sl_type = String::new();
     let mut refresh = String::new();
+    let mut sub_installed = false;
+    let mut sub_command = String::new();
+    let mut sub_type = String::new();
+    let mut sub_refresh = String::new();
     let mut state = "missing";
 
     if path.exists() {
@@ -15,26 +19,32 @@ pub fn run() -> i32 {
         {
             Some(v) => {
                 state = "ok";
-                if let Some(sl) = v.get("statusLine").and_then(|s| s.as_object()) {
-                    sl_type = sl
+                let read_entry = |key: &str| {
+                    let Some(sl) = v.get(key).and_then(|s| s.as_object()) else {
+                        return (String::new(), String::new(), String::new(), false);
+                    };
+                    let sl_type = sl
                         .get("type")
                         .and_then(|t| t.as_str())
                         .unwrap_or("")
                         .to_string();
-                    command = sl
+                    let command = sl
                         .get("command")
                         .and_then(|c| c.as_str())
                         .unwrap_or("")
                         .to_string();
-                    if let Some(r) = sl
+                    let refresh = sl
                         .get("refreshInterval")
                         .and_then(|r| r.as_f64())
                         .filter(|r| *r >= 0.0)
-                    {
-                        refresh = (r as u64).to_string();
-                    }
-                    installed = is_our_command(&command);
-                }
+                        .map(|r| (r as u64).to_string())
+                        .unwrap_or_default();
+                    let installed = is_our_command(&command);
+                    (command, sl_type, refresh, installed)
+                };
+                (command, sl_type, refresh, installed) = read_entry("statusLine");
+                (sub_command, sub_type, sub_refresh, sub_installed) =
+                    read_entry("subagentStatusLine");
             }
             None => state = "unreadable",
         }
@@ -50,6 +60,10 @@ pub fn run() -> i32 {
     println!("version={}", env!("CARGO_PKG_VERSION"));
     println!("settings_path={}", clean(&path.display().to_string()));
     println!("settings_state={state}");
+    println!("subagent_installed={sub_installed}");
+    println!("subagent_command={}", clean(&sub_command));
+    println!("subagent_type={}", clean(&sub_type));
+    println!("subagent_refreshInterval={sub_refresh}");
 
     if state == "unreadable" {
         2

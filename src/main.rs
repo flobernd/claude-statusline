@@ -34,6 +34,9 @@ struct Cli {
     /// Render per-task rows for Claude Code's subagentStatusLine hook
     #[arg(long = "subagent-statusline")]
     subagent_statusline: bool,
+    /// With --install: also write the subagentStatusLine entry
+    #[arg(long = "with-subagent-statusline")]
+    with_subagent_statusline: bool,
 }
 
 const LINE1_DROP: &[&str] = &["cache", "cache_age", "effort"];
@@ -55,7 +58,7 @@ fn main() {
         std::process::exit(commands::print_config::run());
     }
     if cli.install {
-        if let Err(e) = commands::install::install() {
+        if let Err(e) = commands::install::install(cli.with_subagent_statusline) {
             eprintln!("claude-statusline: install failed: {e}");
             std::process::exit(1);
         }

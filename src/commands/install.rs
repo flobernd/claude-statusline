@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
-pub fn install() -> Result<()> {
+pub fn install(with_subagent: bool) -> Result<()> {
     let path = super::settings_path();
     let mut settings = Map::new();
     if path.exists() {
@@ -11,14 +11,18 @@ pub fn install() -> Result<()> {
             .and_then(|t| serde_json::from_str::<Value>(&t).ok());
 
         // The .bak must hold the user's pre-install state, not our own
-        // previous entry: skip it when the current statusLine is already
-        // ours, so reinstalling never clobbers a genuine backup.
-        let current_is_ours = parsed
-            .as_ref()
-            .and_then(|v| v.get("statusLine"))
-            .and_then(|sl| sl.get("command"))
-            .and_then(|c| c.as_str())
-            .is_some_and(super::print_config::is_our_command);
+        // previous entries: skip it only when everything we may overwrite
+        // is already ours.
+        let entry_is_ours = |key: &str| {
+            parsed
+                .as_ref()
+                .and_then(|v| v.get(key))
+                .and_then(|sl| sl.get("command"))
+                .and_then(|c| c.as_str())
+                .map(super::print_config::is_our_command)
+        };
+        let current_is_ours = entry_is_ours("statusLine") == Some(true)
+            && entry_is_ours("subagentStatusLine").unwrap_or(true);
         if !current_is_ours && let Err(e) = std::fs::copy(&path, bak_path(&path)) {
             eprintln!("Warning: could not create backup: {e}");
         }
@@ -41,6 +45,16 @@ pub fn install() -> Result<()> {
         "statusLine".to_string(),
         json!({"type": "command", "command": command_string(&exe), "refreshInterval": 10}),
     );
+    if with_subagent {
+        settings.insert(
+            "subagentStatusLine".to_string(),
+            json!({
+                "type": "command",
+                "command": format!("{} --subagent-statusline", command_string(&exe)),
+                "refreshInterval": 5
+            }),
+        );
+    }
     write_atomic(&path, &Value::Object(settings))?;
 
     println!("Installed claude-statusline into {}", path.display());
@@ -60,29 +74,34 @@ pub fn uninstall() -> Result<()> {
     let Some(Value::Object(mut settings)) = parsed else {
         anyhow::bail!("could not read {}", path.display());
     };
-    if !settings.contains_key("statusLine") {
+    if !settings.contains_key("statusLine") && !settings.contains_key("subagentStatusLine") {
         println!("claude-statusline is not installed (no statusLine in settings).");
         return Ok(());
     }
 
-    let removed = settings.remove("statusLine");
-    let mut restored = false;
-    if let Some(previous) = std::fs::read_to_string(bak_path(&path))
+    let removed = [
+        ("statusLine", settings.remove("statusLine")),
+        ("subagentStatusLine", settings.remove("subagentStatusLine")),
+    ];
+    let backup: Option<Value> = std::fs::read_to_string(bak_path(&path))
         .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| v.get("statusLine").cloned())
-        && Some(&previous) != removed.as_ref()
-    {
-        // Never resurrect our own stale entry: a backup written by an
-        // earlier claude-statusline install is not the user's original
-        // config.
-        let previous_is_ours = previous
-            .get("command")
-            .and_then(|c| c.as_str())
-            .is_some_and(super::print_config::is_our_command);
-        if !previous_is_ours {
-            settings.insert("statusLine".to_string(), previous);
-            restored = true;
+        .and_then(|t| serde_json::from_str(&t).ok());
+    let mut restored = false;
+    for (key, removed_entry) in removed {
+        if let Some(previous) = backup.as_ref().and_then(|v| v.get(key).cloned())
+            && Some(&previous) != removed_entry.as_ref()
+        {
+            // Never resurrect our own stale entry: a backup written by an
+            // earlier claude-statusline install is not the user's original
+            // config.
+            let previous_is_ours = previous
+                .get("command")
+                .and_then(|c| c.as_str())
+                .is_some_and(super::print_config::is_our_command);
+            if !previous_is_ours {
+                settings.insert(key.to_string(), previous);
+                restored = true;
+            }
         }
     }
     write_atomic(&path, &Value::Object(settings))?;

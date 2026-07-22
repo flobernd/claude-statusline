@@ -35,7 +35,7 @@ pub fn run() -> Result<()> {
     }
 
     println!();
-    super::install::install()?;
+    super::install::install(false)?;
     println!();
     println!("Setup complete.");
     println!("Uninstall any time with: claude-statusline --uninstall");
