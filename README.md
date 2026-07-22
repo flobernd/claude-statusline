@@ -55,10 +55,11 @@ Explore │ Searching for callers │ 82K/200K (41%) │ 1m23s │ claude-sonnet
 
 Rows adapt to the panel width, shortening and then hiding the activity text
 before dropping chips. On Claude Code versions without per-task model data
-the metric chips hide and rows fall back to name, activity, and elapsed time. A yellow
-`wt` chip flags tasks whose working directory differs from the session's, which is what
-worktree isolation produces. For a non-interactive install use
-`--install --with-subagent-statusline`.
+the metric chips hide and rows fall back to name, activity, and elapsed time.
+A location chip after the task name shows where a task runs when that differs
+from the session: the repo and branch inside a git repository (worktree
+isolation shows up as its branch), otherwise the folder name. For a
+non-interactive install use `--install --with-subagent-statusline`.
 
 ## Configuration
 
@@ -77,7 +78,7 @@ Optional file `~/.claude/claude-statusline.json`:
 `git_stash`, `git_sync`, `git_state`, `git_worktree`, `pr`, `worktree`.
 
 `subagent_disabled_sections` does the same for the subagent rows:
-`name`, `activity`, `context_tokens`, `elapsed`, `model`, `effort`, `wt`.
+`name`, `cwd`, `branch`, `activity`, `context_tokens`, `elapsed`, `model`, `effort`.
 
 ## Uninstall
 

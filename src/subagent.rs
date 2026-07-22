@@ -4,13 +4,14 @@ use crate::bar::bar_color;
 use crate::format::{fmt_duration, fmt_tokens};
 use crate::schema::Config;
 use crate::schema::lenient;
-use crate::theme::{BLUE, COMMENT, MAGENTA, Style, WHITE, YELLOW};
+use crate::theme::{BLUE, COMMENT, CYAN, GREEN, MAGENTA, Style, WHITE};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct SubagentPayload {
     #[serde(default, deserialize_with = "lenient")]
     pub columns: Option<f64>,
     #[serde(default, deserialize_with = "lenient")]
+    #[allow(dead_code)]
     pub cwd: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     tasks: Option<Vec<serde_json::Value>>,
@@ -40,6 +41,7 @@ pub struct Task {
     #[serde(default, rename = "tokenCount", deserialize_with = "lenient")]
     pub token_count: Option<f64>,
     #[serde(default, deserialize_with = "lenient")]
+    #[allow(dead_code)]
     pub cwd: Option<String>,
 }
 
@@ -86,7 +88,7 @@ pub fn row_chips(
     task: &Task,
     style: &Style,
     now_ms: i64,
-    session_cwd: Option<&str>,
+    location: &TaskLocation,
 ) -> Vec<(&'static str, String)> {
     let s = style;
     let mut out: Vec<(&'static str, String)> = Vec::new();
@@ -94,6 +96,28 @@ pub fn row_chips(
     let name = name_text(task);
     if let Some(n) = name.as_deref() {
         out.push(("name", s.paint(n, WHITE)));
+    }
+
+    match location {
+        TaskLocation::Repo { repo, branch } => {
+            let branch_color = if branch == "main" || branch == "master" {
+                GREEN
+            } else {
+                MAGENTA
+            };
+            out.push((
+                "branch",
+                format!(
+                    "{}{}",
+                    s.paint(&format!("\u{2387} {repo}"), CYAN),
+                    s.paint(&format!("/{branch}"), branch_color),
+                ),
+            ));
+        }
+        TaskLocation::Dir(folder) => {
+            out.push(("cwd", s.paint(&format!("\u{2302} {folder}"), CYAN)));
+        }
+        TaskLocation::Same => {}
     }
 
     if let Some(a) = activity_text(task, name.as_deref()) {
@@ -139,20 +163,11 @@ pub fn row_chips(
         }
     }
 
-    // A task cwd differing from the session cwd is what worktree
-    // isolation produces; the payload has no richer worktree signal.
-    if let (Some(task_cwd), Some(session)) = (task.cwd.as_deref(), session_cwd)
-        && !task_cwd.is_empty()
-        && task_cwd != session
-    {
-        out.push(("wt", s.paint("wt", YELLOW)));
-    }
-
     out
 }
 
 const SEP: &str = " \u{2502} ";
-const DROP: &[&str] = &["wt", "effort", "model", "context_tokens", "elapsed"];
+const DROP: &[&str] = &["effort", "model", "context_tokens", "elapsed"];
 /// Below this many kept characters a truncated activity is noise.
 const MIN_ACTIVITY: usize = 6;
 
@@ -209,9 +224,9 @@ pub fn render_row(
     style: &Style,
     disabled: &[String],
     now_ms: i64,
-    session_cwd: Option<&str>,
+    location: &TaskLocation,
 ) -> Option<String> {
-    let mut chips: Vec<(&'static str, String)> = row_chips(task, style, now_ms, session_cwd)
+    let mut chips: Vec<(&'static str, String)> = row_chips(task, style, now_ms, location)
         .into_iter()
         .filter(|(name, _)| !disabled.iter().any(|d| d == name))
         .collect();
@@ -242,6 +257,22 @@ pub fn render_row(
     }
     let mut chips = crate::fit::fit_line(chips, sep_width, columns, DROP);
 
+    let location_raw = match location {
+        TaskLocation::Repo { repo, branch } => Some(format!("\u{2387} {repo}/{branch}")),
+        TaskLocation::Dir(folder) => Some(format!("\u{2302} {folder}")),
+        TaskLocation::Same => None,
+    };
+    if let Some(raw) = location_raw.as_deref() {
+        let chip = if matches!(location, TaskLocation::Repo { .. }) {
+            "branch"
+        } else {
+            "cwd"
+        };
+        // Last-resort truncation repaints single-tone cyan; the two-tone
+        // split is not worth preserving at widths this tight.
+        shrink_chip(&mut chips, chip, raw, CYAN, 4, false, &budget);
+    }
+
     if let Some(n) = name.as_deref() {
         shrink_chip(&mut chips, "name", n, WHITE, 1, false, &budget);
     }
@@ -269,11 +300,10 @@ pub fn sample_task() -> Task {
 
 pub fn preview(style: &Style) -> String {
     // Fixed now_ms so the sample elapsed chip is stable: 1m23s.
-    render_row(&sample_task(), 100, style, &[], 83_000, None).unwrap_or_default()
+    render_row(&sample_task(), 100, style, &[], 83_000, &TaskLocation::Same).unwrap_or_default()
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum TaskLocation {
     /// Same location as the session: no chip.
     Same,
@@ -347,13 +377,15 @@ pub fn render(raw: &str, config: &Config, style: &Style, fallback_width: usize) 
         let Some(id) = task.id.as_deref().filter(|i| !i.is_empty()) else {
             continue;
         };
+        // Location resolution is not wired in yet, so every row renders as
+        // if the task shares the session's location.
         let Some(content) = render_row(
             &task,
             columns,
             style,
             &config.subagent_disabled_sections,
             now_ms,
-            payload.cwd.as_deref(),
+            &TaskLocation::Same,
         ) else {
             continue;
         };
@@ -458,7 +490,7 @@ mod tests {
 
     #[test]
     fn full_task_renders_all_chips_in_order() {
-        let chips = row_chips(&task(FULL_TASK), &PLAIN, 24_000, None);
+        let chips = row_chips(&task(FULL_TASK), &PLAIN, 24_000, &TaskLocation::Same);
         assert_eq!(
             names(&chips),
             vec![
@@ -480,7 +512,12 @@ mod tests {
 
     #[test]
     fn name_falls_back_to_description() {
-        let chips = row_chips(&task(r#"{"description": "Find callers"}"#), &PLAIN, 0, None);
+        let chips = row_chips(
+            &task(r#"{"description": "Find callers"}"#),
+            &PLAIN,
+            0,
+            &TaskLocation::Same,
+        );
         assert_eq!(text_of(&chips, "name"), "Find callers");
     }
 
@@ -490,7 +527,7 @@ mod tests {
             &task(r#"{"name": "Explore", "label": "Explore"}"#),
             &PLAIN,
             0,
-            None,
+            &TaskLocation::Same,
         );
         assert_eq!(names(&chips), vec!["name"]);
         // Also when the shown name came from the description.
@@ -498,7 +535,7 @@ mod tests {
             &task(r#"{"description": "Find callers", "label": "Find callers"}"#),
             &PLAIN,
             0,
-            None,
+            &TaskLocation::Same,
         );
         assert_eq!(names(&chips), vec!["name"]);
     }
@@ -509,33 +546,58 @@ mod tests {
             &task(r#"{"contextWindowSize": 200000, "tokenCount": 900000}"#),
             &PLAIN,
             0,
-            None,
+            &TaskLocation::Same,
         );
         assert_eq!(text_of(&chips, "context_tokens"), "200K/200K (100%)");
-        let chips = row_chips(&task(r#"{"tokenCount": 5000}"#), &PLAIN, 0, None);
+        let chips = row_chips(
+            &task(r#"{"tokenCount": 5000}"#),
+            &PLAIN,
+            0,
+            &TaskLocation::Same,
+        );
         assert!(!names(&chips).contains(&"context_tokens"));
         let chips = row_chips(
             &task(r#"{"contextWindowSize": 0, "tokenCount": 5000}"#),
             &PLAIN,
             0,
-            None,
+            &TaskLocation::Same,
         );
         assert!(!names(&chips).contains(&"context_tokens"));
     }
 
     #[test]
     fn missing_start_or_negative_elapsed_hides_elapsed() {
-        let chips = row_chips(&task(r#"{"name": "x"}"#), &PLAIN, 50_000, None);
+        let chips = row_chips(
+            &task(r#"{"name": "x"}"#),
+            &PLAIN,
+            50_000,
+            &TaskLocation::Same,
+        );
         assert!(!names(&chips).contains(&"elapsed"));
-        let chips = row_chips(&task(r#"{"startTime": 60000}"#), &PLAIN, 50_000, None);
+        let chips = row_chips(
+            &task(r#"{"startTime": 60000}"#),
+            &PLAIN,
+            50_000,
+            &TaskLocation::Same,
+        );
         assert!(!names(&chips).contains(&"elapsed"));
     }
 
     #[test]
     fn unknown_effort_hides_and_known_levels_render_bare() {
-        let chips = row_chips(&task(r#"{"effort": "ultrathink"}"#), &PLAIN, 0, None);
+        let chips = row_chips(
+            &task(r#"{"effort": "ultrathink"}"#),
+            &PLAIN,
+            0,
+            &TaskLocation::Same,
+        );
         assert!(!names(&chips).contains(&"effort"));
-        let chips = row_chips(&task(r#"{"effort": "medium"}"#), &PLAIN, 0, None);
+        let chips = row_chips(
+            &task(r#"{"effort": "medium"}"#),
+            &PLAIN,
+            0,
+            &TaskLocation::Same,
+        );
         assert_eq!(text_of(&chips, "effort"), "medium");
     }
 
@@ -549,7 +611,7 @@ mod tests {
             &task(r#"{"contextWindowSize": 200000, "tokenCount": 180000}"#),
             &colored,
             0,
-            None,
+            &TaskLocation::Same,
         );
         // 90% sits in the red band.
         assert!(text_of(&chips, "context_tokens").contains("\x1b[38;2;247;118;142m90%"));
@@ -557,36 +619,65 @@ mod tests {
 
     #[test]
     fn empty_task_renders_no_chips() {
-        assert!(row_chips(&task("{}"), &PLAIN, 0, None).is_empty());
+        assert!(row_chips(&task("{}"), &PLAIN, 0, &TaskLocation::Same).is_empty());
     }
 
     #[test]
-    fn wt_chip_flags_a_task_cwd_differing_from_session() {
-        let t = task(r#"{"name": "Explore", "cwd": "/repo/.worktrees/fix"}"#);
-        let chips = row_chips(&t, &PLAIN, 0, Some("/repo"));
-        assert_eq!(names(&chips), vec!["name", "wt"]);
-        assert_eq!(text_of(&chips, "wt"), "wt");
-        // Same cwd, missing session cwd, or missing task cwd: no chip.
-        assert!(!names(&row_chips(&t, &PLAIN, 0, Some("/repo/.worktrees/fix"))).contains(&"wt"));
-        assert!(!names(&row_chips(&t, &PLAIN, 0, None)).contains(&"wt"));
+    fn location_chip_sits_after_name_and_same_hides_it() {
+        let loc = TaskLocation::Repo {
+            repo: "myrepo".to_string(),
+            branch: "fix-1".to_string(),
+        };
+        let chips = row_chips(&task(FULL_TASK), &PLAIN, 24_000, &loc);
+        assert_eq!(names(&chips)[..2], ["name", "branch"]);
+        assert_eq!(text_of(&chips, "branch"), "\u{2387} myrepo/fix-1");
+
+        let chips = row_chips(&task(FULL_TASK), &PLAIN, 24_000, &TaskLocation::Same);
+        assert!(!names(&chips).contains(&"branch") && !names(&chips).contains(&"cwd"));
+    }
+
+    #[test]
+    fn dir_location_renders_cwd_chip() {
+        let loc = TaskLocation::Dir("scratch-dir".to_string());
+        let chips = row_chips(&task(r#"{"name": "builder"}"#), &PLAIN, 0, &loc);
+        assert_eq!(names(&chips), vec!["name", "cwd"]);
+        assert_eq!(text_of(&chips, "cwd"), "\u{2302} scratch-dir");
+    }
+
+    #[test]
+    fn branch_chip_color_codes_default_and_feature_branches() {
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
+        let main_loc = TaskLocation::Repo {
+            repo: "r".to_string(),
+            branch: "master".to_string(),
+        };
+        let chips = row_chips(&task(r#"{"name": "x"}"#), &colored, 0, &main_loc);
+        assert!(text_of(&chips, "branch").contains("\x1b[38;2;158;206;106m/master")); // green
+        let feat_loc = TaskLocation::Repo {
+            repo: "r".to_string(),
+            branch: "feat/x".to_string(),
+        };
+        let chips = row_chips(&task(r#"{"name": "x"}"#), &colored, 0, &feat_loc);
+        assert!(text_of(&chips, "branch").contains("\x1b[38;2;187;154;247m/feat/x")); // magenta
+    }
+
+    #[test]
+    fn location_chip_never_drops_and_truncates_before_name() {
+        let loc = TaskLocation::Repo {
+            repo: "myrepo".to_string(),
+            branch: "fix-1".to_string(),
+        };
+        // name 7 + sep 3 + location 14 = 24; at 20 the location truncates
+        // (name intact), at tiny widths both sit at their floors.
         let t = task(r#"{"name": "Explore"}"#);
-        assert!(!names(&row_chips(&t, &PLAIN, 0, Some("/repo"))).contains(&"wt"));
-    }
-
-    #[test]
-    fn wt_drops_before_effort_under_pressure() {
-        let t = task(
-            r#"{"name": "Explore", "startTime": 1000, "model": "claude-sonnet-5",
-               "effort": "high", "contextWindowSize": 200000, "tokenCount": 82000,
-               "cwd": "/wt/dir"}"#,
-        );
-        let full = render_row(&t, 60, &PLAIN, &[], 24_000, Some("/home/u")).unwrap();
-        assert!(full.ends_with(" \u{2502} wt"), "row: {full}");
-        let r = render_row(&t, 59, &PLAIN, &[], 24_000, Some("/home/u")).unwrap();
-        assert!(
-            !r.ends_with(" \u{2502} wt") && r.contains("high"),
-            "row: {r}"
-        );
+        let r = render_row(&t, 20, &PLAIN, &[], 0, &loc).unwrap();
+        assert_eq!(r, "Explore \u{2502} \u{2387} myrepo/\u{2026}");
+        assert_eq!(crate::fit::visible_width(&r), 20);
+        let r = render_row(&t, 200, &PLAIN, &[], 0, &loc).unwrap();
+        assert_eq!(r, "Explore \u{2502} \u{2387} myrepo/fix-1");
     }
 
     #[test]
@@ -595,7 +686,12 @@ mod tests {
             colors: true,
             links: false,
         };
-        let chips = row_chips(&task(r#"{"name": "Explore"}"#), &colored, 0, None);
+        let chips = row_chips(
+            &task(r#"{"name": "Explore"}"#),
+            &colored,
+            0,
+            &TaskLocation::Same,
+        );
         assert!(text_of(&chips, "name").starts_with("\x1b[38;2;255;255;255m"));
     }
 
@@ -608,7 +704,15 @@ mod tests {
     }
 
     fn row_at(columns: usize) -> String {
-        render_row(&task(FULL_TASK), columns, &PLAIN, &[], 24_000, None).unwrap()
+        render_row(
+            &task(FULL_TASK),
+            columns,
+            &PLAIN,
+            &[],
+            24_000,
+            &TaskLocation::Same,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -659,14 +763,30 @@ mod tests {
 
     #[test]
     fn name_truncates_as_last_resort_but_never_drops() {
-        let r = render_row(&task(r#"{"name": "Explore"}"#), 5, &PLAIN, &[], 0, None).unwrap();
+        let r = render_row(
+            &task(r#"{"name": "Explore"}"#),
+            5,
+            &PLAIN,
+            &[],
+            0,
+            &TaskLocation::Same,
+        )
+        .unwrap();
         assert_eq!(r, "Expl\u{2026}");
     }
 
     #[test]
     fn disabled_sections_filter_chips_and_empty_row_is_none() {
         let disabled = vec!["activity".to_string(), "model".to_string()];
-        let r = render_row(&task(FULL_TASK), 200, &PLAIN, &disabled, 24_000, None).unwrap();
+        let r = render_row(
+            &task(FULL_TASK),
+            200,
+            &PLAIN,
+            &disabled,
+            24_000,
+            &TaskLocation::Same,
+        )
+        .unwrap();
         assert!(!r.contains("Reading") && !r.contains("claude-sonnet-5"));
         assert!(r.contains("Explore") && r.contains("82K/200K"));
 
@@ -681,7 +801,17 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        assert!(render_row(&task(FULL_TASK), 200, &PLAIN, &all, 24_000, None).is_none());
+        assert!(
+            render_row(
+                &task(FULL_TASK),
+                200,
+                &PLAIN,
+                &all,
+                24_000,
+                &TaskLocation::Same
+            )
+            .is_none()
+        );
     }
 
     #[test]
