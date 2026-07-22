@@ -23,11 +23,14 @@ git status, and pull request context on the second.
 - Clickable branch and pull request chips (OSC 8 hyperlinks, on by default)
 - Width-aware: adapts to the terminal width reported by Claude Code, dropping the least
   important chips first
+- Optional subagent status line: while agent tasks run, one row per task with
+  name, live activity, context usage, elapsed time, and model
 - Single native binary; renders in a few milliseconds with no caches or background processes
 
 ## Requirements
 
-- Claude Code 2.1.153 or newer
+- Claude Code 2.1.153 or newer; the per-task model and context fields of the
+  subagent status line need 2.1.205 or newer
 - `git` on PATH for the repository chips
 - A Rust toolchain to build (no runtime dependencies)
 
@@ -43,6 +46,18 @@ seconds, which keeps the cache-age chip live) into `~/.claude/settings.json`, ba
 previous configuration. Restart Claude Code afterwards. For a non-interactive install use
 `--install`; check the result with `--print-config`.
 
+The wizard also offers the optional subagent status line, which renders one
+row per running agent task in the agent panel:
+
+```text
+Explore │ Searching for callers │ 82K/200K (41%) │ 1m23s │ claude-sonnet-5
+```
+
+Rows adapt to the panel width, dropping chips before shortening the activity
+text. On Claude Code versions without per-task model data the metric chips
+hide and rows fall back to name, activity, and elapsed time. For a
+non-interactive install use `--install --with-subagent-statusline`.
+
 ## Configuration
 
 Optional file `~/.claude/claude-statusline.json`:
@@ -50,13 +65,17 @@ Optional file `~/.claude/claude-statusline.json`:
 ```json
 {
   "clickable_links": true,
-  "disabled_sections": ["cache_age"]
+  "disabled_sections": ["cache_age"],
+  "subagent_disabled_sections": ["activity"]
 }
 ```
 
 `clickable_links` toggles the OSC 8 hyperlinks. `disabled_sections` hides chips by name:
 `context_tokens`, `cache`, `cache_age`, `model`, `effort`, `cwd`, `branch`, `git_files`,
 `git_stash`, `git_sync`, `git_state`, `git_worktree`, `pr`, `worktree`.
+
+`subagent_disabled_sections` does the same for the subagent rows:
+`name`, `activity`, `context_tokens`, `elapsed`, `model`, `effort`.
 
 ## Uninstall
 
