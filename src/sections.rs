@@ -33,7 +33,7 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
             "context_tokens",
             format!(
                 "{}{}{}{}{}{}{}",
-                s.paint("\u{2630} ", COMMENT),
+                s.paint("\u{2338} ", COMMENT),
                 s.paint(&fmt_tokens(used), BLUE),
                 s.paint("/", COMMENT),
                 s.paint(&fmt_tokens(win as u64), BLUE),
@@ -370,7 +370,7 @@ mod tests {
             names(&chips),
             vec!["context_tokens", "cache", "cache_age", "model", "effort"]
         );
-        assert_eq!(text_of(&chips, "context_tokens"), "\u{2630} 420K/1M (42%)");
+        assert_eq!(text_of(&chips, "context_tokens"), "\u{2338} 420K/1M (42%)");
         assert_eq!(text_of(&chips, "cache"), "cache:46%"); // 365000 / 789000
         assert_eq!(text_of(&chips, "cache_age"), "cache_age:1m12s");
         assert_eq!(text_of(&chips, "model"), "Sonnet 5");
@@ -393,7 +393,7 @@ mod tests {
         let chips = line1(&c);
         assert_eq!(
             text_of(&chips, "context_tokens"),
-            "\x1b[38;2;86;95;137m\u{2630} \x1b[0m\
+            "\x1b[38;2;86;95;137m\u{2338} \x1b[0m\
              \x1b[38;2;122;162;247m420K\x1b[0m\
              \x1b[38;2;86;95;137m/\x1b[0m\
              \x1b[38;2;122;162;247m1M\x1b[0m\
@@ -469,7 +469,7 @@ mod tests {
         .unwrap();
         let git = GitInfo::default();
         let chips = line1(&ctx_of(&payload, &git));
-        assert_eq!(text_of(&chips, "context_tokens"), "\u{2630} 1M/1M (100%)");
+        assert_eq!(text_of(&chips, "context_tokens"), "\u{2338} 1M/1M (100%)");
     }
 
     fn payload_with_repo() -> Payload {
