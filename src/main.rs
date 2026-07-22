@@ -5,6 +5,7 @@ mod format;
 mod git;
 mod schema;
 mod sections;
+mod subagent;
 mod theme;
 mod transcript;
 

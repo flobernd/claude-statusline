@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 /// Field-level leniency: a wrong-typed field becomes None instead of
 /// failing the whole payload. The statusline must render whatever
 /// upstream got right, not blank on the first field it got wrong.
-fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+pub(crate) fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: DeserializeOwned,
