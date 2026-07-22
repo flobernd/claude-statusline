@@ -31,6 +31,9 @@ struct Cli {
     /// Print install state in machine-readable form
     #[arg(long = "print-config")]
     print_config: bool,
+    /// Render per-task rows for Claude Code's subagentStatusLine hook
+    #[arg(long = "subagent-statusline")]
+    subagent_statusline: bool,
 }
 
 const LINE1_DROP: &[&str] = &["cache", "cache_age", "effort"];
@@ -86,7 +89,14 @@ fn main() {
     // multi-line message; the payload text is folded into our single
     // stderr line instead.
     std::panic::set_hook(Box::new(|_| {}));
-    match std::panic::catch_unwind(|| render(&raw)) {
+    let subagent_mode = cli.subagent_statusline;
+    match std::panic::catch_unwind(|| {
+        if subagent_mode {
+            render_subagent(&raw)
+        } else {
+            render(&raw)
+        }
+    }) {
         Ok(Some(output)) if !output.is_empty() => println!("{output}"),
         Ok(_) => {}
         Err(payload) => {
@@ -110,6 +120,14 @@ fn terminal_width() -> usize {
     parse("CLAUDE_STATUSLINE_WIDTH")
         .or_else(|| parse("COLUMNS"))
         .unwrap_or(100)
+}
+
+fn render_subagent(raw: &str) -> Option<String> {
+    let config = schema::home_dir()
+        .map(|h| schema::load_config(&h.join(".claude").join("claude-statusline.json")))
+        .unwrap_or_default();
+    let style = theme::Style::from_env(config.clickable_links);
+    subagent::render(raw, &config, &style, terminal_width())
 }
 
 fn render(raw: &str) -> Option<String> {

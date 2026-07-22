@@ -422,3 +422,106 @@ fn setup_eof_cancels_cleanly() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("Setup cancelled."));
     assert!(!path.exists());
 }
+
+fn run_subagent(stdin_data: &str, home: &std::path::Path, colors: bool) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_claude-statusline"));
+    cmd.arg("--subagent-statusline")
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .current_dir(home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if colors {
+        cmd.env("FORCE_COLOR", "1");
+    } else {
+        cmd.env("NO_COLOR", "1").env_remove("FORCE_COLOR");
+    }
+    let mut child = cmd.spawn().expect("binary runs");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin_data.as_bytes())
+        .unwrap();
+    child.wait_with_output().expect("binary exits")
+}
+
+const SUBAGENT_SAMPLE: &str = r#"{
+    "columns": 200,
+    "tasks": [
+        {"id": "t1", "type": "local_agent", "name": "Explore",
+         "label": "Searching for callers", "model": "claude-sonnet-5",
+         "contextWindowSize": 200000, "tokenCount": 82000},
+        {"id": "t2", "type": "local_bash", "label": "cargo build --release"},
+        {"type": "local_agent", "name": "NoId", "label": "ignored"}
+    ]
+}"#;
+
+#[test]
+fn subagent_mode_emits_one_json_line_per_agent_task() {
+    let home = tempfile::tempdir().unwrap();
+    let out = run_subagent(SUBAGENT_SAMPLE, home.path(), false);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout: {stdout}");
+    let v: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(v["id"], "t1");
+    let content = v["content"].as_str().unwrap();
+    assert!(
+        content.contains("Explore \u{2502} Searching for callers"),
+        "content: {content}"
+    );
+    assert!(content.contains("82K/200K (41%)"));
+    assert!(content.contains("claude-sonnet-5"));
+    assert!(!content.contains('\u{1b}'));
+}
+
+#[test]
+fn subagent_content_carries_ansi_when_colors_are_on() {
+    let home = tempfile::tempdir().unwrap();
+    let out = run_subagent(SUBAGENT_SAMPLE, home.path(), true);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert!(v["content"].as_str().unwrap().contains("\u{1b}[38;2;"));
+}
+
+#[test]
+fn subagent_payload_columns_bound_each_row() {
+    let home = tempfile::tempdir().unwrap();
+    let narrow = SUBAGENT_SAMPLE.replace("\"columns\": 200", "\"columns\": 30");
+    let out = run_subagent(&narrow, home.path(), false);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    let content = v["content"].as_str().unwrap();
+    assert!(!content.contains("claude-sonnet-5"), "content: {content}");
+    assert!(!content.contains("82K"), "content: {content}");
+    assert!(content.contains('\u{2026}'), "content: {content}");
+    assert!(content.chars().count() <= 30, "content: {content}");
+}
+
+#[test]
+fn subagent_disabled_sections_hide_chips_end_to_end() {
+    let home = tempfile::tempdir().unwrap();
+    let claude_dir = home.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("claude-statusline.json"),
+        r#"{"subagent_disabled_sections": ["activity", "model"]}"#,
+    )
+    .unwrap();
+    let out = run_subagent(SUBAGENT_SAMPLE, home.path(), false);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert_eq!(v["content"], "Explore \u{2502} 82K/200K (41%)");
+}
+
+#[test]
+fn subagent_undecodable_payload_emits_nothing_but_logs() {
+    let home = tempfile::tempdir().unwrap();
+    let out = run_subagent("{definitely not json", home.path(), false);
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+    assert!(!out.stderr.is_empty());
+}

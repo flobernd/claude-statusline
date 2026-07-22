@@ -1,9 +1,8 @@
-#![allow(dead_code)]
-
 use serde::Deserialize;
 
 use crate::bar::bar_color;
 use crate::format::{fmt_duration, fmt_tokens};
+use crate::schema::Config;
 use crate::schema::lenient;
 use crate::theme::{BLUE, COMMENT, CYAN, MAGENTA, Style};
 
@@ -232,6 +231,50 @@ pub fn render_row(
             .collect::<Vec<_>>()
             .join(&sep),
     )
+}
+
+pub fn render(raw: &str, config: &Config, style: &Style, fallback_width: usize) -> Option<String> {
+    let Some(payload) = parse_payload(raw) else {
+        eprintln!("claude-statusline: undecodable subagent payload");
+        return None;
+    };
+    let columns = payload
+        .columns
+        .filter(|c| (10.0..=4000.0).contains(c))
+        .map(|c| c as usize)
+        .unwrap_or(fallback_width);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let mut lines: Vec<String> = Vec::new();
+    for task in payload.parsed_tasks() {
+        // Other task types keep Claude Code's default row.
+        if task.task_type.as_deref() != Some("local_agent") {
+            continue;
+        }
+        let Some(id) = task.id.as_deref().filter(|i| !i.is_empty()) else {
+            continue;
+        };
+        let Some(content) = render_row(
+            &task,
+            columns,
+            style,
+            &config.subagent_disabled_sections,
+            now_ms,
+        ) else {
+            continue;
+        };
+        // serde_json encodes the ESC byte as a \u001b escape, which
+        // Claude Code's JSON.parse restores verbatim.
+        lines.push(serde_json::json!({"id": id, "content": content}).to_string());
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
 }
 
 #[cfg(test)]
