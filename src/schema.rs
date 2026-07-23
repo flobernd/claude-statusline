@@ -32,6 +32,12 @@ pub struct Payload {
     pub pr: Option<Pr>,
     #[serde(default, deserialize_with = "lenient")]
     pub worktree: Option<Worktree>,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by the upcoming usage limits line")
+    )]
+    #[serde(default, deserialize_with = "lenient")]
+    pub rate_limits: Option<RateLimits>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -116,6 +122,31 @@ pub struct Worktree {
     pub branch: Option<String>,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the upcoming usage limits line")
+)]
+#[derive(Debug, Default, Deserialize)]
+pub struct RateLimits {
+    #[serde(default, deserialize_with = "lenient")]
+    pub five_hour: Option<RateWindow>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub seven_day: Option<RateWindow>,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the upcoming usage limits line")
+)]
+#[derive(Debug, Default, Deserialize)]
+pub struct RateWindow {
+    #[serde(default, deserialize_with = "lenient")]
+    pub used_percentage: Option<f64>,
+    /// Epoch seconds.
+    #[serde(default, deserialize_with = "lenient")]
+    pub resets_at: Option<f64>,
+}
+
 pub fn parse_payload(raw: &str) -> Option<Payload> {
     let value: serde_json::Value = serde_json::from_str(raw).ok()?;
     if !value.is_object() {
@@ -127,17 +158,21 @@ pub fn parse_payload(raw: &str) -> Option<Payload> {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub advanced_usage_limits_enabled: bool,
     pub clickable_links: bool,
     pub disabled_sections: Vec<String>,
     pub subagent_disabled_sections: Vec<String>,
+    pub usage_fetch_interval_seconds: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
+            advanced_usage_limits_enabled: false,
             clickable_links: true,
             disabled_sections: Vec::new(),
             subagent_disabled_sections: Vec::new(),
+            usage_fetch_interval_seconds: 60,
         }
     }
 }
@@ -163,6 +198,41 @@ pub fn home_dir() -> Option<PathBuf> {
         .filter(|v| !v.is_empty())
         .or_else(|| std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()))
         .map(PathBuf::from)
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the upcoming usage limits line")
+)]
+#[derive(Debug, Default, Deserialize)]
+pub struct AccountInfo {
+    #[serde(default, deserialize_with = "lenient", rename = "organizationType")]
+    pub organization_type: Option<String>,
+    #[serde(default, deserialize_with = "lenient", rename = "accountUuid")]
+    pub account_uuid: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ClaudeJson {
+    #[serde(default, deserialize_with = "lenient", rename = "oauthAccount")]
+    oauth_account: Option<AccountInfo>,
+}
+
+/// Account identity from Claude Code's ~/.claude.json. Anything missing or
+/// malformed yields None fields; absence just means "no native subscription
+/// signal", never an error the statusline should surface.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the upcoming usage limits line")
+)]
+pub fn load_account_info(claude_json_path: &Path) -> AccountInfo {
+    let Ok(text) = std::fs::read_to_string(claude_json_path) else {
+        return AccountInfo::default();
+    };
+    serde_json::from_str::<ClaudeJson>(&text)
+        .ok()
+        .and_then(|c| c.oauth_account)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -263,6 +333,102 @@ mod tests {
         std::fs::write(&path, "{broken").unwrap();
         let c = load_config(&path);
         assert!(c.clickable_links);
+    }
+
+    #[test]
+    fn payload_rate_limits_parse() {
+        let raw = r#"{
+            "rate_limits": {
+                "five_hour": {"used_percentage": 42, "resets_at": 1753290000},
+                "seven_day": {"used_percentage": 63.5, "resets_at": 1753500000}
+            }
+        }"#;
+        let p = parse_payload(raw).unwrap();
+        let rl = p.rate_limits.unwrap();
+        let five = rl.five_hour.unwrap();
+        assert_eq!(five.used_percentage, Some(42.0));
+        assert_eq!(five.resets_at, Some(1_753_290_000.0));
+        let seven = rl.seven_day.unwrap();
+        assert_eq!(seven.used_percentage, Some(63.5));
+        assert_eq!(seven.resets_at, Some(1_753_500_000.0));
+    }
+
+    #[test]
+    fn rate_limits_wrong_typed_fields_become_none_without_killing_neighbors() {
+        let raw = r#"{
+            "rate_limits": {
+                "five_hour": {"used_percentage": "garbage", "resets_at": 1753290000},
+                "seven_day": "nope"
+            }
+        }"#;
+        let p = parse_payload(raw).unwrap();
+        let rl = p.rate_limits.unwrap();
+        let five = rl.five_hour.unwrap();
+        assert_eq!(five.used_percentage, None);
+        assert_eq!(five.resets_at, Some(1_753_290_000.0));
+        assert!(rl.seven_day.is_none());
+    }
+
+    #[test]
+    fn usage_limits_config_defaults_and_full_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude-statusline.json");
+        let c = load_config(&path);
+        assert!(!c.advanced_usage_limits_enabled);
+        assert_eq!(c.usage_fetch_interval_seconds, 60);
+
+        std::fs::write(&path, "{}").unwrap();
+        let c = load_config(&path);
+        assert!(!c.advanced_usage_limits_enabled);
+        assert_eq!(c.usage_fetch_interval_seconds, 60);
+
+        std::fs::write(
+            &path,
+            r#"{"advanced_usage_limits_enabled": true, "usage_fetch_interval_seconds": 300}"#,
+        )
+        .unwrap();
+        let c = load_config(&path);
+        assert!(c.advanced_usage_limits_enabled);
+        assert_eq!(c.usage_fetch_interval_seconds, 300);
+        // The new keys must not disturb the other defaults.
+        assert!(c.clickable_links && c.disabled_sections.is_empty());
+    }
+
+    #[test]
+    fn partial_usage_limits_config_keeps_other_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude-statusline.json");
+        std::fs::write(&path, r#"{"advanced_usage_limits_enabled": true}"#).unwrap();
+        let c = load_config(&path);
+        assert!(c.advanced_usage_limits_enabled);
+        assert_eq!(c.usage_fetch_interval_seconds, 60);
+        assert!(c.clickable_links && c.subagent_disabled_sections.is_empty());
+    }
+
+    #[test]
+    fn load_account_info_reads_oauth_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        std::fs::write(
+            &path,
+            r#"{"oauthAccount":{"organizationType":"claude_max","accountUuid":"u-1"}}"#,
+        )
+        .unwrap();
+        let info = load_account_info(&path);
+        assert_eq!(info.organization_type.as_deref(), Some("claude_max"));
+        assert_eq!(info.account_uuid.as_deref(), Some("u-1"));
+    }
+
+    #[test]
+    fn load_account_info_missing_file_or_fields_yields_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        let info = load_account_info(&path);
+        assert!(info.organization_type.is_none() && info.account_uuid.is_none());
+
+        std::fs::write(&path, r#"{"oauthAccount":{"organizationType": 42}}"#).unwrap();
+        let info = load_account_info(&path);
+        assert!(info.organization_type.is_none() && info.account_uuid.is_none());
     }
 
     #[test]
