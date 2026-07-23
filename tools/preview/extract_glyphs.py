@@ -20,6 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # marker (U+2387) is absent from the mono face, so its outline comes from the
 # proportional face and gen.py caps its width.
 SPEC = {
+    "⌁": "DejaVu Sans Mono",  # usage limits, electric arrow
     "⌸": "DejaVu Sans Mono",  # context, APL quad-equal (window with lines)
     "⌂": "DejaVu Sans Mono",  # home
     "⎇": "DejaVu Sans",       # branch, alternative-key symbol

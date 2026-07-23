@@ -1,27 +1,56 @@
 #!/usr/bin/env bash
 # Build scratch git states and capture real statusline output for the SVG
 # previews. Everything stays under this folder (out/ and work/, both
-# gitignored); a temporary transcript under ~/.claude is created (required:
-# the transcript reader only trusts that root) and removed at the end.
+# gitignored). The main captures run against scratch HOME directories so the
+# machine's real statusline config, account file, and usage cache can never
+# leak into the previews; the transcript lives inside each scratch HOME
+# because the transcript reader only trusts paths under ~/.claude.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BIN=$HERE/../../target/release/claude-statusline
 OUT=$HERE/out
 WORK=$HERE/work
-TSDIR=$HOME/.claude/.statusline-preview-tmp
+PHOME=$WORK/home
+UHOME=$WORK/home-usage
 
-rm -rf "$OUT" "$WORK" "$TSDIR"
-mkdir -p "$OUT" "$WORK" "$TSDIR"
+rm -rf "$OUT" "$WORK"
+mkdir -p "$OUT" "$PHOME/.claude" "$UHOME/.claude"
 
 # Hermetic git so the scratch repos are deterministic and never touch the
 # user's config.
 g() { git -C "$1" -c init.defaultBranch=main -c user.name=dev -c user.email=dev@example.com -c commit.gpgsign=false -c advice.detachedHead=false "${@:2}"; }
 
-# --- temporary transcript: one assistant message ~72s ago -> cache_age chip ---
+# --- transcripts: one assistant message ~72s ago -> cache_age chip ---------
 TS=$(date -u -d '72 seconds ago' +%Y-%m-%dT%H:%M:%SZ)
-printf '{"type":"assistant","timestamp":"%s","message":{"role":"assistant"}}\n' "$TS" > "$TSDIR/t.jsonl"
-TRANSCRIPT="$TSDIR/t.jsonl"
+for h in "$PHOME" "$UHOME"; do
+  printf '{"type":"assistant","timestamp":"%s","message":{"role":"assistant"}}\n' "$TS" > "$h/.claude/t.jsonl"
+done
+
+# --- usage HOME: opt-in config, account identity, seeded usage snapshot ----
+# Interval 0 keeps the capture from spawning a real fetch child; the line
+# renders purely from this snapshot plus the payload rate_limits.
+cat > "$UHOME/.claude/claude-statusline.json" <<'JSON'
+{"advanced_usage_limits_enabled": true, "usage_fetch_interval_seconds": 0}
+JSON
+cat > "$UHOME/.claude.json" <<'JSON'
+{"oauthAccount": {"organizationType": "claude_max", "accountUuid": "acct-preview"}}
+JSON
+NOW_MS=$(date +%s%3N)
+FABLE_RESET=$(date -u -d '+5 days' +%Y-%m-%dT%H:%M:%SZ)
+cat > "$UHOME/.claude/claude-statusline-usage.json" <<JSON
+{
+  "fetched_at_ms": $NOW_MS,
+  "account_uuid": "acct-preview",
+  "utilization": {
+    "extra_usage": {"is_enabled": true, "monthly_limit": 100000, "used_credits": 100200, "utilization": 100.2},
+    "limits": [
+      {"kind": "weekly_scoped", "group": "model", "percent": 81, "resets_at": "$FABLE_RESET",
+       "scope": {"model": {"display_name": "Fable"}}}
+    ]
+  }
+}
+JSON
 
 # --- repo variant: origin + clone, branch, dirty tree, stashes, ahead/behind ---
 ORIGIN=$WORK/origin
@@ -55,7 +84,7 @@ common_line1() {
   cat <<JSON
   "model": {"display_name": "Opus 4.8"},
   "effort": {"level": "high"},
-  "transcript_path": "$TRANSCRIPT",
+  "transcript_path": "$1/.claude/t.jsonl",
   "context_window": {
     "used_percentage": 47, "context_window_size": 1000000,
     "current_usage": {"input_tokens": 5200, "cache_creation_input_tokens": 11800, "cache_read_input_tokens": 372000}
@@ -64,14 +93,14 @@ JSON
 }
 
 cat > "$OUT/p-cwd.json" <<JSON
-{ $(common_line1),
-  "cwd": "$HOME/dev/notes",
-  "workspace": {"current_dir": "$HOME/dev/notes"}
+{ $(common_line1 "$PHOME"),
+  "cwd": "$PHOME/dev/notes",
+  "workspace": {"current_dir": "$PHOME/dev/notes"}
 }
 JSON
 
 cat > "$OUT/p-repo.json" <<JSON
-{ $(common_line1),
+{ $(common_line1 "$PHOME"),
   "cwd": "$REPO",
   "workspace": {"current_dir": "$REPO", "repo": {"host": "github.com", "owner": "acme", "name": "webapp"}},
   "pr": {"number": 128, "url": "https://github.com/acme/webapp/pull/128", "review_state": "approved"}
@@ -79,9 +108,24 @@ cat > "$OUT/p-repo.json" <<JSON
 JSON
 
 cat > "$OUT/p-worktree.json" <<JSON
-{ $(common_line1),
+{ $(common_line1 "$PHOME"),
   "cwd": "$WT",
   "workspace": {"current_dir": "$WT", "git_worktree": "hotfix", "repo": {"host": "github.com", "owner": "acme", "name": "webapp"}}
+}
+JSON
+
+# Session + weekly ride the payload like a live session; fable and spend
+# come from the seeded snapshot in UHOME.
+NOW_S=$(date +%s)
+cat > "$OUT/p-usage.json" <<JSON
+{ $(common_line1 "$UHOME"),
+  "cwd": "$REPO",
+  "workspace": {"current_dir": "$REPO", "repo": {"host": "github.com", "owner": "acme", "name": "webapp"}},
+  "pr": {"number": 128, "url": "https://github.com/acme/webapp/pull/128", "review_state": "approved"},
+  "rate_limits": {
+    "five_hour": {"used_percentage": 42, "resets_at": $((NOW_S + 7800))},
+    "seven_day": {"used_percentage": 63, "resets_at": $((NOW_S + 259200))}
+  }
 }
 JSON
 
@@ -102,14 +146,16 @@ JSON
 export FORCE_COLOR=1 CLAUDE_STATUSLINE_WIDTH=220
 unset NO_COLOR || true
 for v in cwd repo worktree; do
-  "$BIN" < "$OUT/p-$v.json" > "$OUT/main-$v.ansi"
+  HOME=$PHOME "$BIN" < "$OUT/p-$v.json" > "$OUT/main-$v.ansi"
 done
+HOME=$UHOME "$BIN" < "$OUT/p-usage.json" > "$OUT/main-usage.ansi"
+# The subagent capture keeps the real HOME: task location chips resolve via
+# git against the session cwd, and t1/t2 point at this repository.
 "$BIN" --subagent-statusline < "$OUT/p-subagent.json" > "$OUT/subagent.ndjson"
 
 echo "=== main-cwd ===";      cat -v "$OUT/main-cwd.ansi"
 echo "=== main-repo ===";     cat -v "$OUT/main-repo.ansi"
 echo "=== main-worktree ==="; cat -v "$OUT/main-worktree.ansi"
+echo "=== main-usage ===";    cat -v "$OUT/main-usage.ansi"
 echo "=== subagent (ndjson) ==="; cat -v "$OUT/subagent.ndjson"
-
-rm -rf "$TSDIR"
-echo "=== done; transcript tmp removed ==="
+echo "=== done ==="

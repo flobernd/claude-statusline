@@ -210,6 +210,7 @@ def main():
         ("directory", load_main("cwd")),
         ("repository", load_main("repo")),
         ("worktree", load_main("worktree")),
+        ("usage limits (opt-in)", load_main("usage")),
     ]
     write_pair("statusline", main_cards)
     write_pair("statusline-subagent", [("subagent status line", load_subagent())])
