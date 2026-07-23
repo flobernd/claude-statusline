@@ -122,10 +122,6 @@ pub struct Worktree {
     pub branch: Option<String>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the upcoming usage limits line")
-)]
 #[derive(Debug, Default, Deserialize)]
 pub struct RateLimits {
     #[serde(default, deserialize_with = "lenient")]
@@ -134,10 +130,6 @@ pub struct RateLimits {
     pub seven_day: Option<RateWindow>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the upcoming usage limits line")
-)]
 #[derive(Debug, Default, Deserialize)]
 pub struct RateWindow {
     #[serde(default, deserialize_with = "lenient")]
@@ -200,12 +192,12 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the upcoming usage limits line")
-)]
 #[derive(Debug, Default, Deserialize)]
 pub struct AccountInfo {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by the upcoming usage limits gating")
+    )]
     #[serde(default, deserialize_with = "lenient", rename = "organizationType")]
     pub organization_type: Option<String>,
     #[serde(default, deserialize_with = "lenient", rename = "accountUuid")]
@@ -221,10 +213,6 @@ struct ClaudeJson {
 /// Account identity from Claude Code's ~/.claude.json. Anything missing or
 /// malformed yields None fields; absence just means "no native subscription
 /// signal", never an error the statusline should surface.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the upcoming usage limits line")
-)]
 pub fn load_account_info(claude_json_path: &Path) -> AccountInfo {
     let Ok(text) = std::fs::read_to_string(claude_json_path) else {
         return AccountInfo::default();

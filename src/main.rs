@@ -8,6 +8,7 @@ mod sections;
 mod subagent;
 mod theme;
 mod transcript;
+mod usage;
 
 use clap::Parser;
 use std::io::Read;
@@ -31,6 +32,9 @@ struct Cli {
     /// Print install state in machine-readable form
     #[arg(long = "print-config")]
     print_config: bool,
+    /// Refresh the usage limits cache and exit (spawned by render ticks)
+    #[arg(long = "fetch-usage")]
+    fetch_usage: bool,
     /// Render per-task rows for Claude Code's subagentStatusLine hook
     #[arg(long = "subagent-statusline")]
     subagent_statusline: bool,
@@ -56,6 +60,9 @@ fn main() {
     let cli = Cli::parse();
     if cli.print_config {
         std::process::exit(commands::print_config::run());
+    }
+    if cli.fetch_usage {
+        std::process::exit(usage::run_fetch());
     }
     if cli.install {
         if let Err(e) = commands::install::install(cli.with_subagent_statusline) {
