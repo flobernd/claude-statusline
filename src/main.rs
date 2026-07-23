@@ -8,6 +8,7 @@ mod sections;
 mod subagent;
 mod theme;
 mod transcript;
+mod usage;
 
 use clap::Parser;
 use std::io::Read;
@@ -31,6 +32,9 @@ struct Cli {
     /// Print install state in machine-readable form
     #[arg(long = "print-config")]
     print_config: bool,
+    /// Refresh the usage limits cache and exit (spawned by render ticks)
+    #[arg(long = "fetch-usage")]
+    fetch_usage: bool,
     /// Render per-task rows for Claude Code's subagentStatusLine hook
     #[arg(long = "subagent-statusline")]
     subagent_statusline: bool,
@@ -50,12 +54,18 @@ const LINE2_DROP: &[&str] = &[
     "git_files",
     "pr",
 ];
+// usage_session is intentionally absent so it never drops: the five-hour
+// window is the limit users hit first.
+const LINE3_DROP: &[&str] = &["usage_plan", "usage_spend", "usage_fable", "usage_week"];
 const SEP: &str = " \u{2502} ";
 
 fn main() {
     let cli = Cli::parse();
     if cli.print_config {
         std::process::exit(commands::print_config::run());
+    }
+    if cli.fetch_usage {
+        std::process::exit(usage::run_fetch());
     }
     if cli.install {
         if let Err(e) = commands::install::install(cli.with_subagent_statusline) {
@@ -196,12 +206,112 @@ fn render(raw: &str) -> Option<String> {
         )
     };
 
+    // The flag check comes first so the default path never pays the extra
+    // ~/.claude.json read on a render tick.
+    let line3 = if config.advanced_usage_limits_enabled {
+        let account = schema::home_dir()
+            .map(|h| schema::load_account_info(&h.join(".claude.json")))
+            .unwrap_or_default();
+        if usage_line_enabled(&config, &payload, &account) {
+            usage::spawn_fetch_if_stale(&config);
+            let snapshot = usage::cache_path()
+                .and_then(|p| usage::load_snapshot(&p, account.account_uuid.as_deref()));
+            let now_epoch_s = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let limits = usage::merge(
+                payload.rate_limits.as_ref(),
+                snapshot.as_ref().map(|s| &s.utilization),
+                now_epoch_s,
+            );
+            let plan = account
+                .organization_type
+                .as_deref()
+                .and_then(|t| t.strip_prefix("claude_"));
+            compose(
+                sections::line3(&limits, plan, &style, now_epoch_s),
+                LINE3_DROP,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let lines: Vec<String> = [
         compose(sections::line1(&ctx), LINE1_DROP),
         compose(sections::line2(&ctx), LINE2_DROP),
+        line3,
     ]
     .into_iter()
     .flatten()
     .collect();
     Some(lines.join("\n"))
+}
+
+/// The usage line is for native Anthropic subscriptions only. Enterprise
+/// seats may receive no payload rate_limits at all, so the account type
+/// from ~/.claude.json is the alternate signal that keeps the line alive
+/// for them; API-key, Bedrock, and Vertex sessions match neither.
+fn usage_line_enabled(
+    config: &schema::Config,
+    payload: &schema::Payload,
+    account: &schema::AccountInfo,
+) -> bool {
+    config.advanced_usage_limits_enabled
+        && (payload.rate_limits.is_some()
+            || account
+                .organization_type
+                .as_deref()
+                .is_some_and(|t| t.starts_with("claude_")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_line_requires_the_config_flag() {
+        let payload = schema::parse_payload(r#"{"rate_limits": {}}"#).unwrap();
+        let account = schema::AccountInfo {
+            organization_type: Some("claude_max".to_string()),
+            account_uuid: None,
+        };
+        assert!(!usage_line_enabled(
+            &schema::Config::default(),
+            &payload,
+            &account
+        ));
+        let enabled = schema::Config {
+            advanced_usage_limits_enabled: true,
+            ..schema::Config::default()
+        };
+        assert!(usage_line_enabled(&enabled, &payload, &account));
+    }
+
+    #[test]
+    fn usage_line_needs_a_payload_or_account_subscription_signal() {
+        let enabled = schema::Config {
+            advanced_usage_limits_enabled: true,
+            ..schema::Config::default()
+        };
+        let with_limits = schema::parse_payload(r#"{"rate_limits": {}}"#).unwrap();
+        let without = schema::parse_payload("{}").unwrap();
+        let native = schema::AccountInfo {
+            organization_type: Some("claude_enterprise".to_string()),
+            account_uuid: None,
+        };
+        let external = schema::AccountInfo {
+            organization_type: Some("external".to_string()),
+            account_uuid: None,
+        };
+        let unknown = schema::AccountInfo::default();
+
+        assert!(usage_line_enabled(&enabled, &with_limits, &unknown));
+        assert!(usage_line_enabled(&enabled, &without, &native));
+        assert!(!usage_line_enabled(&enabled, &without, &external));
+        assert!(!usage_line_enabled(&enabled, &without, &unknown));
+    }
 }

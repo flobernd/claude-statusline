@@ -8,12 +8,13 @@
 
 A cross-platform statusline for the [Claude Code](https://code.claude.com) CLI: context usage,
 token and prompt-cache metrics, model and effort level on the first line; working directory,
-git status, and pull request context on the second.
+git status, and pull request context on the second; optionally, subscription usage limits on a
+third.
 
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/statusline-dark.svg">
-    <img src="assets/statusline-light.svg" alt="Statusline previews in a plain directory, a git repository, and a linked worktree">
+    <img src="assets/statusline-light.svg" alt="Statusline previews in a plain directory, a git repository, a linked worktree, and with the opt-in usage limits line">
   </picture>
 </div>
 
@@ -32,7 +33,11 @@ git status, and pull request context on the second.
   important chips first
 - Optional subagent status line: while agent tasks run, one row per task with
   name, live activity, context usage, elapsed time, and model
-- Single native binary; renders in a few milliseconds with no caches or background processes
+- Optional usage limits line (off by default): plan type, session and weekly window
+  utilization with reset countdowns, the Fable-only weekly window, and the extra-usage
+  spend meter
+- Single native binary; renders in a few milliseconds. Only the opt-in usage limits line
+  keeps a small on-disk snapshot, refreshed by a short-lived background fetch
 
 ## Requirements
 
@@ -69,21 +74,38 @@ from the session: the repo and branch inside a git repository (worktree
 isolation shows up as its branch), otherwise the folder name. For a
 non-interactive install use `--install --with-subagent-statusline`.
 
+## Usage limits line
+
+An opt-in third line shows the subscription limits otherwise hidden behind `/usage`: the plan
+type, the five-hour session and weekly windows with reset countdowns, the Fable-only weekly
+window, and the extra-usage spend meter (which also covers Team/Enterprise spend limits). The
+wizard asks about it, or set `advanced_usage_limits_enabled` yourself. The line renders only
+for native Anthropic subscriptions; API-key, Bedrock, and Vertex sessions never show it.
+
+Session and weekly values come live from the Claude Code payload. The per-model and spend
+data comes from an unofficial claude.ai endpoint, fetched in the background at most every
+`usage_fetch_interval_seconds` (default 60, `0` disables the fetch) into
+`~/.claude/claude-statusline-usage.json`. That endpoint may change without notice; when it
+does, the affected chips disappear silently while the payload-backed chips keep working.
+
 ## Configuration
 
 Optional file `~/.claude/claude-statusline.json`:
 
 ```json
 {
+  "advanced_usage_limits_enabled": false,
   "clickable_links": true,
   "disabled_sections": ["cache_age"],
-  "subagent_disabled_sections": ["activity"]
+  "subagent_disabled_sections": ["activity"],
+  "usage_fetch_interval_seconds": 60
 }
 ```
 
 `clickable_links` toggles the OSC 8 hyperlinks. `disabled_sections` hides chips by name:
 `context_tokens`, `cache`, `cache_age`, `model`, `effort`, `cwd`, `branch`, `git_files`,
-`git_stash`, `git_sync`, `git_state`, `git_worktree`, `pr`, `worktree`.
+`git_stash`, `git_sync`, `git_state`, `git_worktree`, `pr`, `worktree`, `usage_plan`,
+`usage_session`, `usage_week`, `usage_fable`, `usage_spend`.
 
 `subagent_disabled_sections` does the same for the subagent rows:
 `name`, `cwd`, `branch`, `activity`, `context_tokens`, `elapsed`, `model`, `effort`.
