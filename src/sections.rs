@@ -237,8 +237,12 @@ pub fn line3(
 ) -> Vec<(&'static str, String)> {
     let s = style;
     let mut out: Vec<(&'static str, String)> = Vec::new();
-    if let Some(plan) = plan {
-        out.push(("usage_plan", s.paint(plan, MAGENTA)));
+    if let Some(plan) = plan
+        && let Some(first) = plan.chars().next()
+    {
+        // Plan names arrive lowercase (max, pro); render them title-cased.
+        let text: String = first.to_uppercase().chain(plan.chars().skip(1)).collect();
+        out.push(("usage_plan", s.paint(&text, MAGENTA)));
     }
     if let Some(w) = &limits.session {
         out.push(("usage_session", window_chip(s, "5h", w, now_epoch_s)));
@@ -874,7 +878,7 @@ mod tests {
         };
         let chips = line3(&limits, Some("max"), &PLAIN, USAGE_NOW_S);
         assert_eq!(names(&chips), vec!["usage_plan", "usage_session"]);
-        assert_eq!(chips[0].1, "\u{2301} max");
+        assert_eq!(chips[0].1, "\u{2301} Max");
         assert_eq!(chips[1].1, "5h:42%");
 
         let colored = Style {
@@ -885,7 +889,7 @@ mod tests {
         assert!(
             chips[0]
                 .1
-                .contains("\x1b[38;2;187;154;247menterprise\x1b[0m")
+                .contains("\x1b[38;2;187;154;247mEnterprise\x1b[0m")
         );
     }
 
@@ -997,7 +1001,7 @@ mod tests {
     #[test]
     fn usage_preview_renders_the_sample_line() {
         let text = usage_preview(&PLAIN);
-        assert!(text.starts_with("\u{2301} max \u{2502} 5h:42%"));
+        assert!(text.starts_with("\u{2301} Max \u{2502} 5h:42%"));
         assert!(text.contains(" \u{2502} "));
         assert!(text.contains("spend:$1002/$1000 (100%)"));
     }
