@@ -21,7 +21,7 @@ pub struct EndpointUtilization {
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct EndpointWindow {
-    /// 0..1 fraction, unlike the payload's 0..100 percentage.
+    /// 0..100, same scale as the payload percentage (verified live).
     #[serde(default, deserialize_with = "lenient")]
     pub utilization: Option<f64>,
     /// RFC3339 timestamp.
@@ -39,7 +39,7 @@ pub struct ExtraUsage {
     /// Cents.
     #[serde(default, deserialize_with = "lenient")]
     pub used_credits: Option<f64>,
-    /// 0..1 fraction.
+    /// 0..100.
     #[serde(default, deserialize_with = "lenient")]
     pub utilization: Option<f64>,
 }
@@ -48,7 +48,7 @@ pub struct ExtraUsage {
 pub struct ScopedLimit {
     #[serde(default, deserialize_with = "lenient")]
     pub kind: Option<String>,
-    /// Already 0..100, unlike the window utilization fractions.
+    /// 0..100.
     #[serde(default, deserialize_with = "lenient")]
     pub percent: Option<f64>,
     /// RFC3339 timestamp.
@@ -165,7 +165,7 @@ fn payload_window(window: &schema::RateWindow) -> Option<Window> {
 
 fn endpoint_window(window: &EndpointWindow) -> Option<Window> {
     Some(Window {
-        pct: window.utilization? * 100.0,
+        pct: window.utilization?,
         resets_at: window.resets_at.as_deref().and_then(parse_reset_iso),
     })
 }
@@ -190,7 +190,7 @@ fn spend_from(extra: &ExtraUsage, now_epoch_s: i64) -> Option<Spend> {
     // only fills the gap, so a unit drift there cannot skew real dollars.
     let pct = match (extra.used_credits, extra.monthly_limit) {
         (Some(used), Some(limit)) if limit > 0.0 => Some(used / limit * 100.0),
-        _ => extra.utilization.map(|fraction| fraction * 100.0),
+        _ => extra.utilization,
     };
     if pct.is_none() && (extra.used_credits.is_none() || extra.monthly_limit.is_none()) {
         return None;
@@ -372,13 +372,13 @@ mod tests {
     use chrono::{Datelike, Local, Timelike};
 
     const FULL_BODY: &str = r#"{
-        "five_hour": {"utilization": 0.42, "resets_at": "2026-07-23T18:00:00Z"},
-        "seven_day": {"utilization": 0.635, "resets_at": "2026-07-27T00:00:00Z"},
+        "five_hour": {"utilization": 42.0, "resets_at": "2026-07-23T18:00:00Z"},
+        "seven_day": {"utilization": 63.5, "resets_at": "2026-07-27T00:00:00Z"},
         "extra_usage": {
             "is_enabled": true,
             "monthly_limit": 100000,
             "used_credits": 100200,
-            "utilization": 1.002,
+            "utilization": 100.2,
             "currency": "USD",
             "disabled_reason": null
         },
@@ -426,14 +426,14 @@ mod tests {
     fn full_endpoint_body_parses() {
         let e = full_endpoint();
         let five = e.five_hour.as_ref().unwrap();
-        assert_eq!(five.utilization, Some(0.42));
+        assert_eq!(five.utilization, Some(42.0));
         assert_eq!(five.resets_at.as_deref(), Some("2026-07-23T18:00:00Z"));
-        assert_eq!(e.seven_day.as_ref().unwrap().utilization, Some(0.635));
+        assert_eq!(e.seven_day.as_ref().unwrap().utilization, Some(63.5));
         let extra = e.extra_usage.as_ref().unwrap();
         assert_eq!(extra.is_enabled, Some(true));
         assert_eq!(extra.monthly_limit, Some(100_000.0));
         assert_eq!(extra.used_credits, Some(100_200.0));
-        assert_eq!(extra.utilization, Some(1.002));
+        assert_eq!(extra.utilization, Some(100.2));
         let limits = e.limits.as_ref().unwrap();
         assert_eq!(limits.len(), 2);
         assert_eq!(limits[0].kind.as_deref(), Some("weekly_scoped"));
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn merge_spend_falls_back_to_utilization_percent() {
-        let raw = r#"{"extra_usage": {"is_enabled": true, "utilization": 0.37}}"#;
+        let raw = r#"{"extra_usage": {"is_enabled": true, "utilization": 37.0}}"#;
         let e: EndpointUtilization = serde_json::from_str(raw).unwrap();
         let spend = merge(None, Some(&e), NOW_S).spend.unwrap();
         assert_eq!(spend.used_cents, None);
@@ -610,7 +610,7 @@ mod tests {
         assert_eq!(loaded.account_uuid.as_deref(), Some("u-1"));
         assert_eq!(
             loaded.utilization.five_hour.unwrap().utilization,
-            Some(0.42)
+            Some(42.0)
         );
 
         assert!(load_snapshot(&path, Some("u-2")).is_none());
