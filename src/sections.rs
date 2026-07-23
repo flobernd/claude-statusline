@@ -231,16 +231,20 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
 
 pub fn line3(
     limits: &crate::usage::Limits,
+    plan: Option<&str>,
     style: &Style,
     now_epoch_s: i64,
 ) -> Vec<(&'static str, String)> {
     let s = style;
     let mut out: Vec<(&'static str, String)> = Vec::new();
+    if let Some(plan) = plan {
+        out.push(("usage_plan", s.paint(plan, MAGENTA)));
+    }
     if let Some(w) = &limits.session {
-        out.push(("usage_session", window_chip(s, "session", w, now_epoch_s)));
+        out.push(("usage_session", window_chip(s, "5h", w, now_epoch_s)));
     }
     if let Some(w) = &limits.week {
-        out.push(("usage_week", window_chip(s, "week", w, now_epoch_s)));
+        out.push(("usage_week", window_chip(s, "7d", w, now_epoch_s)));
     }
     if let Some(w) = &limits.fable {
         out.push(("usage_fable", window_chip(s, "fable", w, now_epoch_s)));
@@ -275,7 +279,7 @@ fn countdown(s: &Style, resets_at: Option<i64>, now_epoch_s: i64) -> String {
         // Strictly future only: a reset at or before now has nothing left
         // to count down.
         Some(at) if at > now_epoch_s => s.paint(
-            &format!(" \u{b7}{}", fmt_duration((at - now_epoch_s) as u64 * 1_000)),
+            &format!(" ({})", fmt_duration((at - now_epoch_s) as u64 * 1_000)),
             COMMENT,
         ),
         _ => String::new(),
@@ -432,7 +436,7 @@ fn sample_limits() -> crate::usage::Limits {
 /// must not advertise a line that is off by default.
 pub fn usage_preview(style: &Style) -> String {
     let sep = style.paint(" \u{2502} ", COMMENT);
-    line3(&sample_limits(), style, USAGE_SAMPLE_NOW_S)
+    line3(&sample_limits(), Some("max"), style, USAGE_SAMPLE_NOW_S)
         .into_iter()
         .map(|(_, r)| r)
         .collect::<Vec<_>>()
@@ -837,20 +841,17 @@ mod tests {
 
     #[test]
     fn full_line3_renders_all_chips_in_order() {
-        let chips = line3(&full_limits(), &PLAIN, USAGE_NOW_S);
+        let chips = line3(&full_limits(), None, &PLAIN, USAGE_NOW_S);
         assert_eq!(
             names(&chips),
             vec!["usage_session", "usage_week", "usage_fable", "usage_spend"]
         );
-        assert_eq!(
-            text_of(&chips, "usage_session"),
-            "\u{2301} session:42% \u{b7}2h10m"
-        );
-        assert_eq!(text_of(&chips, "usage_week"), "week:63% \u{b7}3d");
-        assert_eq!(text_of(&chips, "usage_fable"), "fable:81% \u{b7}5d");
+        assert_eq!(text_of(&chips, "usage_session"), "\u{2301} 5h:42% (2h10m)");
+        assert_eq!(text_of(&chips, "usage_week"), "7d:63% (3d)");
+        assert_eq!(text_of(&chips, "usage_fable"), "fable:81% (5d)");
         assert_eq!(
             text_of(&chips, "usage_spend"),
-            "spend:$1002/$1000 (100%) \u{b7}8d"
+            "spend:$1002/$1000 (100%) (8d)"
         );
     }
 
@@ -860,14 +861,37 @@ mod tests {
             week: Some(window(63.0, None)),
             ..crate::usage::Limits::default()
         };
-        let chips = line3(&limits, &PLAIN, USAGE_NOW_S);
+        let chips = line3(&limits, None, &PLAIN, USAGE_NOW_S);
         assert_eq!(names(&chips), vec!["usage_week"]);
-        assert_eq!(chips[0].1, "\u{2301} week:63%");
+        assert_eq!(chips[0].1, "\u{2301} 7d:63%");
+    }
+
+    #[test]
+    fn plan_chip_renders_first_and_carries_the_glyph() {
+        let limits = crate::usage::Limits {
+            session: Some(window(42.0, None)),
+            ..crate::usage::Limits::default()
+        };
+        let chips = line3(&limits, Some("max"), &PLAIN, USAGE_NOW_S);
+        assert_eq!(names(&chips), vec!["usage_plan", "usage_session"]);
+        assert_eq!(chips[0].1, "\u{2301} max");
+        assert_eq!(chips[1].1, "5h:42%");
+
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
+        let chips = line3(&limits, Some("enterprise"), &colored, USAGE_NOW_S);
+        assert!(
+            chips[0]
+                .1
+                .contains("\x1b[38;2;187;154;247menterprise\x1b[0m")
+        );
     }
 
     #[test]
     fn empty_limits_render_nothing() {
-        assert!(line3(&crate::usage::Limits::default(), &PLAIN, USAGE_NOW_S).is_empty());
+        assert!(line3(&crate::usage::Limits::default(), None, &PLAIN, USAGE_NOW_S).is_empty());
     }
 
     #[test]
@@ -878,9 +902,9 @@ mod tests {
             fable: Some(window(81.0, None)),
             ..crate::usage::Limits::default()
         };
-        let chips = line3(&limits, &PLAIN, USAGE_NOW_S);
-        assert_eq!(text_of(&chips, "usage_session"), "\u{2301} session:42%");
-        assert_eq!(text_of(&chips, "usage_week"), "week:63%");
+        let chips = line3(&limits, None, &PLAIN, USAGE_NOW_S);
+        assert_eq!(text_of(&chips, "usage_session"), "\u{2301} 5h:42%");
+        assert_eq!(text_of(&chips, "usage_week"), "7d:63%");
         assert_eq!(text_of(&chips, "usage_fable"), "fable:81%");
     }
 
@@ -895,7 +919,7 @@ mod tests {
             }),
             ..crate::usage::Limits::default()
         };
-        let chips = line3(&limits, &PLAIN, USAGE_NOW_S);
+        let chips = line3(&limits, None, &PLAIN, USAGE_NOW_S);
         assert_eq!(chips[0].1, "\u{2301} spend:37%");
     }
 
@@ -910,7 +934,7 @@ mod tests {
             }),
             ..crate::usage::Limits::default()
         };
-        assert!(line3(&limits, &PLAIN, USAGE_NOW_S).is_empty());
+        assert!(line3(&limits, None, &PLAIN, USAGE_NOW_S).is_empty());
     }
 
     #[test]
@@ -924,11 +948,11 @@ mod tests {
             week: Some(window(90.0, None)),
             ..crate::usage::Limits::default()
         };
-        let chips = line3(&limits, &colored, USAGE_NOW_S);
+        let chips = line3(&limits, None, &colored, USAGE_NOW_S);
         assert_eq!(
             text_of(&chips, "usage_session"),
             "\x1b[38;2;86;95;137m\u{2301} \x1b[0m\
-             \x1b[38;2;86;95;137msession:\x1b[0m\
+             \x1b[38;2;86;95;137m5h:\x1b[0m\
              \x1b[38;2;158;206;106m42%\x1b[0m"
         );
         assert!(text_of(&chips, "usage_week").contains("\x1b[38;2;247;118;142m90%\x1b[0m"));
@@ -944,10 +968,8 @@ mod tests {
             session: Some(window(42.0, Some(USAGE_NOW_S + 7_800))),
             ..crate::usage::Limits::default()
         };
-        let chips = line3(&limits, &colored, USAGE_NOW_S);
-        assert!(
-            text_of(&chips, "usage_session").ends_with("\x1b[38;2;86;95;137m \u{b7}2h10m\x1b[0m")
-        );
+        let chips = line3(&limits, None, &colored, USAGE_NOW_S);
+        assert!(text_of(&chips, "usage_session").ends_with("\x1b[38;2;86;95;137m (2h10m)\x1b[0m"));
     }
 
     #[test]
@@ -965,7 +987,7 @@ mod tests {
             }),
             ..crate::usage::Limits::default()
         };
-        let chips = line3(&limits, &colored, USAGE_NOW_S);
+        let chips = line3(&limits, None, &colored, USAGE_NOW_S);
         let text = text_of(&chips, "usage_spend");
         assert!(text.contains("\x1b[38;2;247;118;142m$1002\x1b[0m"));
         assert!(text.contains("\x1b[38;2;247;118;142m$1000\x1b[0m"));
@@ -975,7 +997,7 @@ mod tests {
     #[test]
     fn usage_preview_renders_the_sample_line() {
         let text = usage_preview(&PLAIN);
-        assert!(text.starts_with("\u{2301} session:42%"));
+        assert!(text.starts_with("\u{2301} max \u{2502} 5h:42%"));
         assert!(text.contains(" \u{2502} "));
         assert!(text.contains("spend:$1002/$1000 (100%)"));
     }

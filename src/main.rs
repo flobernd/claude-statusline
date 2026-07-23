@@ -56,7 +56,7 @@ const LINE2_DROP: &[&str] = &[
 ];
 // usage_session is intentionally absent so it never drops: the five-hour
 // window is the limit users hit first.
-const LINE3_DROP: &[&str] = &["usage_spend", "usage_fable", "usage_week"];
+const LINE3_DROP: &[&str] = &["usage_plan", "usage_spend", "usage_fable", "usage_week"];
 const SEP: &str = " \u{2502} ";
 
 fn main() {
@@ -225,7 +225,14 @@ fn render(raw: &str) -> Option<String> {
                 snapshot.as_ref().map(|s| &s.utilization),
                 now_epoch_s,
             );
-            compose(sections::line3(&limits, &style, now_epoch_s), LINE3_DROP)
+            let plan = account
+                .organization_type
+                .as_deref()
+                .and_then(|t| t.strip_prefix("claude_"));
+            compose(
+                sections::line3(&limits, plan, &style, now_epoch_s),
+                LINE3_DROP,
+            )
         } else {
             None
         }
