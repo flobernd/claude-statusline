@@ -32,10 +32,6 @@ pub struct Payload {
     pub pr: Option<Pr>,
     #[serde(default, deserialize_with = "lenient")]
     pub worktree: Option<Worktree>,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the upcoming usage limits line")
-    )]
     #[serde(default, deserialize_with = "lenient")]
     pub rate_limits: Option<RateLimits>,
 }
@@ -194,10 +190,6 @@ pub fn home_dir() -> Option<PathBuf> {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct AccountInfo {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the upcoming usage limits gating")
-    )]
     #[serde(default, deserialize_with = "lenient", rename = "organizationType")]
     pub organization_type: Option<String>,
     #[serde(default, deserialize_with = "lenient", rename = "accountUuid")]

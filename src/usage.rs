@@ -87,10 +87,6 @@ pub fn cache_path() -> Option<PathBuf> {
 
 /// A snapshot taken under a different account must read as absent so a
 /// /login switch never shows another account's numbers.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the upcoming usage limits rendering")
-)]
 pub fn load_snapshot(path: &Path, current_uuid: Option<&str>) -> Option<Snapshot> {
     let text = std::fs::read_to_string(path).ok()?;
     let snapshot: Snapshot = serde_json::from_str(&text).ok()?;
@@ -100,10 +96,6 @@ pub fn load_snapshot(path: &Path, current_uuid: Option<&str>) -> Option<Snapshot
     Some(snapshot)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the upcoming usage limits rendering")
-)]
 #[derive(Debug)]
 pub struct Window {
     /// 0..100.
@@ -112,10 +104,6 @@ pub struct Window {
     pub resets_at: Option<i64>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the upcoming usage limits rendering")
-)]
 #[derive(Debug)]
 pub struct Spend {
     pub used_cents: Option<f64>,
@@ -126,10 +114,6 @@ pub struct Spend {
     pub resets_at: Option<i64>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the upcoming usage limits rendering")
-)]
 #[derive(Debug, Default)]
 pub struct Limits {
     pub session: Option<Window>,
@@ -141,10 +125,6 @@ pub struct Limits {
 /// The payload wins for session/week because it refreshes on every render
 /// tick; the cached endpoint snapshot only backfills and supplies the data
 /// the payload never carries (fable, spend).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the upcoming usage limits rendering")
-)]
 pub fn merge(
     payload: Option<&schema::RateLimits>,
     endpoint: Option<&EndpointUtilization>,
@@ -272,10 +252,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the upcoming usage limits rendering")
-)]
 pub fn spawn_fetch_if_stale(config: &Config) {
     // Checked before any filesystem access: interval 0 disables fetching.
     if config.usage_fetch_interval_seconds == 0 {
