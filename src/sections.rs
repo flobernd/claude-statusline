@@ -846,11 +846,11 @@ mod tests {
             text_of(&chips, "usage_session"),
             "\u{2301} session:42% \u{b7}2h10m"
         );
-        assert_eq!(text_of(&chips, "usage_week"), "week:63% \u{b7}72h00m");
-        assert_eq!(text_of(&chips, "usage_fable"), "fable:81% \u{b7}120h00m");
+        assert_eq!(text_of(&chips, "usage_week"), "week:63% \u{b7}3d");
+        assert_eq!(text_of(&chips, "usage_fable"), "fable:81% \u{b7}5d");
         assert_eq!(
             text_of(&chips, "usage_spend"),
-            "spend:$1002/$1000 (100%) \u{b7}192h00m"
+            "spend:$1002/$1000 (100%) \u{b7}8d"
         );
     }
 

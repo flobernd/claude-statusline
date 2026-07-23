@@ -30,7 +30,11 @@ pub fn fmt_duration(ms: u64) -> String {
     if total < 3_600 {
         return format!("{}m{:02}s", total / 60, total % 60);
     }
-    format!("{}h{:02}m", total / 3_600, (total % 3_600) / 60)
+    if total < 86_400 {
+        return format!("{}h{:02}m", total / 3_600, (total % 3_600) / 60);
+    }
+    // Bare rounded days: at reset-countdown scale the hours are noise.
+    format!("{}d", (total + 43_200) / 86_400)
 }
 
 #[cfg(test)]
@@ -79,5 +83,13 @@ mod tests {
     fn duration_hours_pad_minutes() {
         assert_eq!(fmt_duration(3_600_000), "1h00m");
         assert_eq!(fmt_duration(4_530_000), "1h15m");
+        assert_eq!(fmt_duration(86_399_000), "23h59m");
+    }
+
+    #[test]
+    fn duration_days_are_bare_and_rounded() {
+        assert_eq!(fmt_duration(86_400_000), "1d");
+        assert_eq!(fmt_duration(302_400_000), "4d"); // 3.5d rounds up
+        assert_eq!(fmt_duration(690_000_000), "8d");
     }
 }
