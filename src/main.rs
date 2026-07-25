@@ -8,6 +8,7 @@ mod sections;
 mod subagent;
 mod theme;
 mod transcript;
+mod update;
 mod usage;
 
 use clap::Parser;
