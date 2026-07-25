@@ -47,7 +47,9 @@ struct Cli {
     with_subagent_statusline: bool,
 }
 
-const LINE1_DROP: &[&str] = &["cache", "cache_age", "effort"];
+// update drops first: the notice is the least session-critical chip and
+// reappears whenever there is room.
+const LINE1_DROP: &[&str] = &["update", "cache", "cache_age", "effort"];
 // cwd, branch, and worktree are intentionally omitted so they never drop:
 // the location and active-worktree identity stay visible at any width.
 const LINE2_DROP: &[&str] = &[
@@ -247,8 +249,23 @@ fn render(raw: &str) -> Option<String> {
         None
     };
 
+    let mut line1_chips = sections::line1(&ctx);
+    // The interval gates the spawn and the chip; disabled_sections only
+    // hides the chip (compose filters it), so the cache stays warm for a
+    // later re-enable.
+    if config.update_check_interval_minutes > 0 {
+        update::spawn_check_if_stale(&config);
+        if let Some(chip) = update::cache_path()
+            .and_then(|p| update::load_snapshot(&p))
+            .and_then(|s| update::available_update(&s, update::CURRENT_VERSION))
+            .map(|(version, url)| sections::update_chip(&version, url.as_deref(), &style))
+        {
+            line1_chips.push(chip);
+        }
+    }
+
     let lines: Vec<String> = [
-        compose(sections::line1(&ctx), LINE1_DROP),
+        compose(line1_chips, LINE1_DROP),
         compose(sections::line2(&ctx), LINE2_DROP),
         line3,
     ]

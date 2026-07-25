@@ -105,6 +105,21 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
     out
 }
 
+/// The update chip: glyph plus the newer version, linked to its release
+/// notes. Amber so it stands out from the metrics without reading as an
+/// error. The bare U+2B06 (no variation selector) stays single-width,
+/// which the fitting logic relies on.
+pub fn update_chip(version: &str, url: Option<&str>, s: &Style) -> (&'static str, String) {
+    let text = s.paint(&format!("\u{2B06} {version}"), YELLOW);
+    (
+        "update",
+        match url {
+            Some(u) => s.link(u, &text),
+            None => text,
+        },
+    )
+}
+
 pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> = Vec::new();
     let s = c.style;
