@@ -9,7 +9,7 @@ fn version_flag_prints_name_and_version() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("claude-statusline"));
-    assert!(stdout.contains("0.1.0"));
+    assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
