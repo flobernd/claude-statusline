@@ -85,6 +85,64 @@ pub fn cache_path() -> Option<PathBuf> {
     schema::home_dir().map(|h| h.join(".claude").join("claude-statusline-usage.json"))
 }
 
+/// Environment overrides that point Claude Code away from the official
+/// Claude API. Snapshotted once so the hide/show decision stays pure and
+/// testable. The statusline inherits Claude Code's environment, including
+/// `env` entries from settings.json, so these are directly visible.
+#[derive(Debug, Default)]
+pub struct EndpointEnv {
+    pub auth_token: Option<String>,
+    pub base_url: Option<String>,
+    pub use_bedrock: Option<String>,
+    pub use_vertex: Option<String>,
+}
+
+impl EndpointEnv {
+    pub fn from_env() -> Self {
+        let var = |key: &str| std::env::var(key).ok();
+        Self {
+            auth_token: var("ANTHROPIC_AUTH_TOKEN"),
+            base_url: var("ANTHROPIC_BASE_URL"),
+            use_bedrock: var("CLAUDE_CODE_USE_BEDROCK"),
+            use_vertex: var("CLAUDE_CODE_USE_VERTEX"),
+        }
+    }
+
+    /// Every ambiguity errs toward official so a stray empty variable can
+    /// never hide the line. A custom bearer token counts even next to an
+    /// official base URL because it means gateway auth either way. The
+    /// Bedrock/Vertex base URL variables need no check of their own:
+    /// Claude Code ignores them unless the matching mode flag is truthy.
+    pub fn is_custom(&self) -> bool {
+        is_set(&self.auth_token)
+            || self
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|url| !url.is_empty() && !is_official_url(url))
+            || flag_enabled(&self.use_bedrock)
+            || flag_enabled(&self.use_vertex)
+    }
+}
+
+fn is_set(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|v| !v.trim().is_empty())
+}
+
+fn flag_enabled(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|v| {
+        let v = v.trim().to_ascii_lowercase();
+        !v.is_empty() && v != "0" && v != "false"
+    })
+}
+
+/// api.claude.com counts as official alongside api.anthropic.com because
+/// Claude Code treats both as first-party hosts.
+fn is_official_url(url: &str) -> bool {
+    let normalized = url.trim_end_matches('/').to_ascii_lowercase();
+    normalized == "https://api.anthropic.com" || normalized == "https://api.claude.com"
+}
+
 /// A snapshot taken under a different account must read as absent so a
 /// /login switch never shows another account's numbers.
 pub fn load_snapshot(path: &Path, current_uuid: Option<&str>) -> Option<Snapshot> {
@@ -674,5 +732,79 @@ mod tests {
         };
         // Must return without touching the cache file or spawning.
         spawn_fetch_if_stale(&config);
+    }
+
+    fn endpoint_env(
+        auth_token: Option<&str>,
+        base_url: Option<&str>,
+        use_bedrock: Option<&str>,
+        use_vertex: Option<&str>,
+    ) -> EndpointEnv {
+        EndpointEnv {
+            auth_token: auth_token.map(str::to_string),
+            base_url: base_url.map(str::to_string),
+            use_bedrock: use_bedrock.map(str::to_string),
+            use_vertex: use_vertex.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn endpoint_unset_or_blank_variables_read_as_official() {
+        assert!(!EndpointEnv::default().is_custom());
+        assert!(!endpoint_env(Some(""), Some(""), Some(""), Some("")).is_custom());
+        assert!(!endpoint_env(Some("  "), Some(" "), Some("\t"), Some(" ")).is_custom());
+    }
+
+    #[test]
+    fn endpoint_official_base_urls_read_as_official() {
+        for url in [
+            "https://api.anthropic.com",
+            "https://api.anthropic.com/",
+            "https://API.Anthropic.com",
+            "https://api.claude.com",
+            "https://api.claude.com/",
+            "  https://api.anthropic.com  ",
+        ] {
+            assert!(
+                !endpoint_env(None, Some(url), None, None).is_custom(),
+                "{url} must read as official"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_custom_base_urls_read_as_custom() {
+        for url in [
+            "https://gateway.example.com",
+            "https://litellm.internal:4000",
+            "http://api.anthropic.com",
+            "https://api.anthropic.com/v1",
+            "https://anthropic.com",
+        ] {
+            assert!(
+                endpoint_env(None, Some(url), None, None).is_custom(),
+                "{url} must read as custom"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_mode_flags_hide_only_when_truthy() {
+        for value in ["1", "true", "TRUE", "yes", "anything"] {
+            assert!(endpoint_env(None, None, Some(value), None).is_custom());
+            assert!(endpoint_env(None, None, None, Some(value)).is_custom());
+        }
+        for value in ["0", "false", "FALSE", " false "] {
+            assert!(!endpoint_env(None, None, Some(value), None).is_custom());
+            assert!(!endpoint_env(None, None, None, Some(value)).is_custom());
+        }
+    }
+
+    #[test]
+    fn endpoint_auth_token_reads_as_custom() {
+        assert!(endpoint_env(Some("sk-gateway-token"), None, None, None).is_custom());
+        // Even next to an explicitly official base URL: a custom bearer
+        // token means gateway auth regardless of the URL.
+        assert!(endpoint_env(Some("t"), Some("https://api.anthropic.com"), None, None).is_custom());
     }
 }

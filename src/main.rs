@@ -212,7 +212,7 @@ fn render(raw: &str) -> Option<String> {
         let account = schema::home_dir()
             .map(|h| schema::load_account_info(&h.join(".claude.json")))
             .unwrap_or_default();
-        if usage_line_enabled(&config, &payload, &account) {
+        if usage_line_enabled(&config, &payload, &account, &usage::EndpointEnv::from_env()) {
             usage::spawn_fetch_if_stale(&config);
             let snapshot = usage::cache_path()
                 .and_then(|p| usage::load_snapshot(&p, account.account_uuid.as_deref()));
@@ -254,18 +254,23 @@ fn render(raw: &str) -> Option<String> {
 /// The usage line is for native Anthropic subscriptions only. Enterprise
 /// seats may receive no payload rate_limits at all, so the account type
 /// from ~/.claude.json is the alternate signal that keeps the line alive
-/// for them; API-key, Bedrock, and Vertex sessions match neither.
+/// for them. That fallback is a login artifact though: it stays true when
+/// the session talks to a gateway, Bedrock, or Vertex, so a custom
+/// endpoint disables it. Payload rate_limits win unconditionally because
+/// they only appear when Anthropic subscription headers actually flow.
 fn usage_line_enabled(
     config: &schema::Config,
     payload: &schema::Payload,
     account: &schema::AccountInfo,
+    endpoint: &usage::EndpointEnv,
 ) -> bool {
     config.advanced_usage_limits_enabled
         && (payload.rate_limits.is_some()
-            || account
-                .organization_type
-                .as_deref()
-                .is_some_and(|t| t.starts_with("claude_")))
+            || (!endpoint.is_custom()
+                && account
+                    .organization_type
+                    .as_deref()
+                    .is_some_and(|t| t.starts_with("claude_"))))
 }
 
 #[cfg(test)]
@@ -279,16 +284,18 @@ mod tests {
             organization_type: Some("claude_max".to_string()),
             account_uuid: None,
         };
+        let official = usage::EndpointEnv::default();
         assert!(!usage_line_enabled(
             &schema::Config::default(),
             &payload,
-            &account
+            &account,
+            &official
         ));
         let enabled = schema::Config {
             advanced_usage_limits_enabled: true,
             ..schema::Config::default()
         };
-        assert!(usage_line_enabled(&enabled, &payload, &account));
+        assert!(usage_line_enabled(&enabled, &payload, &account, &official));
     }
 
     #[test]
@@ -308,10 +315,41 @@ mod tests {
             account_uuid: None,
         };
         let unknown = schema::AccountInfo::default();
+        let official = usage::EndpointEnv::default();
 
-        assert!(usage_line_enabled(&enabled, &with_limits, &unknown));
-        assert!(usage_line_enabled(&enabled, &without, &native));
-        assert!(!usage_line_enabled(&enabled, &without, &external));
-        assert!(!usage_line_enabled(&enabled, &without, &unknown));
+        assert!(usage_line_enabled(
+            &enabled,
+            &with_limits,
+            &unknown,
+            &official
+        ));
+        assert!(usage_line_enabled(&enabled, &without, &native, &official));
+        assert!(!usage_line_enabled(
+            &enabled, &without, &external, &official
+        ));
+        assert!(!usage_line_enabled(&enabled, &without, &unknown, &official));
+    }
+
+    #[test]
+    fn usage_line_custom_endpoint_disables_only_the_account_fallback() {
+        let enabled = schema::Config {
+            advanced_usage_limits_enabled: true,
+            ..schema::Config::default()
+        };
+        let with_limits = schema::parse_payload(r#"{"rate_limits": {}}"#).unwrap();
+        let without = schema::parse_payload("{}").unwrap();
+        let native = schema::AccountInfo {
+            organization_type: Some("claude_max".to_string()),
+            account_uuid: None,
+        };
+        let custom = usage::EndpointEnv {
+            base_url: Some("https://gateway.example.com".to_string()),
+            ..usage::EndpointEnv::default()
+        };
+
+        // The login artifact alone no longer keeps the line alive.
+        assert!(!usage_line_enabled(&enabled, &without, &native, &custom));
+        // Payload rate limits stay ground truth even behind a gateway.
+        assert!(usage_line_enabled(&enabled, &with_limits, &native, &custom));
     }
 }

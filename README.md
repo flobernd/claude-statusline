@@ -80,7 +80,9 @@ An opt-in third line shows the subscription limits otherwise hidden behind `/usa
 type, the five-hour session and weekly windows with reset countdowns, the Fable-only weekly
 window, and the extra-usage spend meter (which also covers Team/Enterprise spend limits). The
 wizard asks about it, or set `advanced_usage_limits_enabled` yourself. The line renders only
-for native Anthropic subscriptions; API-key, Bedrock, and Vertex sessions never show it.
+for native Anthropic subscriptions: Bedrock, Vertex, and custom-gateway sessions (a
+non-Anthropic `ANTHROPIC_BASE_URL` or an `ANTHROPIC_AUTH_TOKEN`) hide it unless the Claude
+Code payload still reports Anthropic rate limits.
 
 Session and weekly values come live from the Claude Code payload. The per-model and spend
 data comes from an unofficial claude.ai endpoint, fetched in the background at most every
