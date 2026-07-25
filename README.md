@@ -36,6 +36,8 @@ third.
 - Optional usage limits line (off by default): plan type, session and weekly window
   utilization with reset countdowns, the Fable-only weekly window, and the extra-usage
   spend meter
+- Opt-in update notification (off by default): a chip on the first line when a newer
+  release is published, linking to its release notes
 - Single native binary; renders in a few milliseconds. Only the opt-in usage limits line
   keeps a small on-disk snapshot, refreshed by a short-lived background fetch
 
@@ -90,6 +92,18 @@ data comes from an unofficial claude.ai endpoint, fetched in the background at m
 `~/.claude/claude-statusline-usage.json`. That endpoint may change without notice; when it
 does, the affected chips disappear silently while the payload-backed chips keep working.
 
+## Update notification
+
+An opt-in chip at the end of the first line appears when a GitHub release newer than the
+running binary is published, showing the new version and linking to its release notes.
+Notification only: updating stays `git pull` plus `cargo build --release`. The wizard asks
+about it, or set `update_check_interval_minutes` yourself (`1440` checks daily, `0`
+disables); for a non-interactive install use `--install --with-update-check`. When enabled,
+the statusline sends an anonymous request to `api.github.com` at most once per interval,
+fetched by a short-lived background process into `~/.claude/claude-statusline-update.json`.
+On a narrow terminal the chip is the first to give way, and it disappears on its own after
+an update.
+
 ## Configuration
 
 Optional file `~/.claude/claude-statusline.json`:
@@ -100,12 +114,13 @@ Optional file `~/.claude/claude-statusline.json`:
   "clickable_links": true,
   "disabled_sections": ["cache_age"],
   "subagent_disabled_sections": ["activity"],
+  "update_check_interval_minutes": 1440,
   "usage_fetch_interval_seconds": 60
 }
 ```
 
 `clickable_links` toggles the OSC 8 hyperlinks. `disabled_sections` hides chips by name:
-`context_tokens`, `cache`, `cache_age`, `model`, `effort`, `cwd`, `branch`, `git_files`,
+`context_tokens`, `cache`, `cache_age`, `model`, `effort`, `update`, `cwd`, `branch`, `git_files`,
 `git_stash`, `git_sync`, `git_state`, `git_worktree`, `pr`, `worktree`, `usage_plan`,
 `usage_session`, `usage_week`, `usage_fable`, `usage_spend`.
 
