@@ -39,7 +39,7 @@ third.
 - Opt-in update notification (off by default): a chip on the first line when a newer
   release is published, linking to its release notes
 - Single native binary; renders in a few milliseconds. Only the opt-in usage limits line
-  keeps a small on-disk snapshot, refreshed by a short-lived background fetch
+  and update check keep small on-disk snapshots, refreshed by short-lived background fetches
 
 ## Requirements
 
@@ -120,9 +120,9 @@ Optional file `~/.claude/claude-statusline.json`:
 ```
 
 `clickable_links` toggles the OSC 8 hyperlinks. `disabled_sections` hides chips by name:
-`context_tokens`, `cache`, `cache_age`, `model`, `effort`, `update`, `cwd`, `branch`, `git_files`,
-`git_stash`, `git_sync`, `git_state`, `git_worktree`, `pr`, `worktree`, `usage_plan`,
-`usage_session`, `usage_week`, `usage_fable`, `usage_spend`.
+`context_tokens`, `cache`, `cache_age`, `model`, `effort`, `update`, `cwd`, `branch`,
+`git_files`, `git_stash`, `git_sync`, `git_state`, `git_worktree`, `pr`, `worktree`,
+`usage_plan`, `usage_session`, `usage_week`, `usage_fable`, `usage_spend`.
 
 `subagent_disabled_sections` does the same for the subagent rows:
 `name`, `cwd`, `branch`, `activity`, `context_tokens`, `elapsed`, `model`, `effort`.
