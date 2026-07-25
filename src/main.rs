@@ -45,6 +45,9 @@ struct Cli {
     /// With --install: also write the subagentStatusLine entry
     #[arg(long = "with-subagent-statusline")]
     with_subagent_statusline: bool,
+    /// With --install: also enable the daily update check
+    #[arg(long = "with-update-check")]
+    with_update_check: bool,
 }
 
 // update drops first: the notice is the least session-critical chip and
@@ -80,6 +83,16 @@ fn main() {
         if let Err(e) = commands::install::install(cli.with_subagent_statusline) {
             eprintln!("claude-statusline: install failed: {e}");
             std::process::exit(1);
+        }
+        if cli.with_update_check {
+            let path = schema::home_dir()
+                .unwrap_or_default()
+                .join(".claude")
+                .join("claude-statusline.json");
+            if let Err(e) = commands::setup::enable_update_check(&path) {
+                eprintln!("claude-statusline: enabling the update check failed: {e}");
+                std::process::exit(1);
+            }
         }
         return;
     }

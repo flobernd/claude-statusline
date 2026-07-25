@@ -861,3 +861,52 @@ fn narrow_width_drops_the_update_chip_first() {
     assert!(stdout.contains("cache:46%"), "stdout: {stdout}");
     assert!(stdout.contains("Sonnet 5"), "stdout: {stdout}");
 }
+
+#[test]
+fn install_with_update_check_writes_the_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let out = Command::new(env!("CARGO_BIN_EXE_claude-statusline"))
+        .args(["--install", "--with-update-check"])
+        .env("CLAUDE_STATUSLINE_SETTINGS_PATH", &path)
+        .env("HOME", dir.path())
+        .env("USERPROFILE", dir.path())
+        .output()
+        .expect("binary runs");
+    assert!(out.status.success());
+    let config: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".claude").join("claude-statusline.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(config["update_check_interval_minutes"], 1440);
+}
+
+#[test]
+fn setup_opting_into_update_check_writes_the_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    // Answers: install yes, subagent no, usage limits no, update check yes.
+    let out = run_setup("y\nn\nn\ny\n", &path);
+    assert!(out.status.success());
+    let config: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".claude").join("claude-statusline.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(config["update_check_interval_minutes"], 1440);
+}
+
+#[test]
+fn setup_declining_update_check_leaves_the_config_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let out = run_setup("y\nn\nn\nn\n", &path);
+    assert!(out.status.success());
+    assert!(
+        !dir.path()
+            .join(".claude")
+            .join("claude-statusline.json")
+            .exists()
+    );
+}
