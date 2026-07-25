@@ -1,7 +1,8 @@
-use crate::schema::{self, lenient};
+use crate::schema::{self, Config, lenient};
 use crate::usage;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 /// Version embedded at build time; the only local version source.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -87,6 +88,102 @@ fn next_snapshot(
             ..previous.unwrap_or_default()
         },
     }
+}
+
+/// releases/latest excludes drafts and prereleases, so notes can be
+/// drafted at leisure and the notification fires only on publish.
+const LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/flobernd/claude-statusline/releases/latest";
+
+/// The config unit is minutes because sub-minute update checks are never
+/// sensible; the shared staleness helper speaks seconds.
+fn interval_seconds(config: &Config) -> u64 {
+    config.update_check_interval_minutes.saturating_mul(60)
+}
+
+pub fn spawn_check_if_stale(config: &Config) {
+    // Checked before any filesystem access: interval 0 disables checking.
+    if config.update_check_interval_minutes == 0 {
+        return;
+    }
+    let Some(path) = cache_path() else {
+        return;
+    };
+    if !usage::fetch_due(
+        interval_seconds(config),
+        usage::read_fetched_at_ms(&path),
+        usage::now_ms(),
+    ) {
+        return;
+    }
+    spawn_fetch_child();
+}
+
+fn spawn_fetch_child() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut cmd = Command::new(exe);
+    cmd.arg("--fetch-update")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: no console handle
+        // and no Ctrl+C propagation, so the child outlives the render tick.
+        cmd.creation_flags(0x0000_0008 | 0x0000_0200);
+    }
+    // Never waited on: the render path must not block on the network. The
+    // parent exits within the tick, so the OS reaps the orphaned child.
+    let _ = cmd.spawn();
+}
+
+/// Entry point of the detached fetch child. Silent on every failure by
+/// design: a broken check must never splat into the Claude Code footer.
+pub fn run_fetch() -> i32 {
+    let _ = try_fetch();
+    0
+}
+
+fn try_fetch() -> Option<()> {
+    let home = schema::home_dir()?;
+    let config = schema::load_config(&home.join(".claude").join("claude-statusline.json"));
+    let path = cache_path()?;
+    // Re-checking staleness doubles as stampede protection when several
+    // render ticks spawn children before the first snapshot lands.
+    if !usage::fetch_due(
+        interval_seconds(&config),
+        usage::read_fetched_at_ms(&path),
+        usage::now_ms(),
+    ) {
+        return None;
+    }
+    let release = fetch_release();
+    let snapshot = next_snapshot(release, load_snapshot(&path), usage::now_ms());
+    usage::write_json_atomic(&path, &snapshot)
+}
+
+/// The only network touchpoint, kept separate so no test can reach it.
+fn fetch_release() -> Option<ReleaseInfo> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+    let body = agent
+        .get(LATEST_RELEASE_URL)
+        // GitHub rejects requests without a User-Agent.
+        .set(
+            "User-Agent",
+            concat!("claude-statusline/", env!("CARGO_PKG_VERSION")),
+        )
+        .set("Accept", "application/vnd.github+json")
+        .call()
+        .ok()?
+        .into_string()
+        .ok()?;
+    serde_json::from_str(&body).ok()
 }
 
 #[cfg(test)]
@@ -186,5 +283,18 @@ mod tests {
         assert_eq!(loaded.latest_version.as_deref(), Some("0.2.0"));
         assert_eq!(loaded.release_url.as_deref(), Some("https://example.com/r"));
         assert!(load_snapshot(&dir.path().join("missing.json")).is_none());
+    }
+
+    #[test]
+    fn interval_zero_short_circuits_checking() {
+        let config = schema::Config::default();
+        assert_eq!(config.update_check_interval_minutes, 0);
+        // Must return without touching the cache file or spawning.
+        spawn_check_if_stale(&config);
+        let enabled = schema::Config {
+            update_check_interval_minutes: 1440,
+            ..schema::Config::default()
+        };
+        assert_eq!(interval_seconds(&enabled), 86_400);
     }
 }

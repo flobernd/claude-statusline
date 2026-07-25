@@ -752,3 +752,24 @@ fn setup_declining_subagent_installs_main_only() {
     assert!(v.get("statusLine").is_some());
     assert!(v.get("subagentStatusLine").is_none());
 }
+
+#[test]
+fn fetch_update_flag_is_a_silent_no_op_when_disabled() {
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_claude-statusline"))
+        .arg("--fetch-update")
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .output()
+        .expect("binary runs");
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty() && out.stderr.is_empty());
+    // Default interval 0: no snapshot may appear and no network runs.
+    assert!(
+        !home
+            .path()
+            .join(".claude")
+            .join("claude-statusline-update.json")
+            .exists()
+    );
+}

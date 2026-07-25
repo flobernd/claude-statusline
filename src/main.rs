@@ -36,6 +36,9 @@ struct Cli {
     /// Refresh the usage limits cache and exit (spawned by render ticks)
     #[arg(long = "fetch-usage")]
     fetch_usage: bool,
+    /// Refresh the update check cache and exit (spawned by render ticks)
+    #[arg(long = "fetch-update")]
+    fetch_update: bool,
     /// Render per-task rows for Claude Code's subagentStatusLine hook
     #[arg(long = "subagent-statusline")]
     subagent_statusline: bool,
@@ -67,6 +70,9 @@ fn main() {
     }
     if cli.fetch_usage {
         std::process::exit(usage::run_fetch());
+    }
+    if cli.fetch_update {
+        std::process::exit(update::run_fetch());
     }
     if cli.install {
         if let Err(e) = commands::install::install(cli.with_subagent_statusline) {
