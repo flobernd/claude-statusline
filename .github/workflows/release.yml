@@ -1,0 +1,104 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Semver component to bump
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      version:
+        description: Explicit version (X.Y.Z); overrides bump
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute the next version
+        id: next
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXPLICIT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          current="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [ -n "$EXPLICIT" ]; then
+            next="$EXPLICIT"
+          else
+            IFS=. read -r major minor patch <<< "$current"
+            case "$BUMP" in
+              major) next="$((major + 1)).0.0" ;;
+              minor) next="${major}.$((minor + 1)).0" ;;
+              patch) next="${major}.${minor}.$((patch + 1))" ;;
+            esac
+          fi
+          if ! echo "$next" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "invalid version: $next" >&2
+            exit 1
+          fi
+          if [ "$current" = "$next" ] \
+            || [ "$(printf '%s\n%s\n' "$current" "$next" | sort -V | tail -n 1)" != "$next" ]; then
+            echo "$next is not greater than $current" >&2
+            exit 1
+          fi
+          git fetch --tags --quiet
+          if git rev-parse -q --verify "refs/tags/$next" > /dev/null; then
+            echo "tag $next already exists" >&2
+            exit 1
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Bump Cargo.toml and Cargo.lock
+        env:
+          NEXT: ${{ steps.next.outputs.version }}
+        run: |
+          set -euo pipefail
+          sed -i "0,/^version = \".*\"/s//version = \"$NEXT\"/" Cargo.toml
+          cargo update --workspace
+          grep -q "^version = \"$NEXT\"" Cargo.toml
+
+      - name: Commit the bump as a verified commit
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.next.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          oid="$(gh api graphql \
+            -f query='
+              mutation ($input: CreateCommitOnBranchInput!) {
+                createCommitOnBranch(input: $input) { commit { oid } }
+              }' \
+            -F "input[branch][repositoryNameWithOwner]=$REPO" \
+            -F "input[branch][branchName]=master" \
+            -F "input[expectedHeadOid]=$GITHUB_SHA" \
+            -F "input[message][headline]=Release $NEXT" \
+            -F "input[fileChanges][additions][0][path]=Cargo.toml" \
+            -F "input[fileChanges][additions][0][contents]=$(base64 -w0 Cargo.toml)" \
+            -F "input[fileChanges][additions][1][path]=Cargo.lock" \
+            -F "input[fileChanges][additions][1][contents]=$(base64 -w0 Cargo.lock)" \
+            --jq '.data.createCommitOnBranch.commit.oid')"
+          echo "oid=$oid" >> "$GITHUB_OUTPUT"
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.next.outputs.version }}
+        run: |
+          gh release create "$NEXT" \
+            --draft \
+            --generate-notes \
+            --title "$NEXT" \
+            --target "${{ steps.commit.outputs.oid }}"
