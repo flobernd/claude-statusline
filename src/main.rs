@@ -8,6 +8,7 @@ mod sections;
 mod subagent;
 mod theme;
 mod transcript;
+mod update;
 mod usage;
 
 use clap::Parser;
@@ -35,15 +36,23 @@ struct Cli {
     /// Refresh the usage limits cache and exit (spawned by render ticks)
     #[arg(long = "fetch-usage")]
     fetch_usage: bool,
+    /// Refresh the update check cache and exit (spawned by render ticks)
+    #[arg(long = "fetch-update")]
+    fetch_update: bool,
     /// Render per-task rows for Claude Code's subagentStatusLine hook
     #[arg(long = "subagent-statusline")]
     subagent_statusline: bool,
     /// With --install: also write the subagentStatusLine entry
     #[arg(long = "with-subagent-statusline")]
     with_subagent_statusline: bool,
+    /// With --install: also enable the daily update check
+    #[arg(long = "with-update-check")]
+    with_update_check: bool,
 }
 
-const LINE1_DROP: &[&str] = &["cache", "cache_age", "effort"];
+// update drops first: the notice is the least session-critical chip and
+// reappears whenever there is room.
+const LINE1_DROP: &[&str] = &["update", "cache", "cache_age", "effort"];
 // cwd, branch, and worktree are intentionally omitted so they never drop:
 // the location and active-worktree identity stay visible at any width.
 const LINE2_DROP: &[&str] = &[
@@ -67,10 +76,23 @@ fn main() {
     if cli.fetch_usage {
         std::process::exit(usage::run_fetch());
     }
+    if cli.fetch_update {
+        std::process::exit(update::run_fetch());
+    }
     if cli.install {
         if let Err(e) = commands::install::install(cli.with_subagent_statusline) {
             eprintln!("claude-statusline: install failed: {e}");
             std::process::exit(1);
+        }
+        if cli.with_update_check {
+            let path = schema::home_dir()
+                .unwrap_or_default()
+                .join(".claude")
+                .join("claude-statusline.json");
+            if let Err(e) = commands::setup::enable_update_check(&path) {
+                eprintln!("claude-statusline: enabling the update check failed: {e}");
+                std::process::exit(1);
+            }
         }
         return;
     }
@@ -240,8 +262,23 @@ fn render(raw: &str) -> Option<String> {
         None
     };
 
+    let mut line1_chips = sections::line1(&ctx);
+    // The interval gates the spawn and the chip; disabled_sections only
+    // hides the chip (compose filters it), so the cache stays warm for a
+    // later re-enable.
+    if config.update_check_interval_minutes > 0 {
+        update::spawn_check_if_stale(&config);
+        if let Some(chip) = update::cache_path()
+            .and_then(|p| update::load_snapshot(&p))
+            .and_then(|s| update::available_update(&s, update::CURRENT_VERSION))
+            .map(|(version, url)| sections::update_chip(&version, url.as_deref(), &style))
+        {
+            line1_chips.push(chip);
+        }
+    }
+
     let lines: Vec<String> = [
-        compose(sections::line1(&ctx), LINE1_DROP),
+        compose(line1_chips, LINE1_DROP),
         compose(sections::line2(&ctx), LINE2_DROP),
         line3,
     ]

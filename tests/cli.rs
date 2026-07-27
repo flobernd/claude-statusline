@@ -9,7 +9,7 @@ fn version_flag_prints_name_and_version() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("claude-statusline"));
-    assert!(stdout.contains("0.1.0"));
+    assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
@@ -767,4 +767,162 @@ fn setup_declining_subagent_installs_main_only() {
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert!(v.get("statusLine").is_some());
     assert!(v.get("subagentStatusLine").is_none());
+}
+
+#[test]
+fn fetch_update_flag_is_a_silent_no_op_when_disabled() {
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_claude-statusline"))
+        .arg("--fetch-update")
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .output()
+        .expect("binary runs");
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty() && out.stderr.is_empty());
+    // Default interval 0: no snapshot may appear and no network runs.
+    assert!(
+        !home
+            .path()
+            .join(".claude")
+            .join("claude-statusline-update.json")
+            .exists()
+    );
+}
+
+/// Config with the check enabled plus a fresh snapshot. The fresh
+/// fetched_at_ms keeps the render tick from spawning a real network fetch
+/// child during the test.
+fn write_update_snapshot(home: &std::path::Path, latest: &str) {
+    let claude_dir = home.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("claude-statusline.json"),
+        r#"{"update_check_interval_minutes": 1440}"#,
+    )
+    .unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    std::fs::write(
+        claude_dir.join("claude-statusline-update.json"),
+        format!(
+            r#"{{"fetched_at_ms": {now_ms}, "latest_version": {latest:?}, "release_url": "https://github.com/flobernd/claude-statusline/releases/tag/{latest}"}}"#
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn update_chip_renders_from_a_seeded_snapshot() {
+    let home = tempfile::tempdir().unwrap();
+    write_update_snapshot(home.path(), "99.0.0");
+    let out = run_statusline(SAMPLE, "200", home.path());
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\u{2B06} 99.0.0"), "stdout: {stdout}");
+    // The chip sits on line 1, after the effort chip.
+    let line1 = stdout.lines().next().unwrap();
+    assert!(
+        line1.contains("xhigh \u{2502} \u{2B06} 99.0.0"),
+        "line1: {line1}"
+    );
+}
+
+#[test]
+fn update_chip_stays_hidden_without_opt_in() {
+    let home = tempfile::tempdir().unwrap();
+    write_update_snapshot(home.path(), "99.0.0");
+    // Interval 0 (the default) disables the feature even with a snapshot.
+    std::fs::write(
+        home.path().join(".claude").join("claude-statusline.json"),
+        "{}",
+    )
+    .unwrap();
+    let out = run_statusline(SAMPLE, "200", home.path());
+    assert!(!String::from_utf8_lossy(&out.stdout).contains('\u{2B06}'));
+}
+
+#[test]
+fn update_chip_respects_disabled_sections() {
+    let home = tempfile::tempdir().unwrap();
+    write_update_snapshot(home.path(), "99.0.0");
+    std::fs::write(
+        home.path().join(".claude").join("claude-statusline.json"),
+        r#"{"update_check_interval_minutes": 1440, "disabled_sections": ["update"]}"#,
+    )
+    .unwrap();
+    let out = run_statusline(SAMPLE, "200", home.path());
+    assert!(!String::from_utf8_lossy(&out.stdout).contains('\u{2B06}'));
+}
+
+#[test]
+fn update_chip_absent_when_not_newer() {
+    let home = tempfile::tempdir().unwrap();
+    write_update_snapshot(home.path(), env!("CARGO_PKG_VERSION"));
+    let out = run_statusline(SAMPLE, "200", home.path());
+    assert!(!String::from_utf8_lossy(&out.stdout).contains('\u{2B06}'));
+}
+
+#[test]
+fn narrow_width_drops_the_update_chip_first() {
+    let home = tempfile::tempdir().unwrap();
+    write_update_snapshot(home.path(), "99.0.0");
+    // At 50 columns dropping the 8-cell update chip alone makes the line
+    // fit, so every other chip must survive.
+    let out = run_statusline(SAMPLE, "50", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains('\u{2B06}'), "stdout: {stdout}");
+    assert!(stdout.contains("cache:46%"), "stdout: {stdout}");
+    assert!(stdout.contains("Sonnet 5"), "stdout: {stdout}");
+}
+
+#[test]
+fn install_with_update_check_writes_the_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let out = Command::new(env!("CARGO_BIN_EXE_claude-statusline"))
+        .args(["--install", "--with-update-check"])
+        .env("CLAUDE_STATUSLINE_SETTINGS_PATH", &path)
+        .env("HOME", dir.path())
+        .env("USERPROFILE", dir.path())
+        .output()
+        .expect("binary runs");
+    assert!(out.status.success());
+    let config: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".claude").join("claude-statusline.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(config["update_check_interval_minutes"], 1440);
+}
+
+#[test]
+fn setup_opting_into_update_check_writes_the_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    // Answers: install yes, subagent no, usage limits no, update check yes.
+    let out = run_setup("y\nn\nn\ny\n", &path);
+    assert!(out.status.success());
+    let config: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".claude").join("claude-statusline.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(config["update_check_interval_minutes"], 1440);
+}
+
+#[test]
+fn setup_declining_update_check_leaves_the_config_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let out = run_setup("y\nn\nn\nn\n", &path);
+    assert!(out.status.success());
+    assert!(
+        !dir.path()
+            .join(".claude")
+            .join("claude-statusline.json")
+            .exists()
+    );
 }

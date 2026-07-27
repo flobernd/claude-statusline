@@ -69,6 +69,20 @@ pub fn run() -> Result<()> {
         }
     }
 
+    print!("Check for updates once a day and show a notification chip? [y/N]: ");
+    std::io::stdout().flush()?;
+    let mut update_answer = String::new();
+    // EOF counts as the default "no": the install must still happen.
+    let _ = std::io::stdin().lock().read_line(&mut update_answer);
+    if matches!(update_answer.trim().to_lowercase().as_str(), "y" | "yes") {
+        enable_update_check(
+            &crate::schema::home_dir()
+                .unwrap_or_default()
+                .join(".claude")
+                .join("claude-statusline.json"),
+        )?;
+    }
+
     println!();
     super::install::install(with_subagent)?;
     println!();
@@ -77,9 +91,9 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-/// Flip the opt-in flag in the statusline config while keeping every
+/// Set a single opt-in key in the statusline config while keeping every
 /// other key intact: the wizard must never clobber hand-edited settings.
-pub fn enable_usage_limits(path: &Path) -> Result<()> {
+fn set_config_key(path: &Path, key: &str, value: Value) -> Result<()> {
     let mut root: Value = match std::fs::read_to_string(path) {
         // Failing beats overwriting: an unparseable file is the user's
         // data, not ours to discard.
@@ -90,10 +104,7 @@ pub fn enable_usage_limits(path: &Path) -> Result<()> {
     let Some(object) = root.as_object_mut() else {
         anyhow::bail!("{} is not a JSON object", path.display());
     };
-    object.insert(
-        "advanced_usage_limits_enabled".to_string(),
-        Value::Bool(true),
-    );
+    object.insert(key.to_string(), value);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -101,6 +112,15 @@ pub fn enable_usage_limits(path: &Path) -> Result<()> {
     text.push('\n');
     std::fs::write(path, text)?;
     Ok(())
+}
+
+pub fn enable_usage_limits(path: &Path) -> Result<()> {
+    set_config_key(path, "advanced_usage_limits_enabled", Value::Bool(true))
+}
+
+/// 1440 minutes: the daily cadence the wizard promises.
+pub fn enable_update_check(path: &Path) -> Result<()> {
+    set_config_key(path, "update_check_interval_minutes", json!(1440))
 }
 
 #[cfg(test)]
@@ -143,5 +163,28 @@ mod tests {
         assert!(enable_usage_limits(&path).is_err());
         // The unparseable file must survive untouched.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+    }
+
+    #[test]
+    fn enable_update_check_creates_a_missing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude").join("claude-statusline.json");
+        enable_update_check(&path).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["update_check_interval_minutes"], 1440);
+        assert_eq!(value.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn enable_update_check_preserves_existing_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude-statusline.json");
+        std::fs::write(&path, r#"{"clickable_links": false}"#).unwrap();
+        enable_update_check(&path).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["update_check_interval_minutes"], 1440);
+        assert_eq!(value["clickable_links"], false);
     }
 }

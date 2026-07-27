@@ -150,6 +150,7 @@ pub struct Config {
     pub clickable_links: bool,
     pub disabled_sections: Vec<String>,
     pub subagent_disabled_sections: Vec<String>,
+    pub update_check_interval_minutes: u64,
     pub usage_fetch_interval_seconds: u64,
 }
 
@@ -160,6 +161,7 @@ impl Default for Config {
             clickable_links: true,
             disabled_sections: Vec::new(),
             subagent_disabled_sections: Vec::new(),
+            update_check_interval_minutes: 0,
             usage_fetch_interval_seconds: 60,
         }
     }
@@ -426,5 +428,19 @@ mod tests {
         assert_eq!(c.subagent_disabled_sections, vec!["activity", "effort"]);
         // The new key must not disturb the other defaults.
         assert!(c.clickable_links && c.disabled_sections.is_empty());
+    }
+
+    #[test]
+    fn update_check_interval_defaults_to_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude-statusline.json");
+        assert_eq!(load_config(&path).update_check_interval_minutes, 0);
+
+        std::fs::write(&path, r#"{"update_check_interval_minutes": 1440}"#).unwrap();
+        let c = load_config(&path);
+        assert_eq!(c.update_check_interval_minutes, 1440);
+        // The new key must not disturb the other defaults.
+        assert!(c.clickable_links && c.disabled_sections.is_empty());
+        assert_eq!(c.usage_fetch_interval_seconds, 60);
     }
 }

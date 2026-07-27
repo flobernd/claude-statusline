@@ -285,7 +285,7 @@ fn next_month_start(now_epoch_s: i64) -> Option<i64> {
 
 /// Pure staleness decision shared by the render-side spawn and the fetch
 /// child's stampede re-check; interval 0 always reads as "not due".
-fn fetch_due(interval_s: u64, fetched_at_ms: Option<u64>, now_ms: u64) -> bool {
+pub(crate) fn fetch_due(interval_s: u64, fetched_at_ms: Option<u64>, now_ms: u64) -> bool {
     if interval_s == 0 {
         return false;
     }
@@ -297,13 +297,13 @@ fn fetch_due(interval_s: u64, fetched_at_ms: Option<u64>, now_ms: u64) -> bool {
 
 /// Staleness needs only fetched_at_ms; a corrupt cache then simply reads
 /// as stale instead of dragging the full schema into the render path.
-fn read_fetched_at_ms(path: &Path) -> Option<u64> {
+pub(crate) fn read_fetched_at_ms(path: &Path) -> Option<u64> {
     let text = std::fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     value.get("fetched_at_ms")?.as_u64()
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -380,7 +380,7 @@ fn try_fetch() -> Option<()> {
         account_uuid,
         utilization,
     };
-    write_snapshot_atomic(&path, &snapshot)
+    write_json_atomic(&path, &snapshot)
 }
 
 /// The token feeds the Authorization header and nothing else; it is never
@@ -413,8 +413,8 @@ fn fetch_body(token: &str) -> Option<String> {
 
 /// Temp file plus rename so a render tick can never observe a half-written
 /// snapshot. The pid suffix keeps racing children off each other's file.
-fn write_snapshot_atomic(path: &Path, snapshot: &Snapshot) -> Option<()> {
-    let json = serde_json::to_string(snapshot).ok()?;
+pub(crate) fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Option<()> {
+    let json = serde_json::to_string(value).ok()?;
     let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     std::fs::write(&tmp, json).ok()?;
     if std::fs::rename(&tmp, path).is_err() {
@@ -661,7 +661,7 @@ mod tests {
             account_uuid: Some("u-1".to_string()),
             utilization: full_endpoint(),
         };
-        write_snapshot_atomic(&path, &snapshot).unwrap();
+        write_json_atomic(&path, &snapshot).unwrap();
 
         let loaded = load_snapshot(&path, Some("u-1")).unwrap();
         assert_eq!(loaded.fetched_at_ms, 1_784_829_600_000);
@@ -685,7 +685,7 @@ mod tests {
             account_uuid: None,
             utilization: EndpointUtilization::default(),
         };
-        write_snapshot_atomic(&path, &snapshot).unwrap();
+        write_json_atomic(&path, &snapshot).unwrap();
         assert!(load_snapshot(&path, None).is_some());
         assert!(load_snapshot(&path, Some("u-1")).is_none());
     }
@@ -699,12 +699,12 @@ mod tests {
             account_uuid: Some("u-1".to_string()),
             utilization: full_endpoint(),
         };
-        write_snapshot_atomic(&path, &snapshot).unwrap();
+        write_json_atomic(&path, &snapshot).unwrap();
         let updated = Snapshot {
             fetched_at_ms: 2,
             ..snapshot
         };
-        write_snapshot_atomic(&path, &updated).unwrap();
+        write_json_atomic(&path, &updated).unwrap();
 
         let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(entries.len(), 1, "no stray temp files may remain");
