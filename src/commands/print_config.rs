@@ -104,6 +104,10 @@ mod tests {
         assert!(is_our_command(
             "\"C:\\Program Files\\claude-statusline.exe\""
         ));
+        assert!(is_our_command("C:/tools/claude-statusline.exe"));
+        assert!(is_our_command(
+            "\"C:/Program Files/claude-statusline.exe\" --subagent-statusline"
+        ));
     }
 
     #[test]
