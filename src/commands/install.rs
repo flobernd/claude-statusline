@@ -40,6 +40,11 @@ pub fn install(with_subagent: bool) -> Result<()> {
         .context("cannot resolve the path of this binary")?
         .display()
         .to_string();
+    // Claude Code runs statusLine commands through Git Bash on Windows,
+    // which strips unquoted backslashes, so the written path must use
+    // forward slashes (Windows accepts them).
+    #[cfg(windows)]
+    let exe = exe.replace('\\', "/");
     // refreshInterval keeps cache_age live between assistant messages.
     settings.insert(
         "statusLine".to_string(),

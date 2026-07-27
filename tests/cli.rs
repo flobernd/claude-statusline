@@ -615,6 +615,22 @@ fn install_with_subagent_writes_both_entries() {
 }
 
 #[test]
+fn install_writes_forward_slash_command_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let out = run_with_settings(&["--install", "--with-subagent-statusline"], &path);
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    // Git Bash runs statusLine commands on Windows and strips unquoted
+    // backslashes, so a backslash path breaks silently.
+    for key in ["statusLine", "subagentStatusLine"] {
+        let cmd = v[key]["command"].as_str().unwrap();
+        assert!(!cmd.contains('\\'), "{key} command: {cmd}");
+    }
+}
+
+#[test]
 fn plain_install_leaves_foreign_subagent_entry_alone() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
