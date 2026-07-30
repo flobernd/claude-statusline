@@ -5,6 +5,12 @@ Regenerates the SVG previews embedded in the top-level README
 binary and renders it into terminal-window SVGs, so the previews never drift
 from what the statusline actually prints.
 
+`swatches.py` regenerates the palette chips in the README's color table
+(`assets/swatch-*.svg`), reading the colours straight from `src/theme.rs`. It
+needs no capture step and no build:
+
+    tools/preview/swatches.py
+
 ## Pipeline
 
 1. `setup.sh` builds scratch git repositories in `work/` (branch, dirty tree,

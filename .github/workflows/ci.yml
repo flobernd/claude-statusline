@@ -20,3 +20,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+        # Runners spawn processes slowly enough, and run tests concurrently
+        # enough, that the render-time git budget can expire on a healthy
+        # repository. Raise it so a timeout here means a real hang.
+        env:
+          CLAUDE_STATUSLINE_GIT_TIMEOUT_MS: 10000
