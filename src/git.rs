@@ -16,6 +16,7 @@ pub struct GitInfo {
     pub files_changed: u32,
     pub state: Option<GitState>,
     pub linked_worktree: bool,
+    pub on_default_branch: bool,
     pub repo_name_fallback: Option<String>,
 }
 
@@ -123,17 +124,115 @@ const HEAD_ARGS: &[&str] = &[
     "--git-common-dir",
 ];
 
+/// Trunk names to fall back on when no remote publishes a default branch:
+/// a repo with no remote, one where `git remote set-head` was never run, or
+/// a ref backend that does not expose the symref as a file.
+const FALLBACK_DEFAULT_BRANCHES: &[&str] = &["main", "master"];
+
+/// Remote names, read from the repository config.
+///
+/// The directory tree under refs/remotes cannot answer this on its own:
+/// both remote names and branch names may contain slashes, so a path like
+/// refs/remotes/a/b/HEAD is equally the HEAD of remote `a/b` and a branch
+/// `b/HEAD` of remote `a`. Walking the tree would also visit every loose
+/// remote-tracking ref, turning a per-remote lookup into a per-ref one on
+/// a path that runs on every render.
+fn remote_names(common_dir: &Path) -> Vec<String> {
+    let Ok(config) = std::fs::read_to_string(common_dir.join("config")) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = Vec::new();
+    for line in config.lines() {
+        let Some(section) = line
+            .trim()
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+        else {
+            continue;
+        };
+        let Some(name) = section
+            .trim()
+            .strip_prefix("remote ")
+            .and_then(|s| unquote(s.trim()))
+        else {
+            continue;
+        };
+        // A name is pasted into a path below, so keep traversal out of it.
+        if name.is_empty() || name.split('/').any(|c| c == "..") || names.contains(&name) {
+            continue;
+        }
+        names.push(name);
+    }
+    names
+}
+
+/// Git config subsection names are double quoted, with backslash escapes
+/// for a literal quote or backslash.
+fn unquote(raw: &str) -> Option<String> {
+    let inner = raw.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        out.push(if c == '\\' { chars.next()? } else { c });
+    }
+    Some(out)
+}
+
+/// Whether `branch` is a default branch of the repository. Every remote's
+/// HEAD symref counts, so a single remote named something other than
+/// `origin` still resolves, and a fork whose upstream trunk differs from
+/// its own keeps both marked.
+///
+/// Ref packing never touches symrefs, so the pointers stay readable as
+/// plain files and this costs no git subprocess.
+fn on_default_branch(common_dir: &Path, branch: &str) -> bool {
+    let remotes = common_dir.join("refs").join("remotes");
+    let mut published = false;
+    let mut matched = false;
+    for remote in remote_names(common_dir) {
+        let Ok(head) = std::fs::read_to_string(remotes.join(&remote).join("HEAD")) else {
+            continue;
+        };
+        // Matching against the remote's own prefix keeps branch names
+        // that contain slashes intact.
+        let Some(name) = head
+            .trim()
+            .strip_prefix(&format!("ref: refs/remotes/{remote}/"))
+        else {
+            continue;
+        };
+        published = true;
+        matched |= name == branch;
+    }
+    if published {
+        matched
+    } else {
+        FALLBACK_DEFAULT_BRANCHES.contains(&branch)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchLocation {
+    pub repo: String,
+    pub branch: String,
+    pub on_default_branch: bool,
+}
+
 /// Repo name comes from the common dir's parent, not the checkout directory,
 /// so a linked worktree reports the main repository rather than its own
 /// checkout folder.
-pub fn branch_location(dir: &Path) -> Option<(String, String)> {
+pub fn branch_location(dir: &Path) -> Option<BranchLocation> {
     let info = head_info(dir, run_git(dir, HEAD_ARGS))?;
     let repo = info
         .common_dir
         .parent()
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())?;
-    Some((repo, info.branch))
+    Some(BranchLocation {
+        on_default_branch: on_default_branch(&info.common_dir, &info.branch),
+        repo,
+        branch: info.branch,
+    })
 }
 
 pub fn collect(dir: &Path) -> GitInfo {
@@ -159,6 +258,7 @@ pub fn collect(dir: &Path) -> GitInfo {
 
     let mut git_dir: Option<PathBuf> = None;
     if let Some(h) = head_info(dir, head) {
+        info.on_default_branch = on_default_branch(&h.common_dir, &h.branch);
         info.branch = Some(h.branch);
         info.linked_worktree = h.git_dir != h.common_dir;
         info.repo_name_fallback = h
@@ -400,7 +500,11 @@ mod tests {
         init_repo(&repo);
         assert_eq!(
             branch_location(&repo),
-            Some(("myrepo".to_string(), "main".to_string()))
+            Some(BranchLocation {
+                repo: "myrepo".to_string(),
+                branch: "main".to_string(),
+                on_default_branch: true,
+            })
         );
         let plain = dir.path().join("plain");
         std::fs::create_dir(&plain).unwrap();
@@ -420,7 +524,189 @@ mod tests {
         );
         assert_eq!(
             branch_location(&wt),
-            Some(("repo".to_string(), "feat/x".to_string()))
+            Some(BranchLocation {
+                repo: "repo".to_string(),
+                branch: "feat/x".to_string(),
+                on_default_branch: false,
+            })
         );
+    }
+
+    /// Clone `origin` into `dir`/work with `origin`'s default branch named
+    /// `default_branch`, which the clone records in refs/remotes/origin/HEAD.
+    fn clone_with_default(dir: &Path, default_branch: &str) -> PathBuf {
+        let origin = dir.join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        git(&origin, &["init", "-b", default_branch]);
+        std::fs::write(origin.join("f.txt"), "one\n").unwrap();
+        git(&origin, &["add", "f.txt"]);
+        git(&origin, &["commit", "-m", "init"]);
+        let work = dir.join("work");
+        git(
+            dir,
+            &["clone", origin.to_str().unwrap(), work.to_str().unwrap()],
+        );
+        work
+    }
+
+    /// Trunk resolution is a filesystem read over the common dir, so these
+    /// tests ask it directly rather than through `collect`, which spawns
+    /// four git processes per call and would only re-test the wiring that
+    /// `remote_head_read_from_the_common_dir_of_a_worktree` already covers.
+    fn common_dir(repo: &Path) -> PathBuf {
+        repo.join(".git")
+    }
+
+    #[test]
+    fn remote_head_marks_a_trunk_named_neither_main_nor_master() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = common_dir(&clone_with_default(dir.path(), "trunk"));
+        assert!(on_default_branch(&work, "trunk"));
+        // main is not this repo's trunk, so it reads as a feature branch.
+        assert!(!on_default_branch(&work, "main"));
+        assert!(!on_default_branch(&work, "master"));
+    }
+
+    #[test]
+    fn remote_head_read_from_the_common_dir_of_a_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = clone_with_default(dir.path(), "trunk");
+        // Free up trunk so a linked worktree can check it out.
+        git(&work, &["switch", "-c", "feat/x"]);
+        let wt = dir.path().join("wt");
+        git(&work, &["worktree", "add", wt.to_str().unwrap(), "trunk"]);
+
+        // The symref lives in the common dir, which the worktree shares.
+        let info = collect(&wt);
+        assert!(info.linked_worktree);
+        assert!(info.on_default_branch);
+        assert!(!collect(&work).on_default_branch);
+    }
+
+    #[test]
+    fn every_remote_head_counts_as_a_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = clone_with_default(dir.path(), "main");
+        let upstream = dir.path().join("upstream");
+        std::fs::create_dir(&upstream).unwrap();
+        init_repo(&upstream);
+        git(&upstream, &["branch", "-m", "master"]);
+        git(
+            &work,
+            &["remote", "add", "upstream", upstream.to_str().unwrap()],
+        );
+        git(&work, &["fetch", "upstream"]);
+        git(&work, &["remote", "set-head", "upstream", "-a"]);
+
+        // origin publishes main, upstream publishes master: both are trunks.
+        let work = common_dir(&work);
+        assert!(on_default_branch(&work, "main"));
+        assert!(on_default_branch(&work, "master"));
+        assert!(!on_default_branch(&work, "feat/x"));
+    }
+
+    #[test]
+    fn no_remote_head_falls_back_to_main_and_master() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let repo = common_dir(dir.path());
+        assert!(on_default_branch(&repo, "main"));
+        assert!(on_default_branch(&repo, "master"));
+        assert!(!on_default_branch(&repo, "trunk"));
+    }
+
+    #[test]
+    fn remote_without_a_head_symref_keeps_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        // `remote add` alone writes no refs/remotes/<name>/HEAD.
+        git(dir.path(), &["remote", "add", "origin", "/nonexistent"]);
+        let repo = common_dir(dir.path());
+        assert!(on_default_branch(&repo, "main"));
+        assert!(!on_default_branch(&repo, "trunk"));
+    }
+
+    #[test]
+    fn remote_name_containing_a_slash_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = clone_with_default(dir.path(), "main");
+        let nested = dir.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        git(&nested, &["init", "-b", "trunk"]);
+        std::fs::write(nested.join("f.txt"), "one\n").unwrap();
+        git(&nested, &["add", "f.txt"]);
+        git(&nested, &["commit", "-m", "init"]);
+        git(
+            &work,
+            &["remote", "add", "grp/sub", nested.to_str().unwrap()],
+        );
+        git(&work, &["fetch", "grp/sub"]);
+        git(&work, &["remote", "set-head", "grp/sub", "-a"]);
+
+        // refs/remotes/grp/sub/HEAD names remote "grp/sub", not a branch
+        // "sub/HEAD" of a remote "grp".
+        let work = common_dir(&work);
+        assert!(on_default_branch(&work, "trunk"));
+        assert!(on_default_branch(&work, "main"), "origin publishes main");
+        assert!(!on_default_branch(&work, "sub/HEAD"));
+        assert!(!on_default_branch(&work, "feat/x"));
+    }
+
+    #[test]
+    fn remote_names_parses_quoted_subsections() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config"),
+            concat!(
+                "[core]\n\trepositoryformatversion = 0\n",
+                "[remote \"origin\"]\n\turl = /a\n",
+                "  [remote \"grp/sub\"]  \n\turl = /b\n",
+                "[remote \"quo\\\"ted\"]\n\turl = /c\n",
+                "[branch \"remote\"]\n\tremote = origin\n",
+                "[remote \"origin\"]\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            remote_names(dir.path()),
+            vec![
+                "origin".to_string(),
+                "grp/sub".to_string(),
+                "quo\"ted".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_names_rejects_traversal_and_missing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(remote_names(dir.path()).is_empty());
+        std::fs::write(
+            dir.path().join("config"),
+            "[remote \"../../escape\"]\n\turl = /a\n[remote \"..\"]\n\turl = /b\n",
+        )
+        .unwrap();
+        assert!(remote_names(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn remote_head_that_is_not_a_symref_keeps_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = clone_with_default(dir.path(), "trunk");
+        let sha = run_git(&work, &["rev-parse", "HEAD"]).unwrap();
+        // A HEAD holding a raw object id names no branch, so it publishes
+        // no default rather than being read as one.
+        git(
+            &work,
+            &[
+                "update-ref",
+                "--no-deref",
+                "refs/remotes/origin/HEAD",
+                sha.trim(),
+            ],
+        );
+        let work = common_dir(&work);
+        assert!(!on_default_branch(&work, "trunk"));
+        assert!(on_default_branch(&work, "main"));
     }
 }

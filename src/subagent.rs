@@ -2,6 +2,7 @@ use serde::Deserialize;
 
 use crate::bar::bar_color;
 use crate::format::{fmt_duration, fmt_tokens};
+use crate::git::BranchLocation;
 use crate::schema::Config;
 use crate::schema::lenient;
 use crate::theme::{BLUE, COMMENT, CYAN, GREEN, MAGENTA, Style, WHITE};
@@ -97,12 +98,12 @@ pub fn row_chips(
     }
 
     match location {
-        TaskLocation::Repo { repo, branch } => {
-            let branch_color = if branch == "main" || branch == "master" {
-                GREEN
-            } else {
-                MAGENTA
-            };
+        TaskLocation::Repo {
+            repo,
+            branch,
+            on_default_branch,
+        } => {
+            let branch_color = if *on_default_branch { GREEN } else { MAGENTA };
             out.push((
                 "branch",
                 format!(
@@ -256,7 +257,7 @@ pub fn render_row(
     let mut chips = crate::fit::fit_line(chips, sep_width, columns, DROP);
 
     let location_raw = match location {
-        TaskLocation::Repo { repo, branch } => Some(format!("\u{2387} {repo}/{branch}")),
+        TaskLocation::Repo { repo, branch, .. } => Some(format!("\u{2387} {repo}/{branch}")),
         TaskLocation::Dir(folder) => Some(format!("\u{2302} {folder}")),
         TaskLocation::Same => None,
     };
@@ -308,6 +309,7 @@ pub enum TaskLocation {
     Repo {
         repo: String,
         branch: String,
+        on_default_branch: bool,
     },
     Dir(String), // last path component of the task cwd
 }
@@ -324,7 +326,7 @@ fn last_component(path: &str) -> String {
 pub fn resolve_location(
     task_cwd: Option<&str>,
     session_cwd: Option<&str>,
-    lookup: &mut dyn FnMut(&str) -> Option<(String, String)>,
+    lookup: &mut dyn FnMut(&str) -> Option<BranchLocation>,
 ) -> TaskLocation {
     let Some(task_cwd) = task_cwd.filter(|c| !c.is_empty()) else {
         return TaskLocation::Same;
@@ -338,11 +340,15 @@ pub fn resolve_location(
         None => None,
     };
     match task_loc {
-        Some((repo, branch)) => {
-            if session_loc.as_ref() == Some(&(repo.clone(), branch.clone())) {
+        Some(loc) => {
+            if session_loc.as_ref() == Some(&loc) {
                 TaskLocation::Same
             } else {
-                TaskLocation::Repo { repo, branch }
+                TaskLocation::Repo {
+                    repo: loc.repo,
+                    branch: loc.branch,
+                    on_default_branch: loc.on_default_branch,
+                }
             }
         }
         None => TaskLocation::Dir(last_component(task_cwd)),
@@ -371,7 +377,7 @@ pub fn render(raw: &str, config: &Config, style: &Style, fallback_width: usize) 
     });
     // One cache for the whole invocation: sibling tasks in the same repo or
     // worktree reuse a single git lookup instead of spawning one each.
-    let mut cache: std::collections::HashMap<String, Option<(String, String)>> =
+    let mut cache: std::collections::HashMap<String, Option<BranchLocation>> =
         std::collections::HashMap::new();
     let mut lookup = |cwd: &str| {
         cache
@@ -628,6 +634,23 @@ mod tests {
         assert!(text_of(&chips, "context_tokens").contains("\x1b[38;2;247;118;142m90%"));
     }
 
+    fn branch_loc(branch: &str, on_default_branch: bool) -> BranchLocation {
+        BranchLocation {
+            repo: "myrepo".to_string(),
+            branch: branch.to_string(),
+            on_default_branch,
+        }
+    }
+
+    fn repo_loc(branch: &str, on_default_branch: bool) -> TaskLocation {
+        let loc = branch_loc(branch, on_default_branch);
+        TaskLocation::Repo {
+            repo: loc.repo,
+            branch: loc.branch,
+            on_default_branch: loc.on_default_branch,
+        }
+    }
+
     #[test]
     fn empty_task_renders_no_chips() {
         assert!(row_chips(&task("{}"), &PLAIN, 0, &TaskLocation::Same).is_empty());
@@ -635,10 +658,7 @@ mod tests {
 
     #[test]
     fn location_chip_sits_after_name_and_same_hides_it() {
-        let loc = TaskLocation::Repo {
-            repo: "myrepo".to_string(),
-            branch: "fix-1".to_string(),
-        };
+        let loc = repo_loc("fix-1", false);
         let chips = row_chips(&task(FULL_TASK), &PLAIN, 24_000, &loc);
         assert_eq!(names(&chips)[..2], ["name", "branch"]);
         assert_eq!(text_of(&chips, "branch"), "\u{2387} myrepo/fix-1");
@@ -661,26 +681,17 @@ mod tests {
             colors: true,
             links: false,
         };
-        let main_loc = TaskLocation::Repo {
-            repo: "r".to_string(),
-            branch: "master".to_string(),
-        };
+        let main_loc = repo_loc("trunk", true);
         let chips = row_chips(&task(r#"{"name": "x"}"#), &colored, 0, &main_loc);
-        assert!(text_of(&chips, "branch").contains("\x1b[38;2;158;206;106m/master")); // green
-        let feat_loc = TaskLocation::Repo {
-            repo: "r".to_string(),
-            branch: "feat/x".to_string(),
-        };
+        assert!(text_of(&chips, "branch").contains("\x1b[38;2;158;206;106m/trunk")); // green
+        let feat_loc = repo_loc("feat/x", false);
         let chips = row_chips(&task(r#"{"name": "x"}"#), &colored, 0, &feat_loc);
         assert!(text_of(&chips, "branch").contains("\x1b[38;2;187;154;247m/feat/x")); // magenta
     }
 
     #[test]
     fn location_chip_never_drops_and_truncates_before_name() {
-        let loc = TaskLocation::Repo {
-            repo: "myrepo".to_string(),
-            branch: "fix-1".to_string(),
-        };
+        let loc = repo_loc("fix-1", false);
         // name 7 + sep 3 + location 14 = 24; at 20 the location truncates
         // (name intact), at tiny widths both sit at their floors.
         let t = task(r#"{"name": "Explore"}"#);
@@ -827,7 +838,7 @@ mod tests {
 
     #[test]
     fn location_same_for_missing_equal_or_same_branch_cwd() {
-        let mut repo_everywhere = |_: &str| Some(("myrepo".to_string(), "main".to_string()));
+        let mut repo_everywhere = |_: &str| Some(branch_loc("main", true));
         assert!(matches!(
             resolve_location(None, Some("/a"), &mut repo_everywhere),
             TaskLocation::Same
@@ -846,13 +857,18 @@ mod tests {
     #[test]
     fn location_repo_when_branch_differs() {
         let mut lookup = |cwd: &str| match cwd {
-            "/repo" => Some(("myrepo".to_string(), "master".to_string())),
-            _ => Some(("myrepo".to_string(), "fix-1".to_string())),
+            "/repo" => Some(branch_loc("master", true)),
+            _ => Some(branch_loc("fix-1", false)),
         };
         match resolve_location(Some("/repo/.wt/fix-1"), Some("/repo"), &mut lookup) {
-            TaskLocation::Repo { repo, branch } => {
+            TaskLocation::Repo {
+                repo,
+                branch,
+                on_default_branch,
+            } => {
                 assert_eq!(repo, "myrepo");
                 assert_eq!(branch, "fix-1");
+                assert!(!on_default_branch);
             }
             other => panic!("unexpected: {other:?}"),
         }

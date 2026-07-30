@@ -165,7 +165,7 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
     }
 
     if let Some(branch) = c.git.branch.as_deref() {
-        let branch_color = if branch == "main" || branch == "master" {
+        let branch_color = if c.git.on_default_branch {
             GREEN
         } else {
             MAGENTA
@@ -762,24 +762,31 @@ mod tests {
     }
 
     #[test]
-    fn feature_branch_uses_magenta_and_main_uses_green() {
+    fn branch_color_tracks_the_default_branch_flag() {
         let colored = Style {
             colors: true,
             links: false,
         };
         let payload = parse_payload("{}").unwrap();
-        for (branch, rgb) in [
-            ("main", "158;206;106"),
-            ("master", "158;206;106"),
-            ("feat/x", "187;154;247"),
+        for (branch, default, rgb) in [
+            ("main", true, "158;206;106"),
+            ("master", true, "158;206;106"),
+            // A trunk named neither main nor master still reads as one.
+            ("trunk", true, "158;206;106"),
+            ("feat/x", false, "187;154;247"),
+            // main is just a feature branch where it is not the trunk.
+            ("main", false, "187;154;247"),
         ] {
-            let git = git_on(branch);
+            let git = GitInfo {
+                on_default_branch: default,
+                ..git_on(branch)
+            };
             let mut c = ctx_of(&payload, &git);
             c.style = &colored;
             let chips = line2(&c);
             assert!(
                 chips[0].1.contains(&format!("\x1b[38;2;{rgb}m")),
-                "branch {branch}"
+                "branch {branch} (default: {default})"
             );
         }
     }
