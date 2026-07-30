@@ -25,3 +25,32 @@ jobs:
         # repository. Raise it so a timeout here means a real hang.
         env:
           CLAUDE_STATUSLINE_GIT_TIMEOUT_MS: 10000
+  assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - name: Regenerate the committed assets
+        # Deleting first makes a renamed palette entry or a dropped preview
+        # surface as a stale tracked file, not merely a modification.
+        run: |
+          rm -f assets/swatch-*.svg assets/statusline-*.svg
+          tools/preview/swatches.py
+          tools/preview/setup.sh
+          tools/preview/gen.py
+      - name: Fail when assets drift from the sources
+        id: drift
+        run: |
+          if [ -n "$(git status --porcelain -- assets/)" ]; then
+            git status --porcelain -- assets/
+            git diff --stat -- assets/
+            echo "::error::assets/ is out of sync with the code; regenerate with tools/preview (see tools/preview/README.md)"
+            exit 1
+          fi
+      - name: Upload the regenerated assets
+        if: failure() && steps.drift.conclusion == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: regenerated-assets
+          path: assets/

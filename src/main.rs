@@ -1,4 +1,5 @@
 mod bar;
+mod clock;
 mod commands;
 mod fit;
 mod format;
@@ -193,11 +194,7 @@ fn render(raw: &str) -> Option<String> {
 
     let cache_age_ms = payload.transcript_path.as_deref().and_then(|p| {
         let ts = transcript::last_assistant_timestamp_ms(p)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_millis() as i64;
-        Some(now - ts)
+        Some(clock::now_ms() as i64 - ts)
     });
     let cache_ttl_ms = payload
         .transcript_path
@@ -243,10 +240,7 @@ fn render(raw: &str) -> Option<String> {
             usage::spawn_fetch_if_stale(&config);
             let snapshot = usage::cache_path()
                 .and_then(|p| usage::load_snapshot(&p, account.account_uuid.as_deref()));
-            let now_epoch_s = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
+            let now_epoch_s = (clock::now_ms() / 1000) as i64;
             let limits = usage::merge(
                 payload.rate_limits.as_ref(),
                 snapshot.as_ref().map(|s| &s.utilization),

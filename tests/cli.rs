@@ -30,19 +30,27 @@ use std::process::Stdio;
 /// child inherits cargo test's cwd (this crate's own git checkout), and a
 /// payload with no explicit workspace would pick up its branch as a false
 /// line2 chip.
-fn run_statusline(stdin_data: &str, width: &str, home: &std::path::Path) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_claude-statusline"))
-        .env("NO_COLOR", "1")
+fn run_statusline_env(
+    stdin_data: &str,
+    width: &str,
+    home: &std::path::Path,
+    extra_env: &[(&str, &str)],
+) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_claude-statusline"));
+    cmd.env("NO_COLOR", "1")
         .env_remove("FORCE_COLOR")
         .env("CLAUDE_STATUSLINE_WIDTH", width)
         .env("HOME", home)
         .env("USERPROFILE", home)
         .current_dir(home)
+        .env_remove("CLAUDE_STATUSLINE_NOW_MS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("binary runs");
+        .stderr(Stdio::piped());
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    let mut child = cmd.spawn().expect("binary runs");
     child
         .stdin
         .as_mut()
@@ -50,6 +58,10 @@ fn run_statusline(stdin_data: &str, width: &str, home: &std::path::Path) -> std:
         .write_all(stdin_data.as_bytes())
         .unwrap();
     child.wait_with_output().expect("binary exits")
+}
+
+fn run_statusline(stdin_data: &str, width: &str, home: &std::path::Path) -> std::process::Output {
+    run_statusline_env(stdin_data, width, home, &[])
 }
 
 const SAMPLE: &str = r#"{
@@ -204,6 +216,41 @@ fn cache_age_renders_from_transcript_under_home() {
     let out = run_statusline(&payload, "200", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("cache_age:"), "stdout: {stdout}");
+}
+
+#[test]
+fn pinned_clock_renders_exact_cache_age() {
+    let home = tempfile::tempdir().unwrap();
+    let claude = home.path().join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    // 72 s before the pinned now of 2026-07-24T00:00:00Z.
+    std::fs::write(
+        claude.join("t.jsonl"),
+        "{\"type\":\"assistant\",\"timestamp\":\"2026-07-23T23:58:48Z\",\"message\":{\"role\":\"assistant\"}}\n",
+    )
+    .unwrap();
+    let transcript = claude
+        .join("t.jsonl")
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    let payload = format!(
+        r#"{{"model": {{"display_name": "Sonnet 5"}}, "transcript_path": "{transcript}",
+            "context_window": {{"used_percentage": 42, "context_window_size": 200000,
+                "current_usage": {{"input_tokens": 5200, "cache_read_input_tokens": 37200}}}}}}"#
+    );
+    let out = run_statusline_env(
+        &payload,
+        "200",
+        home.path(),
+        &[("CLAUDE_STATUSLINE_NOW_MS", "1784851200000")],
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("cache_age:1m12s"),
+        "expected pinned cache age, got: {stdout}"
+    );
 }
 
 fn print_config(settings: Option<&str>) -> (std::process::Output, tempfile::TempDir) {

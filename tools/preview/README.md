@@ -28,6 +28,17 @@ needs no capture step and no build:
 Requires `bash`, `git`, GNU coreutils (`setup.sh` uses GNU `date` flags),
 and `python3`; no Python packages.
 
+## Determinism
+
+Every timestamp in the captures derives from one canonical instant,
+2026-07-24T00:00:00Z, and `setup.sh` exports the same instant to the binary
+as `CLAUDE_STATUSLINE_NOW_MS` (epoch milliseconds; unset or unparsable
+falls back to the real clock). A fixed date rather than "now" keeps
+calendar-derived output stable, because the spend reset renders the
+distance to the next 1st of the month. Regeneration is therefore
+byte-identical on any machine, any day, and CI enforces it: the `assets`
+job regenerates all of `assets/` and fails when the committed files drift.
+
 ## Glyph outlines
 
 Text in the SVGs rides the viewer's monospace font stack. The three glyphs
