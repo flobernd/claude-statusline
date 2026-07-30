@@ -141,16 +141,16 @@ Every chip is painted from one fixed 24-bit palette, so a color means the same t
 appears. Labels, separators and low-salience values stay in the muted comment tone; a chip only
 takes a saturated color when its value carries information.
 
-| Name    | Hex       | Role                                            |
-| ------- | --------- | ----------------------------------------------- |
-| Comment | `#565f89` | Labels, separators, and values needing no attention |
-| Blue    | `#7aa2f7` | Token counts                                    |
-| Cyan    | `#7dcfff` | Locations and identifiers: directory, repo, pull request |
-| Green   | `#9ece6a` | Healthy, default, or additive                   |
-| Magenta | `#bb9af7` | Identity, and being off the default: model, plan, feature branch, raised effort |
-| Yellow  | `#e0af68` | Worth noticing                                  |
-| Red     | `#f7768e` | Needs attention, or destructive                 |
-| White   | `#ffffff` | Subagent task name                              |
+| Name | Hex | Role |
+| --- | --- | --- |
+| Comment | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-comment-dark.svg"><img src="assets/swatch-comment-light.svg" alt="#565f89"></picture> | Labels, separators, and values needing no attention |
+| Blue | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-blue-dark.svg"><img src="assets/swatch-blue-light.svg" alt="#7aa2f7"></picture> | Token counts |
+| Cyan | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-cyan-dark.svg"><img src="assets/swatch-cyan-light.svg" alt="#7dcfff"></picture> | Locations and identifiers: directory, repo, pull request |
+| Green | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-green-dark.svg"><img src="assets/swatch-green-light.svg" alt="#9ece6a"></picture> | Healthy, default, or additive |
+| Magenta | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-magenta-dark.svg"><img src="assets/swatch-magenta-light.svg" alt="#bb9af7"></picture> | Identity, and being off the default: model, plan, feature branch, raised effort |
+| Yellow | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-yellow-dark.svg"><img src="assets/swatch-yellow-light.svg" alt="#e0af68"></picture> | Worth noticing |
+| Red | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-red-dark.svg"><img src="assets/swatch-red-light.svg" alt="#f7768e"></picture> | Needs attention, or destructive |
+| White | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-white-dark.svg"><img src="assets/swatch-white-light.svg" alt="#ffffff"></picture> | Subagent task name |
 
 Anything measured as a percentage of a budget shares one fill scale, so context, usage windows and
 spend all read alike: green at 60% or below, yellow below 85%, red from 85% up.
