@@ -28,10 +28,8 @@ third.
   `NO_COLOR` respected
 - Chips hide themselves when their data is absent: a clean repo shows a short line, a merge
   conflict or a cold prompt cache stands out
-- Cache age is flagged against the TTL the session actually requested, read from the
-  transcript, with amber leading the expiry: amber at 4 minutes and red at 5 under a
-  5 minute TTL, amber at 50 minutes and red at 60 under an hour. When the transcript does
-  not reveal the TTL, amber stays at 5 minutes and red at an hour
+- Cache age is flagged against the prompt-cache TTL the session actually requested, read from
+  the transcript, so the chip warns as the real expiry approaches instead of at a fixed mark
 - Clickable branch and pull request chips (OSC 8 hyperlinks, on by default)
 - Width-aware: adapts to the terminal width reported by Claude Code, dropping the least
   important chips first
@@ -148,12 +146,12 @@ takes a saturated color when its value carries information.
 | Cyan | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-cyan-dark.svg"><img src="assets/swatch-cyan-light.svg" alt="#7dcfff"></picture> | Locations and identifiers: directory, repo, pull request |
 | Green | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-green-dark.svg"><img src="assets/swatch-green-light.svg" alt="#9ece6a"></picture> | Healthy, default, or additive |
 | Magenta | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-magenta-dark.svg"><img src="assets/swatch-magenta-light.svg" alt="#bb9af7"></picture> | Identity, and being off the default: model, plan, feature branch, raised effort |
-| Yellow | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-yellow-dark.svg"><img src="assets/swatch-yellow-light.svg" alt="#e0af68"></picture> | Worth noticing |
+| Amber | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-amber-dark.svg"><img src="assets/swatch-amber-light.svg" alt="#e0af68"></picture> | Worth noticing |
 | Red | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-red-dark.svg"><img src="assets/swatch-red-light.svg" alt="#f7768e"></picture> | Needs attention, or destructive |
 | White | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/swatch-white-dark.svg"><img src="assets/swatch-white-light.svg" alt="#ffffff"></picture> | Subagent task name |
 
 Anything measured as a percentage of a budget shares one fill scale, so context, usage windows and
-spend all read alike: green at 60% or below, yellow below 85%, red from 85% up.
+spend all read alike: green at 60% or below, amber below 85%, red from 85% up.
 
 The tables below follow the render order of each line rather than an alphabetical one, so they read
 in the same order as the statusline itself.
@@ -164,10 +162,22 @@ in the same order as the statusline itself.
 | ---------------- | ---------------------------------------------------------------------------- |
 | `context_tokens` | Counts blue, glyph and punctuation comment; the percentage takes the fill scale |
 | `cache`          | Label comment, hit ratio always green                                        |
-| `cache_age`      | Label comment; age comment under 5 minutes, yellow from 5 minutes, red from 1 hour |
+| `cache_age`      | Label comment; the age is comment while fresh, amber as expiry nears, red once expired, against the session's cache TTL (below) |
 | `model`          | Magenta                                                                      |
 | `effort`         | Bold magenta at `high`, `xhigh`, and `max`; bold comment at `low` and `medium`; hidden otherwise |
-| `update`         | Yellow: a new release is worth noticing but is not an error                  |
+| `update`         | Amber: a new release is worth noticing but is not an error                  |
+
+The `cache_age` thresholds follow the prompt-cache TTL the session actually requested, read from the
+most recent cache write in the transcript. Turns that only read the cache name no TTL, and providers
+other than Anthropic do not report one at all; either way the chip keeps the wider default.
+
+| Cache TTL    | Comment   | Amber           | Red         |
+| ------------ | --------- | --------------- | ----------- |
+| 5 minutes    | under 4m  | 4m to under 5m  | 5m and over |
+| 1 hour       | under 50m | 50m to under 1h | 1h and over |
+| Not reported | under 5m  | 5m to under 1h  | 1h and over |
+
+A negative age, meaning the transcript timestamp sits ahead of the clock, hides the chip entirely.
 
 ### Second line
 
@@ -175,13 +185,13 @@ in the same order as the statusline itself.
 | -------------- | ------------------------------------------------------------------------------ |
 | `cwd`          | Cyan; renders only outside a git repository                                     |
 | `branch`       | Repo name cyan; the branch green on a default branch, magenta on any other      |
-| `git_files`    | `+added` green, `-removed` red, `~changed` yellow                               |
-| `git_stash`    | Yellow                                                                          |
+| `git_files`    | `+added` green, `-removed` red, `~changed` amber                               |
+| `git_stash`    | Amber                                                                          |
 | `git_sync`     | Comment: ahead and behind counts are informational, not a problem               |
-| `git_state`    | Bold red for `conflict`, bold yellow for `merge`, `rebase`, `cherry-pick`, and `revert` |
-| `git_worktree` | Yellow                                                                          |
-| `pr`           | `PR#N` cyan, then the review state: `ok` green, `chg` red, `rev` yellow, `draft` comment |
-| `worktree`     | Yellow                                                                          |
+| `git_state`    | Bold red for `conflict`, bold amber for `merge`, `rebase`, `cherry-pick`, and `revert` |
+| `git_worktree` | Amber                                                                          |
+| `pr`           | `PR#N` cyan, then the review state: `ok` green, `chg` red, `rev` amber, `draft` comment |
+| `worktree`     | Amber                                                                          |
 
 ### Usage limits line
 
