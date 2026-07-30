@@ -131,6 +131,87 @@ Optional file `~/.claude/claude-statusline.json`:
 `subagent_disabled_sections` does the same for the subagent rows:
 `name`, `cwd`, `branch`, `activity`, `context_tokens`, `elapsed`, `model`, `effort`.
 
+## Colors
+
+Every chip is painted from one fixed 24-bit palette, so a color means the same thing wherever it
+appears. Labels, separators and low-salience values stay in the muted comment tone; a chip only
+takes a saturated color when its value carries information.
+
+| Name    | Hex       | Role                                            |
+| ------- | --------- | ----------------------------------------------- |
+| Comment | `#565f89` | Labels, separators, and values needing no attention |
+| Blue    | `#7aa2f7` | Token counts                                    |
+| Cyan    | `#7dcfff` | Locations and identifiers: directory, repo, pull request |
+| Green   | `#9ece6a` | Healthy, default, or additive                   |
+| Magenta | `#bb9af7` | Identity, and being off the default: model, plan, feature branch, raised effort |
+| Yellow  | `#e0af68` | Worth noticing                                  |
+| Red     | `#f7768e` | Needs attention, or destructive                 |
+| White   | `#ffffff` | Subagent task name                              |
+
+Anything measured as a percentage of a budget shares one fill scale, so context, usage windows and
+spend all read alike: green at 60% or below, yellow below 85%, red from 85% up.
+
+The tables below follow the render order of each line rather than an alphabetical one, so they read
+in the same order as the statusline itself.
+
+### First line
+
+| Chip             | Coloring                                                                     |
+| ---------------- | ---------------------------------------------------------------------------- |
+| `context_tokens` | Counts blue, glyph and punctuation comment; the percentage takes the fill scale |
+| `cache`          | Label comment, hit ratio always green                                        |
+| `cache_age`      | Label comment; age comment under 5 minutes, yellow from 5 minutes, red from 1 hour |
+| `model`          | Magenta                                                                      |
+| `effort`         | Bold magenta at `high`, `xhigh`, and `max`; bold comment at `low` and `medium`; hidden otherwise |
+| `update`         | Yellow: a new release is worth noticing but is not an error                  |
+
+### Second line
+
+| Chip           | Coloring                                                                       |
+| -------------- | ------------------------------------------------------------------------------ |
+| `cwd`          | Cyan; renders only outside a git repository                                     |
+| `branch`       | Repo name cyan; the branch green on a default branch, magenta on any other      |
+| `git_files`    | `+added` green, `-removed` red, `~changed` yellow                               |
+| `git_stash`    | Yellow                                                                          |
+| `git_sync`     | Comment: ahead and behind counts are informational, not a problem               |
+| `git_state`    | Bold red for `conflict`, bold yellow for `merge`, `rebase`, `cherry-pick`, and `revert` |
+| `git_worktree` | Yellow                                                                          |
+| `pr`           | `PR#N` cyan, then the review state: `ok` green, `chg` red, `rev` yellow, `draft` comment |
+| `worktree`     | Yellow                                                                          |
+
+### Usage limits line
+
+Every chip here pairs a comment label with a value on the fill scale, so the line reads as a row of
+meters: the further into a budget, the warmer the number.
+
+| Chip            | Coloring                                                                      |
+| --------------- | ------------------------------------------------------------------------------ |
+| `usage_plan`    | Magenta, matching the model chip above it                                       |
+| `usage_session` | Label `5h:` comment, percentage on the fill scale                               |
+| `usage_week`    | Label `7d:` comment, percentage on the fill scale                               |
+| `usage_fable`   | Label `fable:` comment, percentage on the fill scale                            |
+| `usage_spend`   | Label `spend:` comment; both dollar amounts and the percentage on the fill scale |
+
+Reset countdowns are comment throughout, as is the leading glyph that marks the line.
+
+### Subagent rows
+
+The task `name` is white and `activity` and `elapsed` are comment. The `cwd`, `branch`,
+`context_tokens`, `model`, and `effort` chips use exactly the rules above.
+
+### Default branch detection
+
+The branch chip turns green on a default branch and magenta on anything else, so a glance tells you
+whether you are on a trunk or on your own work.
+
+Rather than assuming the trunk is called `main` or `master`, the default branch is read from the
+`HEAD` symref each remote publishes, which is what `git clone` records and what
+`git remote set-head` refreshes. A repository whose trunk is `develop` or `trunk` is recognized, and
+so is one whose only remote is not named `origin`. Every remote counts, so in a fork whose
+`upstream` still uses `master` while `origin` has moved to `main`, both branches read as default.
+
+When no remote publishes a `HEAD`, the chip falls back to treating `main` and `master` as default.
+
 ## Uninstall
 
 ```bash
