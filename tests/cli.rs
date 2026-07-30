@@ -953,10 +953,11 @@ fn run_statusline_colored(stdin_data: &str, home: &std::path::Path) -> std::proc
 
 /// One assistant entry stamped ten minutes ago: inside the default 1h
 /// window but past a 5m TTL, so the two cases color differently.
-fn write_usage_transcript(home: &std::path::Path, usage: &str) -> String {
+fn write_usage_transcript(home: &std::path::Path, usage: &str, minutes_ago: i64) -> String {
     let dir = home.join(".claude").join("projects").join("p");
     std::fs::create_dir_all(&dir).unwrap();
-    let ts = (chrono::Utc::now() - chrono::Duration::minutes(10)).format("%Y-%m-%dT%H:%M:%SZ");
+    let ts =
+        (chrono::Utc::now() - chrono::Duration::minutes(minutes_ago)).format("%Y-%m-%dT%H:%M:%SZ");
     let path = dir.join("s.jsonl");
     std::fs::write(
         &path,
@@ -968,39 +969,55 @@ fn write_usage_transcript(home: &std::path::Path, usage: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
-#[test]
-fn cache_age_expires_early_under_a_detected_5m_ttl() {
+const AMBER_SEQ: &str = "\x1b[38;2;224;175;104m";
+const COMMENT_SEQ: &str = "\x1b[38;2;86;95;137m";
+const RED_SEQ: &str = "\x1b[38;2;247;118;142m";
+const WROTE_5M: &str =
+    r#"{"cache_creation":{"ephemeral_5m_input_tokens":700,"ephemeral_1h_input_tokens":0}}"#;
+const WROTE_1H: &str =
+    r#"{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":900}}"#;
+// No breakdown at all, as a non-Anthropic gateway reports it.
+const WROTE_UNKNOWN: &str = r#"{"input_tokens":5}"#;
+
+fn cache_age_color(usage: &str, minutes_ago: i64) -> String {
     let home = tempfile::tempdir().unwrap();
-    let path = write_usage_transcript(
-        home.path(),
-        r#"{"cache_creation":{"ephemeral_5m_input_tokens":700,"ephemeral_1h_input_tokens":0}}"#,
-    );
+    let path = write_usage_transcript(home.path(), usage, minutes_ago);
     let payload = format!(r#"{{"transcript_path": {path:?}}}"#);
     let out = run_statusline_colored(&payload, home.path());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    // Ten minutes past a 5m write: expired, red.
-    assert!(
-        stdout.contains("\x1b[38;2;247;118;142m10m"),
-        "stdout: {stdout:?}"
-    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 #[test]
-fn cache_age_keeps_the_1h_ceiling_for_1h_or_unknown_ttl() {
-    for usage in [
-        r#"{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":900}}"#,
-        // No breakdown at all: the default thresholds stay in force.
-        r#"{"input_tokens":5}"#,
-    ] {
-        let home = tempfile::tempdir().unwrap();
-        let path = write_usage_transcript(home.path(), usage);
-        let payload = format!(r#"{{"transcript_path": {path:?}}}"#);
-        let out = run_statusline_colored(&payload, home.path());
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        // Ten minutes into a 1h window: amber, exactly as before.
+fn cache_age_bands_lead_a_detected_5m_ttl() {
+    for (minutes, want) in [(2, COMMENT_SEQ), (4, AMBER_SEQ), (10, RED_SEQ)] {
+        let stdout = cache_age_color(WROTE_5M, minutes);
         assert!(
-            stdout.contains("\x1b[38;2;224;175;104m10m"),
-            "usage {usage}: stdout: {stdout:?}"
+            stdout.contains(&format!("{want}{minutes}m")),
+            "5m ttl at {minutes}m: {stdout:?}"
+        );
+    }
+}
+
+#[test]
+fn cache_age_bands_lead_a_detected_1h_ttl() {
+    // Ten minutes in the cache still reads fresh: amber leads the 1h expiry
+    // at 50 minutes, not at 5.
+    for (minutes, want) in [(10, COMMENT_SEQ), (55, AMBER_SEQ)] {
+        let stdout = cache_age_color(WROTE_1H, minutes);
+        assert!(
+            stdout.contains(&format!("{want}{minutes}m")),
+            "1h ttl at {minutes}m: {stdout:?}"
+        );
+    }
+}
+
+#[test]
+fn cache_age_keeps_the_wide_warning_when_the_ttl_is_unknown() {
+    for (minutes, want) in [(2, COMMENT_SEQ), (10, AMBER_SEQ)] {
+        let stdout = cache_age_color(WROTE_UNKNOWN, minutes);
+        assert!(
+            stdout.contains(&format!("{want}{minutes}m")),
+            "unknown ttl at {minutes}m: {stdout:?}"
         );
     }
 }

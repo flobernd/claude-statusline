@@ -3,12 +3,28 @@ use crate::git::GitInfo;
 use crate::schema::Payload;
 use crate::theme::{AMBER, BLUE, COMMENT, CYAN, GREEN, MAGENTA, RED, Style};
 
-/// Display heuristic: past five minutes the prompt cache is likely cold.
+/// Display heuristic for an unknown TTL: past five minutes the prompt cache
+/// is likely cold.
 pub const CACHE_AGE_WARN_MS: i64 = 5 * 60 * 1000;
 /// Fallback expiry when the transcript does not reveal the session's cache
 /// TTL: one hour is the longest TTL on offer, so past it the prompt cache
 /// has certainly expired.
 pub const CACHE_AGE_EXPIRE_MS: i64 = 60 * 60 * 1000;
+/// How far amber leads a known expiry. Proportionally tighter for the short
+/// TTL, where a ten minute lead would cover the whole window.
+const CACHE_AGE_WARN_5M_MS: i64 = 4 * 60 * 1000;
+const CACHE_AGE_WARN_1H_MS: i64 = 50 * 60 * 1000;
+
+/// Amber and red thresholds for the session's cache TTL. A known TTL puts
+/// amber just ahead of the real expiry; without one there is no expiry to
+/// lead, so the wide "likely cold" warning stands in for the uncertainty.
+fn cache_age_thresholds(ttl_ms: Option<i64>) -> (i64, i64) {
+    match ttl_ms {
+        Some(ttl) if ttl == crate::transcript::TTL_5M_MS => (CACHE_AGE_WARN_5M_MS, ttl),
+        Some(ttl) if ttl == crate::transcript::TTL_1H_MS => (CACHE_AGE_WARN_1H_MS, ttl),
+        _ => (CACHE_AGE_WARN_MS, CACHE_AGE_EXPIRE_MS),
+    }
+}
 
 pub struct Ctx<'a> {
     pub payload: &'a Payload,
@@ -67,12 +83,10 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
     }
 
     if let Some(age) = c.cache_age_ms.filter(|a| *a >= 0) {
-        // Under a 5m TTL expiry arrives at the warn threshold, so the amber
-        // band is empty and the age jumps straight to red.
-        let expire = c.cache_ttl_ms.unwrap_or(CACHE_AGE_EXPIRE_MS);
+        let (warn, expire) = cache_age_thresholds(c.cache_ttl_ms);
         let color = if age >= expire {
             RED
-        } else if age >= CACHE_AGE_WARN_MS {
+        } else if age >= warn {
             AMBER
         } else {
             COMMENT
@@ -614,7 +628,12 @@ mod tests {
     }
 
     #[test]
-    fn detected_ttl_moves_the_expiry_boundary() {
+    fn cache_age_bands_lead_the_detected_ttl() {
+        const COMMENT_SEQ: &str = "\x1b[38;2;86;95;137m";
+        const AMBER_SEQ: &str = "\x1b[38;2;224;175;104m";
+        const RED_SEQ: &str = "\x1b[38;2;247;118;142m";
+        let mins = |m: i64| m * 60 * 1000;
+
         let colored = Style {
             colors: true,
             links: false,
@@ -624,24 +643,33 @@ mod tests {
         let mut c = ctx_of(&payload, &git);
         c.style = &colored;
 
-        // A 5m TTL: expiry lands on the warn threshold, so the amber band
-        // is empty and the age jumps from comment straight to red.
-        c.cache_ttl_ms = Some(5 * 60 * 1000);
-        c.cache_age_ms = Some(5 * 60 * 1000 - 1);
-        let chips = line1(&c);
-        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;86;95;137m4m59s")); // comment
-        c.cache_age_ms = Some(5 * 60 * 1000);
-        let chips = line1(&c);
-        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;247;118;142m5m00s")); // red
+        let cases: &[(Option<i64>, i64, &str)] = &[
+            // A 5m TTL: amber leads the expiry by one minute.
+            (Some(mins(5)), mins(4) - 1, COMMENT_SEQ),
+            (Some(mins(5)), mins(4), AMBER_SEQ),
+            (Some(mins(5)), mins(5) - 1, AMBER_SEQ),
+            (Some(mins(5)), mins(5), RED_SEQ),
+            // A 1h TTL: amber leads by ten minutes, so five minutes in the
+            // cache still reads fresh.
+            (Some(mins(60)), mins(5), COMMENT_SEQ),
+            (Some(mins(60)), mins(50) - 1, COMMENT_SEQ),
+            (Some(mins(60)), mins(50), AMBER_SEQ),
+            (Some(mins(60)), mins(60) - 1, AMBER_SEQ),
+            (Some(mins(60)), mins(60), RED_SEQ),
+            // An unknown TTL keeps the wide warning from five minutes.
+            (None, CACHE_AGE_WARN_MS - 1, COMMENT_SEQ),
+            (None, CACHE_AGE_WARN_MS, AMBER_SEQ),
+            (None, CACHE_AGE_EXPIRE_MS - 1, AMBER_SEQ),
+            (None, CACHE_AGE_EXPIRE_MS, RED_SEQ),
+        ];
 
-        // A 1h TTL reproduces the default thresholds exactly.
-        c.cache_ttl_ms = Some(60 * 60 * 1000);
-        c.cache_age_ms = Some(CACHE_AGE_WARN_MS);
-        let chips = line1(&c);
-        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;224;175;104m")); // amber
-        c.cache_age_ms = Some(CACHE_AGE_EXPIRE_MS);
-        let chips = line1(&c);
-        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;247;118;142m")); // red
+        for (ttl, age, want) in cases {
+            c.cache_ttl_ms = *ttl;
+            c.cache_age_ms = Some(*age);
+            let chips = line1(&c);
+            let text = text_of(&chips, "cache_age");
+            assert!(text.contains(want), "ttl {ttl:?} at {age}ms: {text:?}");
+        }
     }
 
     #[test]

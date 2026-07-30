@@ -64,8 +64,8 @@ pub fn last_assistant_ts_under(path: &str, allowed_root: &Path) -> Option<i64> {
 
 /// The two TTLs the cache API offers; the transcript reports written
 /// tokens per TTL bucket.
-const TTL_5M_MS: i64 = 5 * 60 * 1000;
-const TTL_1H_MS: i64 = 60 * 60 * 1000;
+pub const TTL_5M_MS: i64 = 5 * 60 * 1000;
+pub const TTL_1H_MS: i64 = 60 * 60 * 1000;
 
 pub fn last_cache_ttl_ms(path: &str) -> Option<i64> {
     let root = crate::schema::home_dir()?.join(".claude");

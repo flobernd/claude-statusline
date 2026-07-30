@@ -29,7 +29,9 @@ third.
 - Chips hide themselves when their data is absent: a clean repo shows a short line, a merge
   conflict or a cold prompt cache stands out
 - Cache age is flagged against the TTL the session actually requested, read from the
-  transcript: 5 minutes or 1 hour, falling back to 1 hour when the transcript does not say
+  transcript, with amber leading the expiry: amber at 4 minutes and red at 5 under a
+  5 minute TTL, amber at 50 minutes and red at 60 under an hour. When the transcript does
+  not reveal the TTL, amber stays at 5 minutes and red at an hour
 - Clickable branch and pull request chips (OSC 8 hyperlinks, on by default)
 - Width-aware: adapts to the terminal width reported by Claude Code, dropping the least
   important chips first
