@@ -40,6 +40,7 @@ jobs:
           tools/preview/setup.sh
           tools/preview/gen.py
       - name: Fail when assets drift from the sources
+        id: drift
         run: |
           if [ -n "$(git status --porcelain -- assets/)" ]; then
             git status --porcelain -- assets/
@@ -48,7 +49,7 @@ jobs:
             exit 1
           fi
       - name: Upload the regenerated assets
-        if: failure()
+        if: failure() && steps.drift.conclusion == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: regenerated-assets

@@ -30,6 +30,10 @@ g() { git -C "$1" -c init.defaultBranch=main -c user.name=dev -c user.email=dev@
 export TZ=UTC
 NOW_S=1784851200
 NOW_MS=$((NOW_S * 1000))
+# Byte-exact regeneration must not depend on machine speed: a slow runner can
+# blow the default git budget and silently drop branch/ahead-behind/worktree
+# chips, capturing wrong SVGs instead of failing loudly.
+export CLAUDE_STATUSLINE_GIT_TIMEOUT_MS=10000
 
 # --- transcripts: one assistant message ~72s ago -> cache_age chip ---------
 TS=$(date -u -d "@$((NOW_S - 72))" +%Y-%m-%dT%H:%M:%SZ)
