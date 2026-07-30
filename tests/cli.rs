@@ -43,6 +43,7 @@ fn run_statusline_env(
         .env("HOME", home)
         .env("USERPROFILE", home)
         .current_dir(home)
+        .env_remove("CLAUDE_STATUSLINE_NOW_MS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
