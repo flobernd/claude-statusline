@@ -997,7 +997,7 @@ fn cache_age_keeps_the_1h_ceiling_for_1h_or_unknown_ttl() {
         let payload = format!(r#"{{"transcript_path": {path:?}}}"#);
         let out = run_statusline_colored(&payload, home.path());
         let stdout = String::from_utf8_lossy(&out.stdout);
-        // Ten minutes into a 1h window: yellow, exactly as before.
+        // Ten minutes into a 1h window: amber, exactly as before.
         assert!(
             stdout.contains("\x1b[38;2;224;175;104m10m"),
             "usage {usage}: stdout: {stdout:?}"

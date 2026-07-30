@@ -1,7 +1,7 @@
 use crate::format::{fmt_duration, fmt_tokens};
 use crate::git::GitInfo;
 use crate::schema::Payload;
-use crate::theme::{BLUE, COMMENT, CYAN, GREEN, MAGENTA, RED, Style, YELLOW};
+use crate::theme::{AMBER, BLUE, COMMENT, CYAN, GREEN, MAGENTA, RED, Style};
 
 /// Display heuristic: past five minutes the prompt cache is likely cold.
 pub const CACHE_AGE_WARN_MS: i64 = 5 * 60 * 1000;
@@ -67,13 +67,13 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
     }
 
     if let Some(age) = c.cache_age_ms.filter(|a| *a >= 0) {
-        // Under a 5m TTL expiry arrives at the warn threshold, so the yellow
+        // Under a 5m TTL expiry arrives at the warn threshold, so the amber
         // band is empty and the age jumps straight to red.
         let expire = c.cache_ttl_ms.unwrap_or(CACHE_AGE_EXPIRE_MS);
         let color = if age >= expire {
             RED
         } else if age >= CACHE_AGE_WARN_MS {
-            YELLOW
+            AMBER
         } else {
             COMMENT
         };
@@ -115,7 +115,7 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
 /// error. The bare U+2B06 (no variation selector) stays single-width,
 /// which the fitting logic relies on.
 pub fn update_chip(version: &str, url: Option<&str>, s: &Style) -> (&'static str, String) {
-    let text = s.paint(&format!("\u{2B06} {version}"), YELLOW);
+    let text = s.paint(&format!("\u{2B06} {version}"), AMBER);
     (
         "update",
         match url {
@@ -186,7 +186,7 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
             parts.push(s.paint(&format!("-{}", c.git.files_removed), RED));
         }
         if c.git.files_changed > 0 {
-            parts.push(s.paint(&format!("~{}", c.git.files_changed), YELLOW));
+            parts.push(s.paint(&format!("~{}", c.git.files_changed), AMBER));
         }
         out.push(("git_files", parts.join(" ")));
     }
@@ -194,7 +194,7 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
     if c.git.stash > 0 {
         out.push((
             "git_stash",
-            s.paint(&format!("stash:{}", c.git.stash), YELLOW),
+            s.paint(&format!("stash:{}", c.git.stash), AMBER),
         ));
     }
 
@@ -216,13 +216,13 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
         let color = if state == crate::git::GitState::Conflict {
             RED
         } else {
-            YELLOW
+            AMBER
         };
         out.push(("git_state", s.paint_bold(state.label(), color)));
     }
 
     if ws.is_some_and(|w| w.git_worktree_present()) || c.git.linked_worktree {
-        out.push(("git_worktree", s.paint("gwt", YELLOW)));
+        out.push(("git_worktree", s.paint("gwt", AMBER)));
     }
 
     if let Some(pr) = c.payload.pr.as_ref()
@@ -243,7 +243,7 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
     if let Some(wt) = c.payload.worktree.as_ref()
         && let Some(branch) = wt.branch.as_deref().or(wt.name.as_deref())
     {
-        out.push(("worktree", s.paint(&format!("wt:{branch}"), YELLOW)));
+        out.push(("worktree", s.paint(&format!("wt:{branch}"), AMBER)));
     }
 
     out
@@ -345,7 +345,7 @@ fn review_token(state: &str) -> Option<(&'static str, crate::theme::Rgb)> {
     match state {
         "approved" => Some(("ok", GREEN)),
         "changes_requested" => Some(("chg", RED)),
-        "pending" => Some(("rev", YELLOW)),
+        "pending" => Some(("rev", AMBER)),
         "draft" => Some(("draft", COMMENT)),
         _ => None,
     }
@@ -606,7 +606,7 @@ mod tests {
         c.style = &colored;
         c.cache_age_ms = Some(CACHE_AGE_WARN_MS);
         let chips = line1(&c);
-        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;224;175;104m")); // yellow
+        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;224;175;104m")); // amber
 
         c.cache_age_ms = Some(CACHE_AGE_EXPIRE_MS);
         let chips = line1(&c);
@@ -624,7 +624,7 @@ mod tests {
         let mut c = ctx_of(&payload, &git);
         c.style = &colored;
 
-        // A 5m TTL: expiry lands on the warn threshold, so the yellow band
+        // A 5m TTL: expiry lands on the warn threshold, so the amber band
         // is empty and the age jumps from comment straight to red.
         c.cache_ttl_ms = Some(5 * 60 * 1000);
         c.cache_age_ms = Some(5 * 60 * 1000 - 1);
@@ -638,7 +638,7 @@ mod tests {
         c.cache_ttl_ms = Some(60 * 60 * 1000);
         c.cache_age_ms = Some(CACHE_AGE_WARN_MS);
         let chips = line1(&c);
-        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;224;175;104m")); // yellow
+        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;224;175;104m")); // amber
         c.cache_age_ms = Some(CACHE_AGE_EXPIRE_MS);
         let chips = line1(&c);
         assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;247;118;142m")); // red
