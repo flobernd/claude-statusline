@@ -199,12 +199,16 @@ fn render(raw: &str) -> Option<String> {
             .as_millis() as i64;
         Some(now - ts)
     });
+    let cache_ttl_ms = payload
+        .transcript_path
+        .as_deref()
+        .and_then(transcript::last_cache_ttl_ms);
 
     let ctx = sections::Ctx {
         payload: &payload,
         git: &git_info,
         cache_age_ms,
-        cache_ttl_ms: None,
+        cache_ttl_ms,
         style: &style,
     };
     let sep = style.paint(SEP, theme::COMMENT);

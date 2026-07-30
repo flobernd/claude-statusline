@@ -926,3 +926,81 @@ fn setup_declining_update_check_leaves_the_config_absent() {
             .exists()
     );
 }
+
+/// Like run_statusline but with colors forced on: a detected TTL shows up
+/// only in the cache_age chip's color.
+fn run_statusline_colored(stdin_data: &str, home: &std::path::Path) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_claude-statusline"))
+        .env("FORCE_COLOR", "1")
+        .env_remove("NO_COLOR")
+        .env("CLAUDE_STATUSLINE_WIDTH", "200")
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .current_dir(home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("binary runs");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin_data.as_bytes())
+        .unwrap();
+    child.wait_with_output().expect("binary exits")
+}
+
+/// One assistant entry stamped ten minutes ago: inside the default 1h
+/// window but past a 5m TTL, so the two cases color differently.
+fn write_usage_transcript(home: &std::path::Path, usage: &str) -> String {
+    let dir = home.join(".claude").join("projects").join("p");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ts = (chrono::Utc::now() - chrono::Duration::minutes(10)).format("%Y-%m-%dT%H:%M:%SZ");
+    let path = dir.join("s.jsonl");
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","message":{{"role":"assistant","usage":{usage}}}}}"#
+        ),
+    )
+    .unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn cache_age_expires_early_under_a_detected_5m_ttl() {
+    let home = tempfile::tempdir().unwrap();
+    let path = write_usage_transcript(
+        home.path(),
+        r#"{"cache_creation":{"ephemeral_5m_input_tokens":700,"ephemeral_1h_input_tokens":0}}"#,
+    );
+    let payload = format!(r#"{{"transcript_path": {path:?}}}"#);
+    let out = run_statusline_colored(&payload, home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Ten minutes past a 5m write: expired, red.
+    assert!(
+        stdout.contains("\x1b[38;2;247;118;142m10m"),
+        "stdout: {stdout:?}"
+    );
+}
+
+#[test]
+fn cache_age_keeps_the_1h_ceiling_for_1h_or_unknown_ttl() {
+    for usage in [
+        r#"{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":900}}"#,
+        // No breakdown at all: the default thresholds stay in force.
+        r#"{"input_tokens":5}"#,
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let path = write_usage_transcript(home.path(), usage);
+        let payload = format!(r#"{{"transcript_path": {path:?}}}"#);
+        let out = run_statusline_colored(&payload, home.path());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // Ten minutes into a 1h window: yellow, exactly as before.
+        assert!(
+            stdout.contains("\x1b[38;2;224;175;104m10m"),
+            "usage {usage}: stdout: {stdout:?}"
+        );
+    }
+}
