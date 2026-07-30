@@ -28,6 +28,8 @@ third.
   `NO_COLOR` respected
 - Chips hide themselves when their data is absent: a clean repo shows a short line, a merge
   conflict or a cold prompt cache stands out
+- Cache age is flagged against the TTL the session actually requested, read from the
+  transcript: 5 minutes or 1 hour, falling back to 1 hour when the transcript does not say
 - Clickable branch and pull request chips (OSC 8 hyperlinks, on by default)
 - Width-aware: adapts to the terminal width reported by Claude Code, dropping the least
   important chips first
