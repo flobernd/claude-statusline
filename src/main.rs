@@ -204,6 +204,7 @@ fn render(raw: &str) -> Option<String> {
         payload: &payload,
         git: &git_info,
         cache_age_ms,
+        cache_ttl_ms: None,
         style: &style,
     };
     let sep = style.paint(SEP, theme::COMMENT);

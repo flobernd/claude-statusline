@@ -5,14 +5,16 @@ use crate::theme::{BLUE, COMMENT, CYAN, GREEN, MAGENTA, RED, Style, YELLOW};
 
 /// Display heuristic: past five minutes the prompt cache is likely cold.
 pub const CACHE_AGE_WARN_MS: i64 = 5 * 60 * 1000;
-/// The one-hour cache TTL is the hard ceiling: past it the prompt cache has
-/// certainly expired, so the age is flagged more severely than "cold".
+/// Fallback expiry when the transcript does not reveal the session's cache
+/// TTL: one hour is the longest TTL on offer, so past it the prompt cache
+/// has certainly expired.
 pub const CACHE_AGE_EXPIRE_MS: i64 = 60 * 60 * 1000;
 
 pub struct Ctx<'a> {
     pub payload: &'a Payload,
     pub git: &'a GitInfo,
     pub cache_age_ms: Option<i64>,
+    pub cache_ttl_ms: Option<i64>,
     pub style: &'a Style,
 }
 
@@ -65,7 +67,10 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
     }
 
     if let Some(age) = c.cache_age_ms.filter(|a| *a >= 0) {
-        let color = if age >= CACHE_AGE_EXPIRE_MS {
+        // Under a 5m TTL expiry arrives at the warn threshold, so the yellow
+        // band is empty and the age jumps straight to red.
+        let expire = c.cache_ttl_ms.unwrap_or(CACHE_AGE_EXPIRE_MS);
+        let color = if age >= expire {
             RED
         } else if age >= CACHE_AGE_WARN_MS {
             YELLOW
@@ -411,6 +416,7 @@ pub fn preview(style: &Style) -> String {
         payload: &payload,
         git: &git,
         cache_age_ms: Some(72_000),
+        cache_ttl_ms: None,
         style,
     };
     let sep = style.paint(" \u{2502} ", COMMENT);
@@ -477,6 +483,7 @@ mod tests {
             payload,
             git,
             cache_age_ms: None,
+            cache_ttl_ms: None,
             style: &PLAIN,
         }
     }
@@ -604,6 +611,37 @@ mod tests {
         c.cache_age_ms = Some(CACHE_AGE_EXPIRE_MS);
         let chips = line1(&c);
         assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;247;118;142m")); // red past 1h
+    }
+
+    #[test]
+    fn detected_ttl_moves_the_expiry_boundary() {
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
+        let payload = parse_payload("{}").unwrap();
+        let git = GitInfo::default();
+        let mut c = ctx_of(&payload, &git);
+        c.style = &colored;
+
+        // A 5m TTL: expiry lands on the warn threshold, so the yellow band
+        // is empty and the age jumps from comment straight to red.
+        c.cache_ttl_ms = Some(5 * 60 * 1000);
+        c.cache_age_ms = Some(5 * 60 * 1000 - 1);
+        let chips = line1(&c);
+        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;86;95;137m4m59s")); // comment
+        c.cache_age_ms = Some(5 * 60 * 1000);
+        let chips = line1(&c);
+        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;247;118;142m5m00s")); // red
+
+        // A 1h TTL reproduces the default thresholds exactly.
+        c.cache_ttl_ms = Some(60 * 60 * 1000);
+        c.cache_age_ms = Some(CACHE_AGE_WARN_MS);
+        let chips = line1(&c);
+        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;224;175;104m")); // yellow
+        c.cache_age_ms = Some(CACHE_AGE_EXPIRE_MS);
+        let chips = line1(&c);
+        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;247;118;142m")); // red
     }
 
     #[test]
