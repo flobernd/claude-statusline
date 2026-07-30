@@ -1,18 +1,36 @@
 use crate::format::{fmt_duration, fmt_tokens};
 use crate::git::GitInfo;
 use crate::schema::Payload;
-use crate::theme::{BLUE, COMMENT, CYAN, GREEN, MAGENTA, RED, Style, YELLOW};
+use crate::theme::{AMBER, BLUE, COMMENT, CYAN, GREEN, MAGENTA, RED, Style};
 
-/// Display heuristic: past five minutes the prompt cache is likely cold.
+/// Display heuristic for an unknown TTL: past five minutes the prompt cache
+/// is likely cold.
 pub const CACHE_AGE_WARN_MS: i64 = 5 * 60 * 1000;
-/// The one-hour cache TTL is the hard ceiling: past it the prompt cache has
-/// certainly expired, so the age is flagged more severely than "cold".
+/// Fallback expiry when the transcript does not reveal the session's cache
+/// TTL: one hour is the longest TTL on offer, so past it the prompt cache
+/// has certainly expired.
 pub const CACHE_AGE_EXPIRE_MS: i64 = 60 * 60 * 1000;
+/// How far amber leads a known expiry. Proportionally tighter for the short
+/// TTL, where a ten minute lead would cover the whole window.
+const CACHE_AGE_WARN_5M_MS: i64 = 4 * 60 * 1000;
+const CACHE_AGE_WARN_1H_MS: i64 = 50 * 60 * 1000;
+
+/// Amber and red thresholds for the session's cache TTL. A known TTL puts
+/// amber just ahead of the real expiry; without one there is no expiry to
+/// lead, so the wide "likely cold" warning stands in for the uncertainty.
+fn cache_age_thresholds(ttl_ms: Option<i64>) -> (i64, i64) {
+    match ttl_ms {
+        Some(ttl) if ttl == crate::transcript::TTL_5M_MS => (CACHE_AGE_WARN_5M_MS, ttl),
+        Some(ttl) if ttl == crate::transcript::TTL_1H_MS => (CACHE_AGE_WARN_1H_MS, ttl),
+        _ => (CACHE_AGE_WARN_MS, CACHE_AGE_EXPIRE_MS),
+    }
+}
 
 pub struct Ctx<'a> {
     pub payload: &'a Payload,
     pub git: &'a GitInfo,
     pub cache_age_ms: Option<i64>,
+    pub cache_ttl_ms: Option<i64>,
     pub style: &'a Style,
 }
 
@@ -65,10 +83,11 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
     }
 
     if let Some(age) = c.cache_age_ms.filter(|a| *a >= 0) {
-        let color = if age >= CACHE_AGE_EXPIRE_MS {
+        let (warn, expire) = cache_age_thresholds(c.cache_ttl_ms);
+        let color = if age >= expire {
             RED
-        } else if age >= CACHE_AGE_WARN_MS {
-            YELLOW
+        } else if age >= warn {
+            AMBER
         } else {
             COMMENT
         };
@@ -110,7 +129,7 @@ pub fn line1(c: &Ctx) -> Vec<(&'static str, String)> {
 /// error. The bare U+2B06 (no variation selector) stays single-width,
 /// which the fitting logic relies on.
 pub fn update_chip(version: &str, url: Option<&str>, s: &Style) -> (&'static str, String) {
-    let text = s.paint(&format!("\u{2B06} {version}"), YELLOW);
+    let text = s.paint(&format!("\u{2B06} {version}"), AMBER);
     (
         "update",
         match url {
@@ -181,7 +200,7 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
             parts.push(s.paint(&format!("-{}", c.git.files_removed), RED));
         }
         if c.git.files_changed > 0 {
-            parts.push(s.paint(&format!("~{}", c.git.files_changed), YELLOW));
+            parts.push(s.paint(&format!("~{}", c.git.files_changed), AMBER));
         }
         out.push(("git_files", parts.join(" ")));
     }
@@ -189,7 +208,7 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
     if c.git.stash > 0 {
         out.push((
             "git_stash",
-            s.paint(&format!("stash:{}", c.git.stash), YELLOW),
+            s.paint(&format!("stash:{}", c.git.stash), AMBER),
         ));
     }
 
@@ -211,13 +230,13 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
         let color = if state == crate::git::GitState::Conflict {
             RED
         } else {
-            YELLOW
+            AMBER
         };
         out.push(("git_state", s.paint_bold(state.label(), color)));
     }
 
     if ws.is_some_and(|w| w.git_worktree_present()) || c.git.linked_worktree {
-        out.push(("git_worktree", s.paint("gwt", YELLOW)));
+        out.push(("git_worktree", s.paint("gwt", AMBER)));
     }
 
     if let Some(pr) = c.payload.pr.as_ref()
@@ -238,7 +257,7 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
     if let Some(wt) = c.payload.worktree.as_ref()
         && let Some(branch) = wt.branch.as_deref().or(wt.name.as_deref())
     {
-        out.push(("worktree", s.paint(&format!("wt:{branch}"), YELLOW)));
+        out.push(("worktree", s.paint(&format!("wt:{branch}"), AMBER)));
     }
 
     out
@@ -340,7 +359,7 @@ fn review_token(state: &str) -> Option<(&'static str, crate::theme::Rgb)> {
     match state {
         "approved" => Some(("ok", GREEN)),
         "changes_requested" => Some(("chg", RED)),
-        "pending" => Some(("rev", YELLOW)),
+        "pending" => Some(("rev", AMBER)),
         "draft" => Some(("draft", COMMENT)),
         _ => None,
     }
@@ -411,6 +430,7 @@ pub fn preview(style: &Style) -> String {
         payload: &payload,
         git: &git,
         cache_age_ms: Some(72_000),
+        cache_ttl_ms: None,
         style,
     };
     let sep = style.paint(" \u{2502} ", COMMENT);
@@ -477,6 +497,7 @@ mod tests {
             payload,
             git,
             cache_age_ms: None,
+            cache_ttl_ms: None,
             style: &PLAIN,
         }
     }
@@ -599,11 +620,56 @@ mod tests {
         c.style = &colored;
         c.cache_age_ms = Some(CACHE_AGE_WARN_MS);
         let chips = line1(&c);
-        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;224;175;104m")); // yellow
+        assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;224;175;104m")); // amber
 
         c.cache_age_ms = Some(CACHE_AGE_EXPIRE_MS);
         let chips = line1(&c);
         assert!(text_of(&chips, "cache_age").contains("\x1b[38;2;247;118;142m")); // red past 1h
+    }
+
+    #[test]
+    fn cache_age_bands_lead_the_detected_ttl() {
+        const COMMENT_SEQ: &str = "\x1b[38;2;86;95;137m";
+        const AMBER_SEQ: &str = "\x1b[38;2;224;175;104m";
+        const RED_SEQ: &str = "\x1b[38;2;247;118;142m";
+        let mins = |m: i64| m * 60 * 1000;
+
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
+        let payload = parse_payload("{}").unwrap();
+        let git = GitInfo::default();
+        let mut c = ctx_of(&payload, &git);
+        c.style = &colored;
+
+        let cases: &[(Option<i64>, i64, &str)] = &[
+            // A 5m TTL: amber leads the expiry by one minute.
+            (Some(mins(5)), mins(4) - 1, COMMENT_SEQ),
+            (Some(mins(5)), mins(4), AMBER_SEQ),
+            (Some(mins(5)), mins(5) - 1, AMBER_SEQ),
+            (Some(mins(5)), mins(5), RED_SEQ),
+            // A 1h TTL: amber leads by ten minutes, so five minutes in the
+            // cache still reads fresh.
+            (Some(mins(60)), mins(5), COMMENT_SEQ),
+            (Some(mins(60)), mins(50) - 1, COMMENT_SEQ),
+            (Some(mins(60)), mins(50), AMBER_SEQ),
+            (Some(mins(60)), mins(60) - 1, AMBER_SEQ),
+            (Some(mins(60)), mins(60), RED_SEQ),
+            // An unknown TTL keeps the wide warning from five minutes.
+            (None, CACHE_AGE_WARN_MS - 1, COMMENT_SEQ),
+            (None, CACHE_AGE_WARN_MS, AMBER_SEQ),
+            (None, CACHE_AGE_EXPIRE_MS - 1, AMBER_SEQ),
+            (None, CACHE_AGE_EXPIRE_MS, RED_SEQ),
+        ];
+
+        for (ttl, age, want) in cases {
+            c.cache_ttl_ms = *ttl;
+            c.cache_age_ms = Some(*age);
+            let chips = line1(&c);
+            let text = text_of(&chips, "cache_age");
+            assert!(text.contains(want), "ttl {ttl:?} at {age}ms: {text:?}");
+        }
     }
 
     #[test]

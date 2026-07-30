@@ -13,7 +13,7 @@ pub fn last_assistant_timestamp_ms(path: &str) -> Option<i64> {
 /// transcript_path is external input; require the resolved real path to
 /// live under the allowed root so a hostile payload cannot make us read
 /// arbitrary files.
-pub fn last_assistant_ts_under(path: &str, allowed_root: &Path) -> Option<i64> {
+fn tail_text(path: &str, allowed_root: &Path) -> Option<String> {
     let real = Path::new(path).canonicalize().ok()?;
     let root = allowed_root.canonicalize().ok()?;
     if !real.starts_with(&root) {
@@ -28,12 +28,17 @@ pub fn last_assistant_ts_under(path: &str, allowed_root: &Path) -> Option<i64> {
     f.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).ok()?;
-    let text = String::from_utf8_lossy(&buf);
-    let mut lines: Vec<&str> = text.split('\n').collect();
-    if start > 0 && !buf.starts_with(b"\n") && !lines.is_empty() {
-        lines.remove(0); // partial first line when the tail starts mid-line
+    let mut text = String::from_utf8_lossy(&buf).into_owned();
+    if start > 0 && !text.starts_with('\n') {
+        let cut = text.find('\n')?; // partial first line when the tail starts mid-line
+        text.drain(..=cut);
     }
-    for line in lines.iter().rev() {
+    Some(text)
+}
+
+pub fn last_assistant_ts_under(path: &str, allowed_root: &Path) -> Option<i64> {
+    let text = tail_text(path, allowed_root)?;
+    for line in text.split('\n').rev() {
         // Cheap substring pre-filter before json parsing each line.
         if !line.contains("\"assistant\"") || !line.contains("\"timestamp\"") {
             continue;
@@ -52,6 +57,49 @@ pub fn last_assistant_ts_under(path: &str, allowed_root: &Path) -> Option<i64> {
             .and_then(parse_iso8601_ms)
         {
             return Some(ts);
+        }
+    }
+    None
+}
+
+/// The two TTLs the cache API offers; the transcript reports written
+/// tokens per TTL bucket.
+pub const TTL_5M_MS: i64 = 5 * 60 * 1000;
+pub const TTL_1H_MS: i64 = 60 * 60 * 1000;
+
+pub fn last_cache_ttl_ms(path: &str) -> Option<i64> {
+    let root = crate::schema::home_dir()?.join(".claude");
+    last_cache_ttl_under(path, &root)
+}
+
+/// TTL of the most recent cache write. Read-only turns report zero in both
+/// buckets and carry no TTL, so the scan walks past them. A turn writing
+/// both buckets reports the longer TTL: red means certainly expired, which
+/// only holds past the longest TTL written.
+pub fn last_cache_ttl_under(path: &str, allowed_root: &Path) -> Option<i64> {
+    let text = tail_text(path, allowed_root)?;
+    for line in text.split('\n').rev() {
+        // Cheap substring pre-filter before json parsing each line. The
+        // closing quote keeps cache_creation_input_tokens from matching.
+        if !line.contains("\"cache_creation\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(cc) = v.pointer("/message/usage/cache_creation") else {
+            continue;
+        };
+        let written = |field: &str| {
+            cc.get(field)
+                .and_then(|t| t.as_f64())
+                .is_some_and(|t| t > 0.0)
+        };
+        if written("ephemeral_1h_input_tokens") {
+            return Some(TTL_1H_MS);
+        }
+        if written("ephemeral_5m_input_tokens") {
+            return Some(TTL_5M_MS);
         }
     }
     None
@@ -232,5 +280,99 @@ mod tests {
         std::fs::write(&path, lines.join("\n")).unwrap();
         let p = path.to_string_lossy().into_owned();
         assert_eq!(last_assistant_ts_under(&p, dir.path()), Some(0));
+    }
+
+    #[test]
+    fn ttl_of_the_newest_write_bearing_entry_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","usage":{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":900}}}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","usage":{"cache_creation":{"ephemeral_5m_input_tokens":700,"ephemeral_1h_input_tokens":0}}}}"#,
+            ],
+        );
+        assert_eq!(last_cache_ttl_under(&path, dir.path()), Some(5 * 60 * 1000));
+
+        let path = write_transcript(
+            dir.path(),
+            "t.jsonl",
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","usage":{"cache_creation":{"ephemeral_5m_input_tokens":700,"ephemeral_1h_input_tokens":0}}}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","usage":{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":900}}}}"#,
+            ],
+        );
+        assert_eq!(
+            last_cache_ttl_under(&path, dir.path()),
+            Some(60 * 60 * 1000)
+        );
+    }
+
+    #[test]
+    fn ttl_scan_walks_past_zero_write_decoy_and_malformed_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","usage":{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":800}}}}"#,
+                // Parses, but the key is not at /message/usage/cache_creation.
+                r#"{"cache_creation":{"ephemeral_5m_input_tokens":5},"type":"other"}"#,
+                r#"{"cache_creation": broken"#,
+                r#"{"type":"assistant","message":{"role":"assistant","usage":{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}}}"#,
+            ],
+        );
+        assert_eq!(
+            last_cache_ttl_under(&path, dir.path()),
+            Some(60 * 60 * 1000)
+        );
+    }
+
+    #[test]
+    fn ttl_mixed_buckets_report_the_longer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","usage":{"cache_creation":{"ephemeral_5m_input_tokens":300,"ephemeral_1h_input_tokens":900}}}}"#,
+            ],
+        );
+        assert_eq!(
+            last_cache_ttl_under(&path, dir.path()),
+            Some(60 * 60 * 1000)
+        );
+    }
+
+    #[test]
+    fn ttl_unknown_without_cache_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        // Non-Anthropic gateways omit the breakdown entirely.
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":5,"cache_read_input_tokens":100}}}"#,
+            ],
+        );
+        assert_eq!(last_cache_ttl_under(&path, dir.path()), None);
+        let empty = write_transcript(dir.path(), "e.jsonl", &[]);
+        assert_eq!(last_cache_ttl_under(&empty, dir.path()), None);
+        assert_eq!(last_cache_ttl_under("/does/not/exist", dir.path()), None);
+    }
+
+    #[test]
+    fn ttl_path_outside_allowed_root_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let path = write_transcript(
+            other.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","usage":{"cache_creation":{"ephemeral_1h_input_tokens":900}}}}"#,
+            ],
+        );
+        assert_eq!(last_cache_ttl_under(&path, dir.path()), None);
     }
 }
