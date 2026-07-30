@@ -3,7 +3,25 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const GIT_TIMEOUT: Duration = Duration::from_millis(500);
+/// A render must not stall on a hung repository, so every git call gets
+/// this budget. Raisable through CLAUDE_STATUSLINE_GIT_TIMEOUT_MS for
+/// machines where process spawning alone can approach it, such as a busy
+/// CI runner, where the budget would otherwise fail healthy repositories.
+const GIT_TIMEOUT_DEFAULT: Duration = Duration::from_millis(500);
+const GIT_TIMEOUT_VAR: &str = "CLAUDE_STATUSLINE_GIT_TIMEOUT_MS";
+
+/// Anything unparseable, zero, or negative keeps the default: a broken
+/// value must not silently disable the budget.
+fn timeout_from(raw: Option<String>) -> Duration {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map_or(GIT_TIMEOUT_DEFAULT, Duration::from_millis)
+}
+
+fn git_timeout() -> Duration {
+    static TIMEOUT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *TIMEOUT.get_or_init(|| timeout_from(std::env::var(GIT_TIMEOUT_VAR).ok()))
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct GitInfo {
@@ -44,6 +62,7 @@ impl GitState {
 /// Run git with a hard timeout so a hung repository (network FS, huge
 /// object store) can never stall the statusline render.
 fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
+    let timeout = git_timeout();
     let mut child = Command::new("git")
         .args(args)
         .current_dir(dir)
@@ -73,7 +92,7 @@ fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
                 return out;
             }
             Ok(None) => {
-                if start.elapsed() > GIT_TIMEOUT {
+                if start.elapsed() > timeout {
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = reader.join();
@@ -354,6 +373,17 @@ mod tests {
         std::fs::write(dir.join("f.txt"), "one\n").unwrap();
         git(dir, &["add", "f.txt"]);
         git(dir, &["commit", "-m", "init"]);
+    }
+
+    #[test]
+    fn git_timeout_override_ignores_unusable_values() {
+        assert_eq!(
+            timeout_from(Some(" 10000 ".into())),
+            Duration::from_secs(10)
+        );
+        for bad in [None, Some("".into()), Some("0".into()), Some("-1".into())] {
+            assert_eq!(timeout_from(bad), GIT_TIMEOUT_DEFAULT);
+        }
     }
 
     #[test]

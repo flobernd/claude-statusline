@@ -131,6 +131,10 @@ Optional file `~/.claude/claude-statusline.json`:
 `subagent_disabled_sections` does the same for the subagent rows:
 `name`, `cwd`, `branch`, `activity`, `context_tokens`, `elapsed`, `model`, `effort`.
 
+Every `git` call gets a 500 ms budget so a hung repository can never stall a render.
+`CLAUDE_STATUSLINE_GIT_TIMEOUT_MS` raises it for machines where process spawning alone can approach
+that, such as a busy CI runner; an unusable value keeps the default.
+
 ## Colors
 
 Every chip is painted from one fixed 24-bit palette, so a color means the same thing wherever it
