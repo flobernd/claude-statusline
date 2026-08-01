@@ -15,7 +15,10 @@ PHOME=$WORK/home
 UHOME=$WORK/home-usage
 
 rm -rf "$OUT" "$WORK"
-mkdir -p "$OUT" "$PHOME/.claude" "$UHOME/.claude"
+# dev/notes has to exist on disk: the statusline paints a directory that is
+# gone as a dead location, and this capture stands for the healthy chip a
+# plain directory outside any repository gets.
+mkdir -p "$OUT" "$PHOME/.claude" "$PHOME/dev/notes" "$UHOME/.claude"
 
 # Hermetic git so the scratch repos are deterministic and never touch the
 # user's config.
@@ -154,6 +157,9 @@ cat > "$OUT/p-subagent.json" <<JSON
 JSON
 
 # --- capture real output --------------------------------------------------
+# work/ sits inside this repository, so git discovery would climb out of the
+# scratch tree and resolve the captures against claude-statusline itself.
+export GIT_CEILING_DIRECTORIES=$WORK
 export FORCE_COLOR=1 CLAUDE_STATUSLINE_WIDTH=220 CLAUDE_STATUSLINE_NOW_MS=$NOW_MS
 unset NO_COLOR || true
 for v in cwd repo worktree; do
