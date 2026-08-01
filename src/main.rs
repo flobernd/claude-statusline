@@ -178,8 +178,10 @@ fn render(raw: &str) -> Option<String> {
     let style = theme::Style::from_env(config.clickable_links);
     let width = terminal_width();
 
-    // A missing working directory only loses the git chips; Line 1 must
-    // still render, so this never aborts the whole pipeline.
+    // With no resolvable directory the git chips simply stay absent, but
+    // Line 1 must still render, so this never aborts the whole pipeline.
+    // A directory that resolves yet no longer exists is handled in
+    // git::collect, which flags it for the red missing-dir rendering.
     let git_dir = payload
         .workspace
         .as_ref()
