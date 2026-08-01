@@ -148,6 +148,19 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
         .and_then(|r| r.name.clone())
         .or_else(|| c.git.repo_name_fallback.clone());
 
+    // When the directory is gone git answers nothing, so the payload's
+    // native worktree fields stand in for the branch identity.
+    let missing_branch = if c.git.missing_dir {
+        c.payload.worktree.as_ref().and_then(|wt| {
+            wt.branch
+                .as_deref()
+                .filter(|b| !b.is_empty())
+                .or_else(|| wt.name.as_deref().filter(|n| !n.is_empty()))
+        })
+    } else {
+        None
+    };
+
     // The branch chip already carries the repo name and location, so the
     // cwd chip only earns its space outside a git repo, where none renders.
     let cwd = ws
@@ -156,28 +169,38 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
         .or_else(|| ws.and_then(|w| w.project_dir.as_deref()))
         .filter(|p| !p.is_empty());
     if c.git.branch.is_none()
+        && missing_branch.is_none()
         && let Some(path) = cwd
     {
+        let color = if c.git.missing_dir { RED } else { CYAN };
         out.push((
             "cwd",
-            s.paint(&format!("\u{2302} {}", display_path(path)), CYAN),
+            s.paint(&format!("\u{2302} {}", display_path(path)), color),
         ));
     }
 
-    if let Some(branch) = c.git.branch.as_deref() {
+    let branch_text = if let Some(branch) = c.git.branch.as_deref() {
         let branch_color = if c.git.on_default_branch {
             GREEN
         } else {
             MAGENTA
         };
-        let text = match repo_name.as_deref() {
+        Some(match repo_name.as_deref() {
             Some(r) => format!(
                 "{}{}",
                 s.paint(&format!("\u{2387} {r}"), CYAN),
                 s.paint(&format!("/{branch}"), branch_color)
             ),
             None => s.paint(&format!("\u{2387} {branch}"), branch_color),
-        };
+        })
+    } else {
+        // Entirely red: the location itself is dead, not just the branch.
+        missing_branch.map(|branch| match repo_name.as_deref() {
+            Some(r) => s.paint(&format!("\u{2387} {r}/{branch}"), RED),
+            None => s.paint(&format!("\u{2387} {branch}"), RED),
+        })
+    };
+    if let Some(text) = branch_text {
         let url = repo.and_then(|r| match (&r.host, &r.owner, &r.name) {
             (Some(h), Some(o), Some(n)) => Some(format!("https://{h}/{o}/{n}")),
             _ => None,
@@ -1092,5 +1115,128 @@ mod tests {
         assert!(text.starts_with("\u{2301} Max \u{2502} 5h:42%"));
         assert!(text.contains(" \u{2502} "));
         assert!(text.contains("spend:$1002/$1000 (100%)"));
+    }
+
+    fn missing_git() -> GitInfo {
+        GitInfo {
+            missing_dir: true,
+            ..GitInfo::default()
+        }
+    }
+
+    #[test]
+    fn missing_dir_renders_branch_chip_from_payload_worktree() {
+        let payload = parse_payload(
+            r#"{
+        "workspace": {"current_dir": "/gone/wt", "repo": {"name": "myrepo"}},
+        "worktree": {"name": "fix", "branch": "feat/x"}
+    }"#,
+        )
+        .unwrap();
+        let git = missing_git();
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(chips[0].0, "branch");
+        assert_eq!(chips[0].1, "\u{2387} myrepo/feat/x");
+        // The branch chip carries the location, so the cwd chip stays out.
+        assert!(!names_of(&chips).contains(&"cwd"));
+    }
+
+    #[test]
+    fn missing_dir_branch_chip_is_entirely_red() {
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
+        let payload = parse_payload(
+            r#"{
+        "workspace": {"current_dir": "/gone/wt", "repo": {"name": "myrepo"}},
+        "worktree": {"branch": "feat/x"}
+    }"#,
+        )
+        .unwrap();
+        let git = missing_git();
+        let mut c = ctx_of(&payload, &git);
+        c.style = &colored;
+        let chips = line2(&c);
+        assert_eq!(
+            chips[0].1,
+            "\x1b[38;2;247;118;142m\u{2387} myrepo/feat/x\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn missing_dir_branch_falls_back_to_worktree_name() {
+        let payload = parse_payload(
+            r#"{"workspace": {"current_dir": "/gone"}, "worktree": {"name": "fix"}}"#,
+        )
+        .unwrap();
+        let git = missing_git();
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(chips[0].1, "\u{2387} fix");
+    }
+
+    #[test]
+    fn missing_dir_branch_chip_keeps_the_repo_link() {
+        let linked = Style {
+            colors: true,
+            links: true,
+        };
+        let payload = parse_payload(
+            r#"{
+        "workspace": {"current_dir": "/gone",
+            "repo": {"host": "github.com", "owner": "u", "name": "myapp"}},
+        "worktree": {"branch": "feat/x"}
+    }"#,
+        )
+        .unwrap();
+        let git = missing_git();
+        let mut c = ctx_of(&payload, &git);
+        c.style = &linked;
+        let chips = line2(&c);
+        assert!(
+            chips[0]
+                .1
+                .contains("\x1b]8;;https://github.com/u/myapp\x1b\\"),
+            "chip: {}",
+            chips[0].1
+        );
+    }
+
+    #[test]
+    fn missing_dir_without_payload_worktree_paints_the_cwd_chip_red() {
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
+        let payload = parse_payload(r#"{"workspace": {"current_dir": "/gone/dir"}}"#).unwrap();
+        let git = missing_git();
+        let mut c = ctx_of(&payload, &git);
+        c.style = &colored;
+        let chips = line2(&c);
+        assert_eq!(chips[0].0, "cwd");
+        assert_eq!(
+            chips[0].1,
+            "\x1b[38;2;247;118;142m\u{2302} /gone/dir\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn missing_dir_empty_worktree_fields_fall_back_gracefully() {
+        // An empty branch is no identity; the name still is.
+        let payload = parse_payload(
+            r#"{"workspace": {"current_dir": "/gone"}, "worktree": {"branch": "", "name": "fix"}}"#,
+        )
+        .unwrap();
+        let git = missing_git();
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(chips[0].1, "\u{2387} fix");
+
+        // Both empty: no identity at all, so the red cwd chip renders.
+        let payload = parse_payload(
+            r#"{"workspace": {"current_dir": "/gone"}, "worktree": {"branch": "", "name": ""}}"#,
+        )
+        .unwrap();
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(chips[0].0, "cwd");
     }
 }
