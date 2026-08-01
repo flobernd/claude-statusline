@@ -151,10 +151,12 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
     // When the directory is gone git answers nothing, so the payload's
     // native worktree fields stand in for the branch identity.
     let missing_branch = if c.git.missing_dir {
-        c.payload
-            .worktree
-            .as_ref()
-            .and_then(|wt| wt.branch.as_deref().or(wt.name.as_deref()))
+        c.payload.worktree.as_ref().and_then(|wt| {
+            wt.branch
+                .as_deref()
+                .filter(|b| !b.is_empty())
+                .or_else(|| wt.name.as_deref().filter(|n| !n.is_empty()))
+        })
     } else {
         None
     };
@@ -1216,5 +1218,25 @@ mod tests {
             chips[0].1,
             "\x1b[38;2;247;118;142m\u{2302} /gone/dir\x1b[0m"
         );
+    }
+
+    #[test]
+    fn missing_dir_empty_worktree_fields_fall_back_gracefully() {
+        // An empty branch is no identity; the name still is.
+        let payload = parse_payload(
+            r#"{"workspace": {"current_dir": "/gone"}, "worktree": {"branch": "", "name": "fix"}}"#,
+        )
+        .unwrap();
+        let git = missing_git();
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(chips[0].1, "\u{2387} fix");
+
+        // Both empty: no identity at all, so the red cwd chip renders.
+        let payload = parse_payload(
+            r#"{"workspace": {"current_dir": "/gone"}, "worktree": {"branch": "", "name": ""}}"#,
+        )
+        .unwrap();
+        let chips = line2(&ctx_of(&payload, &git));
+        assert_eq!(chips[0].0, "cwd");
     }
 }
