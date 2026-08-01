@@ -1068,3 +1068,22 @@ fn cache_age_keeps_the_wide_warning_when_the_ttl_is_unknown() {
         );
     }
 }
+
+#[test]
+fn missing_workspace_dir_renders_the_red_branch_chip() {
+    let home = tempfile::tempdir().unwrap();
+    let gone = home.path().join("removed-wt");
+    let payload = format!(
+        r#"{{"workspace": {{"current_dir": {dir:?}, "repo": {{"name": "myrepo"}}}},
+            "worktree": {{"name": "wt", "branch": "feat/x"}}}}"#,
+        dir = gone.to_string_lossy()
+    );
+    let out = run_statusline_colored(&payload, home.path());
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("{RED_SEQ}\u{2387} myrepo/feat/x")),
+        "stdout: {stdout}"
+    );
+    assert!(!stdout.contains('\u{2302}'), "stdout: {stdout}");
+}

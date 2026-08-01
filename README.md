@@ -183,8 +183,8 @@ A negative age, meaning the transcript timestamp sits ahead of the clock, hides 
 
 | Chip           | Coloring                                                                       |
 | -------------- | ------------------------------------------------------------------------------ |
-| `cwd`          | Cyan; renders only outside a git repository                                     |
-| `branch`       | Repo name cyan; the branch green on a default branch, magenta on any other      |
+| `cwd`          | Cyan; renders only outside a git repository. Red when the directory itself no longer exists |
+| `branch`       | Repo name cyan; the branch green on a default branch, magenta on any other. Entirely red when the working directory no longer exists, with the identity taken from the Claude Code worktree payload |
 | `git_files`    | `+added` green, `-removed` red, `~changed` amber                               |
 | `git_stash`    | Amber                                                                          |
 | `git_sync`     | Comment: ahead and behind counts are informational, not a problem               |
