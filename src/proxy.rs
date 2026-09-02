@@ -6,7 +6,7 @@
 #![allow(dead_code)]
 
 use crate::schema::{lenient, lenient_vec};
-use crate::usage::{Limits, Spend, Window};
+use crate::usage::{Limits, Window};
 use serde::Deserialize;
 
 pub const ROUTE_PATH: &str = "/v0/resource/plugins/cpa-claude-statusline/session";
@@ -127,7 +127,8 @@ pub fn parse_status(body: &str) -> Option<ProxyStatus> {
 }
 
 /// A window whose reset has passed is dropped, as Claude Code drops stale payload windows;
-/// spend mirrors `usage::spend_from`, amounts first and the reported percentage as the gap filler.
+/// spend is built by `usage::spend_from_parts`, the same amounts-first rule the native endpoint
+/// uses.
 pub fn limits(account: &ProxyAccount, now_epoch_s: i64) -> Limits {
     let window = |w: Option<&ProxyWindow>| -> Option<Window> {
         let w = w?;
@@ -145,27 +146,15 @@ pub fn limits(account: &ProxyAccount, now_epoch_s: i64) -> Limits {
         session: window(windows.and_then(|w| w.five_hour.as_ref())),
         week: window(windows.and_then(|w| w.seven_day.as_ref())),
         fable: window(windows.and_then(|w| w.fable.as_ref())),
-        spend: account
-            .spend
-            .as_ref()
-            .and_then(|s| spend_from(s, now_epoch_s)),
+        spend: account.spend.as_ref().and_then(|s| {
+            crate::usage::spend_from_parts(
+                s.used_cents,
+                s.limit_cents,
+                s.used_percentage,
+                now_epoch_s,
+            )
+        }),
     }
-}
-
-fn spend_from(spend: &ProxySpend, now_epoch_s: i64) -> Option<Spend> {
-    let pct = match (spend.used_cents, spend.limit_cents) {
-        (Some(used), Some(limit)) if limit > 0.0 => Some(used / limit * 100.0),
-        _ => spend.used_percentage,
-    };
-    if pct.is_none() && (spend.used_cents.is_none() || spend.limit_cents.is_none()) {
-        return None;
-    }
-    Some(Spend {
-        used_cents: spend.used_cents,
-        limit_cents: spend.limit_cents,
-        pct,
-        resets_at: crate::usage::next_month_start(now_epoch_s),
-    })
 }
 
 /// The only network touchpoint, kept separate so no test can reach it. The budget follows the

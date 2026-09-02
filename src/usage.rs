@@ -260,18 +260,34 @@ fn fable_window(endpoint: &EndpointUtilization) -> Option<Window> {
 }
 
 fn spend_from(extra: &ExtraUsage, now_epoch_s: i64) -> Option<Spend> {
+    spend_from_parts(
+        extra.used_credits,
+        extra.monthly_limit,
+        extra.utilization,
+        now_epoch_s,
+    )
+}
+
+/// Shared by the native endpoint and the CLIProxyAPI proxy route, which report the same shape
+/// under different field names.
+pub(crate) fn spend_from_parts(
+    used_cents: Option<f64>,
+    limit_cents: Option<f64>,
+    reported_pct: Option<f64>,
+    now_epoch_s: i64,
+) -> Option<Spend> {
     // Amounts are authoritative when both exist; the reported utilization
     // only fills the gap, so a unit drift there cannot skew real dollars.
-    let pct = match (extra.used_credits, extra.monthly_limit) {
+    let pct = match (used_cents, limit_cents) {
         (Some(used), Some(limit)) if limit > 0.0 => Some(used / limit * 100.0),
-        _ => extra.utilization,
+        _ => reported_pct,
     };
-    if pct.is_none() && (extra.used_credits.is_none() || extra.monthly_limit.is_none()) {
+    if pct.is_none() && (used_cents.is_none() || limit_cents.is_none()) {
         return None;
     }
     Some(Spend {
-        used_cents: extra.used_credits,
-        limit_cents: extra.monthly_limit,
+        used_cents,
+        limit_cents,
         pct,
         resets_at: next_month_start(now_epoch_s),
     })
