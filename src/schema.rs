@@ -239,7 +239,6 @@ pub struct AccountInfo {
     #[serde(default, deserialize_with = "lenient", rename = "accountUuid")]
     pub account_uuid: Option<String>,
     #[serde(default, deserialize_with = "lenient", rename = "emailAddress")]
-    #[allow(dead_code)]
     pub email: Option<String>,
 }
 

@@ -505,7 +505,7 @@ pub fn usage_preview(style: &Style) -> String {
     let chips = line3(
         &sample_limits(),
         Some("max"),
-        None,
+        Some("user@example.com"),
         None,
         style,
         USAGE_SAMPLE_NOW_S,
@@ -1165,7 +1165,7 @@ mod tests {
     #[test]
     fn usage_preview_renders_the_sample_line() {
         let text = usage_preview(&PLAIN);
-        assert!(text.starts_with("\u{2301} Max \u{2502} 5h:42%"));
+        assert!(text.starts_with("\u{2301} user@example.com \u{2502} Max \u{2502} 5h:42%"));
         assert!(text.contains(" \u{2502} "));
         assert!(text.contains("spend:$1002/$1000 (100%)"));
     }

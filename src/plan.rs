@@ -5,7 +5,6 @@
 /// not separate them; team needs an active subscription; enterprise and anything newer fall
 /// through to the organization type. The local `~/.claude.json` carries neither flag nor the
 /// subscription status, so from that file only the last rule applies.
-#[allow(dead_code)]
 pub fn derive(
     organization_type: Option<&str>,
     has_claude_max: Option<bool>,
