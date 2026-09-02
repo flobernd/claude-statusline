@@ -14,6 +14,23 @@ where
     Ok(serde_json::from_value(v).ok())
 }
 
+/// A list parses element by element: a malformed entry becomes nothing rather than failing the
+/// whole list, and a value that is not a list at all reads as empty.
+pub(crate) fn lenient_vec<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    let serde_json::Value::Array(items) = v else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| serde_json::from_value(item).ok())
+        .collect())
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct Payload {
     #[serde(default, deserialize_with = "lenient")]

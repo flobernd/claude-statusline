@@ -3,6 +3,7 @@ mod commands;
 mod fit;
 mod format;
 mod git;
+mod proxy;
 mod schema;
 mod sections;
 mod subagent;
