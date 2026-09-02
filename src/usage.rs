@@ -123,6 +123,22 @@ impl EndpointEnv {
             || flag_enabled(&self.use_bedrock)
             || flag_enabled(&self.use_vertex)
     }
+
+    /// The base URL of a custom HTTP endpoint, with trailing slashes removed. None for the
+    /// official API and for Bedrock or Vertex sessions, where no HTTP base URL applies and a
+    /// proxy route cannot exist. A bearer token alone does not name a host, so it plays no part.
+    // Unread until a later task wires the CLIProxyAPI status lookup into rendering.
+    #[allow(dead_code)]
+    pub fn custom_base_url(&self) -> Option<String> {
+        if flag_enabled(&self.use_bedrock) || flag_enabled(&self.use_vertex) {
+            return None;
+        }
+        let url = self.base_url.as_deref()?.trim();
+        if url.is_empty() || is_official_url(url) {
+            return None;
+        }
+        Some(url.trim_end_matches('/').to_string())
+    }
 }
 
 fn is_set(value: &Option<String>) -> bool {
@@ -269,7 +285,7 @@ fn parse_reset_iso(s: &str) -> Option<i64> {
 
 /// Extra usage renews monthly, so the meter resets on the first of the
 /// next month in the user's local time.
-fn next_month_start(now_epoch_s: i64) -> Option<i64> {
+pub(crate) fn next_month_start(now_epoch_s: i64) -> Option<i64> {
     let now = chrono::DateTime::from_timestamp(now_epoch_s, 0)?.with_timezone(&Local);
     let (year, month) = if now.month() == 12 {
         (now.year() + 1, 1)
@@ -806,5 +822,42 @@ mod tests {
         // Even next to an explicitly official base URL: a custom bearer
         // token means gateway auth regardless of the URL.
         assert!(endpoint_env(Some("t"), Some("https://api.anthropic.com"), None, None).is_custom());
+    }
+
+    #[test]
+    fn custom_base_url_is_the_trimmed_non_official_http_base() {
+        assert_eq!(
+            endpoint_env(None, Some(" http://127.0.0.1:8317/ "), None, None).custom_base_url(),
+            Some("http://127.0.0.1:8317".to_string())
+        );
+        assert!(
+            endpoint_env(None, None, None, None)
+                .custom_base_url()
+                .is_none()
+        );
+        assert!(
+            endpoint_env(None, Some("https://api.anthropic.com/"), None, None)
+                .custom_base_url()
+                .is_none()
+        );
+        assert!(
+            endpoint_env(Some("tok"), Some("https://api.claude.com"), None, None)
+                .custom_base_url()
+                .is_none()
+        );
+        assert!(
+            endpoint_env(None, Some("http://proxy"), Some("1"), None)
+                .custom_base_url()
+                .is_none()
+        );
+        assert!(
+            endpoint_env(None, Some("http://proxy"), None, Some("true"))
+                .custom_base_url()
+                .is_none()
+        );
+        assert_eq!(
+            endpoint_env(None, Some("http://proxy"), Some("0"), Some("false")).custom_base_url(),
+            Some("http://proxy".to_string())
+        );
     }
 }
