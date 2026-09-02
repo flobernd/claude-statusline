@@ -127,7 +127,7 @@ pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
     let response: ProfileResponse = serde_json::from_str(body).ok()?;
     let account = response.account.unwrap_or_default();
     let organization = response.organization.unwrap_or_default();
-    Some(Profile {
+    let profile = Profile {
         email: account
             .email
             .map(|e| e.trim().to_string())
@@ -138,7 +138,15 @@ pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
             account.has_claude_pro,
             organization.subscription_status.as_deref(),
         ),
-    })
+    };
+    // A 200 whose shape no longer matches (an endpoint change) parses to an
+    // empty profile. Reading that as success would overwrite a good cached
+    // profile and stamp it fresh for a day; None instead lets refresh_profile
+    // keep the previous profile and retry on the next child run.
+    if profile.email.is_none() && profile.plan.is_none() {
+        return None;
+    }
+    Some(profile)
 }
 
 pub fn cache_path() -> Option<PathBuf> {
@@ -860,6 +868,8 @@ mod tests {
         let p = profile_from_body(body).unwrap();
         assert_eq!(p.plan.as_deref(), Some("enterprise"));
         assert!(profile_from_body("nope").is_none());
+        assert!(profile_from_body("{}").is_none());
+        assert!(profile_from_body(r#"{"account":{"uuid":"u"}}"#).is_none());
     }
 
     #[test]

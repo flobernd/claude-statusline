@@ -35,10 +35,10 @@ third.
   important chips first
 - Optional subagent status line: while agent tasks run, one row per task with
   name, live activity, context usage, elapsed time, and model
-- Optional usage limits line (off by default): plan type, session and weekly window
-  utilization with reset countdowns, the Fable-only weekly window, and the extra-usage
-  spend meter; behind CLIProxyAPI one row per account that serves the session, each with
-  the model it served last
+- Optional usage limits line (off by default): the account email, plan type, session
+  and weekly window utilization with reset countdowns, the Fable-only weekly window,
+  and the extra-usage spend meter; behind CLIProxyAPI one row per account that serves
+  the session, each with the model it served last
 - Opt-in update notification (off by default): a chip on the first line when a newer
   release is published, linking to its release notes
 - Single native binary; renders in a few milliseconds. Only the opt-in usage limits line
@@ -98,7 +98,8 @@ does, the affected chips disappear silently while the payload-backed chips keep 
 
 The account email and the plan come from the claude.ai profile endpoint, fetched by the same
 background process at most once a day; until the first fetch lands, and with the fetch
-disabled, they come from `~/.claude.json`.
+disabled, they come from `~/.claude.json`. The account chip puts your email on screen;
+`disabled_sections: ["usage_account"]` hides it.
 
 ### Behind CLIProxyAPI
 
