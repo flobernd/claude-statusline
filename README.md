@@ -37,7 +37,8 @@ third.
   name, live activity, context usage, elapsed time, and model
 - Optional usage limits line (off by default): plan type, session and weekly window
   utilization with reset countdowns, the Fable-only weekly window, and the extra-usage
-  spend meter
+  spend meter; behind CLIProxyAPI one row per account that serves the session, each with
+  the model it served last
 - Opt-in update notification (off by default): a chip on the first line when a newer
   release is published, linking to its release notes
 - Single native binary; renders in a few milliseconds. Only the opt-in usage limits line
@@ -94,6 +95,29 @@ data comes from an unofficial claude.ai endpoint, fetched in the background at m
 `~/.claude/claude-statusline-usage.json`. That endpoint may change without notice; when it
 does, the affected chips disappear silently while the payload-backed chips keep working.
 
+### Behind CLIProxyAPI
+
+With `cli_proxy_usage_enabled` set, a session whose `ANTHROPIC_BASE_URL` points at a
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance that runs the
+`cpa-claude-statusline` plugin gets the line from that plugin instead. A detached child polls
+`<base-url>/v0/resource/plugins/cpa-claude-statusline/session?id=<session-id>` every
+`cli_proxy_usage_refresh_seconds` (default 5, the floor) into
+`~/.claude/claude-statusline-sessions/<session-id>.json`, and each render tick reads that file;
+the tick never waits on the network. An answer older than a minute is not shown. Files of
+sessions that ended are removed a day later.
+
+The proxy binds a session to a credential per model, so the main model, the auxiliary calls
+Claude Code makes on a smaller model, and a subagent on another model can each run on an
+account of their own. The plugin publishes every account that served the session, and the line
+renders one row per account, the most recently used on top, capped by
+`cli_proxy_usage_max_accounts` (default 3). Each row shows the account (`usage_account`, the
+email in magenta), its plan, the 5h, 7d, and Fable windows, the spend, and the model it served
+last (`usage_model`), by model id, alias suffix included.
+
+The claude.ai fetch and its cache are not used in that mode, because the local login is not
+the account behind the proxy. Without the plugin the route answers 404 and the line stays
+hidden, as it does for any other custom endpoint.
+
 ## Update notification
 
 An opt-in chip at the end of the first line appears when a GitHub release newer than the
@@ -113,6 +137,9 @@ Optional file `~/.claude/claude-statusline.json`:
 ```json
 {
   "advanced_usage_limits_enabled": false,
+  "cli_proxy_usage_enabled": false,
+  "cli_proxy_usage_max_accounts": 3,
+  "cli_proxy_usage_refresh_seconds": 5,
   "clickable_links": true,
   "disabled_sections": ["cache_age"],
   "subagent_disabled_sections": ["activity"],
@@ -124,7 +151,8 @@ Optional file `~/.claude/claude-statusline.json`:
 `clickable_links` toggles the OSC 8 hyperlinks. `disabled_sections` hides chips by name:
 `context_tokens`, `cache`, `cache_age`, `model`, `effort`, `update`, `cwd`, `branch`,
 `git_files`, `git_stash`, `git_sync`, `git_state`, `git_worktree`, `pr`, `worktree`,
-`usage_plan`, `usage_session`, `usage_week`, `usage_fable`, `usage_spend`.
+`usage_account`, `usage_plan`, `usage_session`, `usage_week`, `usage_fable`, `usage_spend`,
+`usage_model`.
 
 `subagent_disabled_sections` does the same for the subagent rows:
 `name`, `cwd`, `branch`, `activity`, `context_tokens`, `elapsed`, `model`, `effort`.
@@ -200,11 +228,13 @@ meters: the further into a budget, the warmer the number.
 
 | Chip            | Coloring                                                                      |
 | --------------- | ------------------------------------------------------------------------------ |
+| `usage_account` | Magenta; the email of the account behind the line                              |
 | `usage_plan`    | Magenta, matching the model chip above it                                       |
 | `usage_session` | Label `5h:` comment, percentage on the fill scale                               |
 | `usage_week`    | Label `7d:` comment, percentage on the fill scale                               |
 | `usage_fable`   | Label `fable:` comment, percentage on the fill scale                            |
 | `usage_spend`   | Label `spend:` comment; both dollar amounts and the percentage on the fill scale |
+| `usage_model`   | Magenta; the model id                                                          |
 
 Reset countdowns are comment throughout, as is the leading glyph that marks the line.
 
