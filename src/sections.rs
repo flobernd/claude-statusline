@@ -266,11 +266,19 @@ pub fn line2(c: &Ctx) -> Vec<(&'static str, String)> {
 pub fn line3(
     limits: &crate::usage::Limits,
     plan: Option<&str>,
+    account: Option<&str>,
+    model: Option<&str>,
     style: &Style,
     now_epoch_s: i64,
 ) -> Vec<(&'static str, String)> {
     let s = style;
     let mut out: Vec<(&'static str, String)> = Vec::new();
+    if let Some(account) = account.map(str::trim).filter(|a| !a.is_empty()) {
+        // An email can run long; 32 characters keeps a personal address whole and trims a
+        // corporate one before it crowds the windows out.
+        let text: String = account.chars().take(32).collect();
+        out.push(("usage_account", s.paint(&text, MAGENTA)));
+    }
     if let Some(plan) = plan
         && let Some(first) = plan.chars().next()
     {
@@ -291,6 +299,10 @@ pub fn line3(
         && let Some(chip) = spend_chip(s, spend, now_epoch_s)
     {
         out.push(("usage_spend", chip));
+    }
+    if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        // Shown whole: shortening the id would hide the alias suffix that tells a 1M session apart.
+        out.push(("usage_model", s.paint(model, MAGENTA)));
     }
     // The glyph marks the line, not a specific chip, so it rides on
     // whichever chip happens to render first.
@@ -475,11 +487,18 @@ fn sample_limits() -> crate::usage::Limits {
 /// must not advertise a line that is off by default.
 pub fn usage_preview(style: &Style) -> String {
     let sep = style.paint(" \u{2502} ", COMMENT);
-    line3(&sample_limits(), Some("max"), style, USAGE_SAMPLE_NOW_S)
-        .into_iter()
-        .map(|(_, r)| r)
-        .collect::<Vec<_>>()
-        .join(&sep)
+    line3(
+        &sample_limits(),
+        Some("max"),
+        None,
+        None,
+        style,
+        USAGE_SAMPLE_NOW_S,
+    )
+    .into_iter()
+    .map(|(_, r)| r)
+    .collect::<Vec<_>>()
+    .join(&sep)
 }
 
 #[cfg(test)]
@@ -933,7 +952,7 @@ mod tests {
 
     #[test]
     fn full_line3_renders_all_chips_in_order() {
-        let chips = line3(&full_limits(), None, &PLAIN, USAGE_NOW_S);
+        let chips = line3(&full_limits(), None, None, None, &PLAIN, USAGE_NOW_S);
         assert_eq!(
             names(&chips),
             vec!["usage_session", "usage_week", "usage_fable", "usage_spend"]
@@ -953,7 +972,7 @@ mod tests {
             week: Some(window(63.0, None)),
             ..crate::usage::Limits::default()
         };
-        let chips = line3(&limits, None, &PLAIN, USAGE_NOW_S);
+        let chips = line3(&limits, None, None, None, &PLAIN, USAGE_NOW_S);
         assert_eq!(names(&chips), vec!["usage_week"]);
         assert_eq!(chips[0].1, "\u{2301} 7d:63%");
     }
@@ -964,7 +983,7 @@ mod tests {
             session: Some(window(42.0, None)),
             ..crate::usage::Limits::default()
         };
-        let chips = line3(&limits, Some("max"), &PLAIN, USAGE_NOW_S);
+        let chips = line3(&limits, Some("max"), None, None, &PLAIN, USAGE_NOW_S);
         assert_eq!(names(&chips), vec!["usage_plan", "usage_session"]);
         assert_eq!(chips[0].1, "\u{2301} Max");
         assert_eq!(chips[1].1, "5h:42%");
@@ -973,7 +992,14 @@ mod tests {
             colors: true,
             links: false,
         };
-        let chips = line3(&limits, Some("enterprise"), &colored, USAGE_NOW_S);
+        let chips = line3(
+            &limits,
+            Some("enterprise"),
+            None,
+            None,
+            &colored,
+            USAGE_NOW_S,
+        );
         assert!(
             chips[0]
                 .1
@@ -983,7 +1009,17 @@ mod tests {
 
     #[test]
     fn empty_limits_render_nothing() {
-        assert!(line3(&crate::usage::Limits::default(), None, &PLAIN, USAGE_NOW_S).is_empty());
+        assert!(
+            line3(
+                &crate::usage::Limits::default(),
+                None,
+                None,
+                None,
+                &PLAIN,
+                USAGE_NOW_S
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -994,7 +1030,7 @@ mod tests {
             fable: Some(window(81.0, None)),
             ..crate::usage::Limits::default()
         };
-        let chips = line3(&limits, None, &PLAIN, USAGE_NOW_S);
+        let chips = line3(&limits, None, None, None, &PLAIN, USAGE_NOW_S);
         assert_eq!(text_of(&chips, "usage_session"), "\u{2301} 5h:42%");
         assert_eq!(text_of(&chips, "usage_week"), "7d:63%");
         assert_eq!(text_of(&chips, "usage_fable"), "fable:81%");
@@ -1011,7 +1047,7 @@ mod tests {
             }),
             ..crate::usage::Limits::default()
         };
-        let chips = line3(&limits, None, &PLAIN, USAGE_NOW_S);
+        let chips = line3(&limits, None, None, None, &PLAIN, USAGE_NOW_S);
         assert_eq!(chips[0].1, "\u{2301} spend:37%");
     }
 
@@ -1026,7 +1062,7 @@ mod tests {
             }),
             ..crate::usage::Limits::default()
         };
-        assert!(line3(&limits, None, &PLAIN, USAGE_NOW_S).is_empty());
+        assert!(line3(&limits, None, None, None, &PLAIN, USAGE_NOW_S).is_empty());
     }
 
     #[test]
@@ -1040,7 +1076,7 @@ mod tests {
             week: Some(window(90.0, None)),
             ..crate::usage::Limits::default()
         };
-        let chips = line3(&limits, None, &colored, USAGE_NOW_S);
+        let chips = line3(&limits, None, None, None, &colored, USAGE_NOW_S);
         assert_eq!(
             text_of(&chips, "usage_session"),
             "\x1b[38;2;86;95;137m\u{2301} \x1b[0m\
@@ -1060,7 +1096,7 @@ mod tests {
             session: Some(window(42.0, Some(USAGE_NOW_S + 7_800))),
             ..crate::usage::Limits::default()
         };
-        let chips = line3(&limits, None, &colored, USAGE_NOW_S);
+        let chips = line3(&limits, None, None, None, &colored, USAGE_NOW_S);
         assert!(text_of(&chips, "usage_session").ends_with("\x1b[38;2;86;95;137m (2h10m)\x1b[0m"));
     }
 
@@ -1079,7 +1115,7 @@ mod tests {
             }),
             ..crate::usage::Limits::default()
         };
-        let chips = line3(&limits, None, &colored, USAGE_NOW_S);
+        let chips = line3(&limits, None, None, None, &colored, USAGE_NOW_S);
         let text = text_of(&chips, "usage_spend");
         assert!(text.contains("\x1b[38;2;247;118;142m$1002\x1b[0m"));
         assert!(text.contains("\x1b[38;2;247;118;142m$1000\x1b[0m"));
@@ -1092,5 +1128,91 @@ mod tests {
         assert!(text.starts_with("\u{2301} Max \u{2502} 5h:42%"));
         assert!(text.contains(" \u{2502} "));
         assert!(text.contains("spend:$1002/$1000 (100%)"));
+    }
+
+    #[test]
+    fn account_chip_renders_first_and_carries_the_glyph() {
+        let limits = crate::usage::Limits {
+            session: Some(window(42.0, None)),
+            ..crate::usage::Limits::default()
+        };
+        let chips = line3(
+            &limits,
+            Some("max"),
+            Some("biz@example.com"),
+            None,
+            &PLAIN,
+            USAGE_NOW_S,
+        );
+        assert_eq!(
+            names(&chips),
+            vec!["usage_account", "usage_plan", "usage_session"]
+        );
+        assert_eq!(chips[0].1, "\u{2301} biz@example.com");
+        assert_eq!(chips[1].1, "Max");
+    }
+
+    #[test]
+    fn account_chip_is_truncated_and_a_blank_one_is_skipped() {
+        let limits = crate::usage::Limits {
+            session: Some(window(1.0, None)),
+            ..crate::usage::Limits::default()
+        };
+        let long = "abcdefghijklmnopqrstuvwxyz0123456789@example.com";
+        let chips = line3(&limits, None, Some(long), None, &PLAIN, USAGE_NOW_S);
+        assert_eq!(chips[0].1, format!("\u{2301} {}", &long[..32]));
+        let chips = line3(&limits, None, Some("  "), None, &PLAIN, USAGE_NOW_S);
+        assert_eq!(names(&chips), vec!["usage_session"]);
+    }
+
+    #[test]
+    fn model_chip_shows_the_text_verbatim_after_the_spend() {
+        let chips = line3(
+            &full_limits(),
+            Some("Max 5x"),
+            Some("git@example.com"),
+            Some("claude-fable-5-1[1m]"),
+            &PLAIN,
+            USAGE_NOW_S,
+        );
+        assert_eq!(
+            names(&chips),
+            vec![
+                "usage_account",
+                "usage_plan",
+                "usage_session",
+                "usage_week",
+                "usage_fable",
+                "usage_spend",
+                "usage_model"
+            ]
+        );
+        assert_eq!(text_of(&chips, "usage_model"), "claude-fable-5-1[1m]");
+        let named = line3(
+            &full_limits(),
+            None,
+            None,
+            Some("Claude Fable 5.1 (1M)"),
+            &PLAIN,
+            USAGE_NOW_S,
+        );
+        assert_eq!(text_of(&named, "usage_model"), "Claude Fable 5.1 (1M)");
+        let codex = line3(
+            &full_limits(),
+            None,
+            None,
+            Some("gpt-5.4-codex"),
+            &PLAIN,
+            USAGE_NOW_S,
+        );
+        assert_eq!(text_of(&codex, "usage_model"), "gpt-5.4-codex");
+    }
+
+    #[test]
+    fn model_chip_is_absent_without_a_model_or_with_a_blank_one() {
+        let none = line3(&full_limits(), None, None, None, &PLAIN, USAGE_NOW_S);
+        assert!(!names(&none).contains(&"usage_model"));
+        let blank = line3(&full_limits(), None, None, Some("  "), &PLAIN, USAGE_NOW_S);
+        assert!(!names(&blank).contains(&"usage_model"));
     }
 }

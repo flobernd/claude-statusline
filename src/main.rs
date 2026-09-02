@@ -258,7 +258,7 @@ fn render(raw: &str) -> Option<String> {
                 .as_deref()
                 .and_then(|t| t.strip_prefix("claude_"));
             compose(
-                sections::line3(&limits, plan, &style, now_epoch_s),
+                sections::line3(&limits, plan, None, None, &style, now_epoch_s),
                 LINE3_DROP,
             )
         } else {
