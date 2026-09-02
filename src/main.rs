@@ -418,6 +418,7 @@ mod tests {
         let account = schema::AccountInfo {
             organization_type: Some("claude_max".to_string()),
             account_uuid: None,
+            email: None,
         };
         let official = usage::EndpointEnv::default();
         assert!(!usage_line_enabled(
@@ -447,10 +448,12 @@ mod tests {
         let native = schema::AccountInfo {
             organization_type: Some("claude_enterprise".to_string()),
             account_uuid: None,
+            email: None,
         };
         let external = schema::AccountInfo {
             organization_type: Some("external".to_string()),
             account_uuid: None,
+            email: None,
         };
         let unknown = schema::AccountInfo::default();
         let official = usage::EndpointEnv::default();
@@ -484,6 +487,7 @@ mod tests {
         let native = schema::AccountInfo {
             organization_type: Some("claude_max".to_string()),
             account_uuid: None,
+            email: None,
         };
         let custom = usage::EndpointEnv {
             base_url: Some("https://gateway.example.com".to_string()),
