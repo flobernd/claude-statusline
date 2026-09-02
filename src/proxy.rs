@@ -1,15 +1,22 @@
 //! The session route of the cpa-claude-statusline CLIProxyAPI plugin: the one source that names
-//! the account serving a proxied session. Pure apart from `fetch_status`.
+//! the account serving a proxied session. Pure apart from `fetch_status` and the session
+//! cache files the child writes.
 
-// A later task wires this module into rendering; until then nothing outside its own tests
-// calls in, so the whole surface reads as dead code to a build that excludes cfg(test).
-#![allow(dead_code)]
-
-use crate::schema::{lenient, lenient_vec};
+use crate::schema::{self, lenient, lenient_vec};
 use crate::usage::{Limits, Window};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 pub const ROUTE_PATH: &str = "/v0/resource/plugins/cpa-claude-statusline/session";
+
+/// Milliseconds since the epoch. A clock set before it reads as 0, which makes every stamp
+/// look due rather than parking the poll.
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
 
 /// The route body. Every field below `schema` parses leniently: a wrong-typed field costs
 /// that field, never the line, and unknown keys are ignored so the plugin can grow the schema.
@@ -25,6 +32,8 @@ pub struct ProxyStatus {
 /// the models within an account newest first, so the first model is the one served last.
 #[derive(Debug, Default, Deserialize)]
 pub struct ProxyAccount {
+    /// Parsed for the route's shape; a row names its account by email.
+    #[allow(dead_code)]
     #[serde(default, deserialize_with = "lenient")]
     pub provider: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
@@ -37,6 +46,9 @@ pub struct ProxyAccount {
     pub spend: Option<ProxySpend>,
     #[serde(default, deserialize_with = "lenient_vec")]
     pub models: Vec<ProxyModel>,
+    /// The plugin already orders the accounts, so the stamp is parsed for the shape rather
+    /// than sorted on.
+    #[allow(dead_code)]
     #[serde(default, deserialize_with = "lenient")]
     pub last_served_at: Option<i64>,
 }
@@ -45,6 +57,9 @@ pub struct ProxyAccount {
 pub struct ProxyModel {
     #[serde(default, deserialize_with = "lenient")]
     pub id: Option<String>,
+    /// Models arrive newest first, so `last_model` takes the first usable id instead of
+    /// comparing stamps.
+    #[allow(dead_code)]
     #[serde(default, deserialize_with = "lenient")]
     pub last_served_at: Option<i64>,
 }
@@ -157,16 +172,263 @@ pub fn limits(account: &ProxyAccount, now_epoch_s: i64) -> Limits {
     }
 }
 
-/// The only network touchpoint, kept separate so no test can reach it. The budget follows the
-/// 500 ms the git calls get in the same render tick: a loopback or LAN proxy answers in about
-/// a millisecond, and a proxy that is down means Claude Code cannot work either.
-pub fn fetch_status(url: &str) -> Option<ProxyStatus> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_millis(100))
-        .timeout(std::time::Duration::from_millis(250))
-        .build();
-    let body = agent.get(url).call().ok()?.into_string().ok()?;
-    parse_status(&body)
+/// A stored route answer older than this is not shown: the plugin refreshes on every poll, so
+/// a minute of silence means the child stopped landing and the line must not paint numbers that
+/// no longer describe the session.
+pub const STATUS_MAX_AGE_S: u64 = 60;
+
+/// Session files last written more than this long ago are the leftovers of ended sessions.
+const SESSION_FILE_MAX_AGE_S: u64 = 24 * 3600;
+/// The sweep is bounded so a directory full of leftovers cannot hold up a fetch.
+const SESSION_SWEEP_LIMIT: usize = 64;
+
+/// The route's last answer for one session, written by the fetch child and read by every
+/// render tick. `status` is the answer as parsed JSON; it is re-checked on read so a file
+/// written by an older build never paints a shape this build does not know.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct SessionCache {
+    #[serde(default, deserialize_with = "lenient")]
+    pub base_url: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub attempted_at_ms: Option<u64>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub fetched_at_ms: Option<u64>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub status: Option<serde_json::Value>,
+}
+
+pub fn sessions_dir() -> Option<PathBuf> {
+    schema::home_dir().map(|h| h.join(".claude").join("claude-statusline-sessions"))
+}
+
+/// The session id becomes a file name, so only a conservative character set is allowed and a
+/// leading dot is refused: the id is external input from the payload.
+pub fn valid_cache_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.starts_with('.')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+}
+
+pub fn session_cache_path(session_id: &str) -> Option<PathBuf> {
+    if !valid_cache_id(session_id) {
+        return None;
+    }
+    sessions_dir().map(|d| d.join(format!("{session_id}.json")))
+}
+
+pub fn load_session_cache(path: &Path) -> Option<SessionCache> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn same_base(cache: &SessionCache, base_url: &str) -> bool {
+    cache.base_url.as_deref() == Some(base_url)
+}
+
+/// The stored answer, when it is this base URL's, fresh, and still the plugin's shape. A stamp
+/// further ahead than the ceiling reads as expired, the rule `fetch_due` applies to its own
+/// stamp, so a clock that jumped forward and back cannot freeze numbers on the line.
+pub fn cached_status(cache: &SessionCache, base_url: &str, now_ms: u64) -> Option<ProxyStatus> {
+    if !same_base(cache, base_url) {
+        return None;
+    }
+    let fetched = cache.fetched_at_ms?;
+    if fetched.abs_diff(now_ms) > STATUS_MAX_AGE_S.saturating_mul(1_000) {
+        return None;
+    }
+    parse_status(&cache.status.as_ref()?.to_string())
+}
+
+/// Due without a file, for another base URL, or once the attempt stamp is an interval old. A
+/// stamp further ahead than the interval reads as expired, so a clock that jumped forward and
+/// back cannot park the poll.
+pub fn fetch_due(
+    cache: Option<&SessionCache>,
+    base_url: &str,
+    interval_s: u64,
+    now_ms: u64,
+) -> bool {
+    let Some(cache) = cache else {
+        return true;
+    };
+    if !same_base(cache, base_url) {
+        return true;
+    }
+    let Some(attempted) = cache.attempted_at_ms else {
+        return true;
+    };
+    let interval_ms = interval_s.saturating_mul(1_000);
+    if attempted > now_ms {
+        return attempted - now_ms > interval_ms;
+    }
+    now_ms - attempted >= interval_ms
+}
+
+/// The stamped attempt the child records before it asks. The base URL rides along so the next
+/// tick can tell an answer for this proxy from one left by another.
+fn new_attempt(base_url: &str, now_ms: u64) -> SessionCache {
+    SessionCache {
+        base_url: Some(base_url.to_string()),
+        attempted_at_ms: Some(now_ms),
+        ..Default::default()
+    }
+}
+
+/// The same stamped attempt with the previous answer riding along, so one failed poll shows the
+/// last numbers until `cached_status`'s freshness window runs out instead of blanking the line
+/// at once. An answer stored for another base URL is dropped: it belongs to another proxy.
+fn carried_attempt(previous: Option<&SessionCache>, base_url: &str, now_ms: u64) -> SessionCache {
+    let kept = previous.filter(|c| same_base(c, base_url));
+    SessionCache {
+        base_url: Some(base_url.to_string()),
+        attempted_at_ms: Some(now_ms),
+        fetched_at_ms: kept.and_then(|c| c.fetched_at_ms),
+        status: kept.and_then(|c| c.status.clone()),
+    }
+}
+
+pub fn spawn_fetch_child(session_id: &str) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut cmd = Command::new(exe);
+    cmd.arg("--fetch-proxy")
+        .arg(session_id)
+        // The clock override serves reproducible preview captures; a live poll has to stamp
+        // the real clock or its file reads as ancient or from the future on the next tick.
+        .env_remove("CLAUDE_STATUSLINE_NOW_MS")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: no console handle
+        // and no Ctrl+C propagation, so the child outlives the render tick.
+        cmd.creation_flags(0x0000_0008 | 0x0000_0200);
+    }
+    // Never waited on: the render path must not block on the network. The
+    // parent exits within the tick, so the OS reaps the orphaned child.
+    let _ = cmd.spawn();
+}
+
+/// Entry point of the detached fetch child. Silent on every failure by design: a broken fetch
+/// must never splat into the Claude Code footer, and the next tick simply finds no fresh answer.
+pub fn run_fetch(session_id: &str) -> i32 {
+    let _ = try_fetch(session_id);
+    0
+}
+
+fn try_fetch(session_id: &str) -> Option<()> {
+    let home = schema::home_dir()?;
+    let config = schema::load_config(&home.join(".claude").join("claude-statusline.json"));
+    if !config.cli_proxy_usage_enabled {
+        return None;
+    }
+    let endpoint = crate::usage::EndpointEnv::from_env();
+    let base = endpoint.custom_base_url()?;
+    let path = session_cache_path(session_id)?;
+    let now = now_ms();
+    let previous = load_session_cache(&path);
+    // Re-checking the gate doubles as stampede protection when several render ticks spawn
+    // children before the first answer lands.
+    if !fetch_due(
+        previous.as_ref(),
+        &base,
+        config.proxy_refresh_seconds(),
+        now,
+    ) {
+        return None;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+        sweep_sessions(dir);
+    }
+    let url = status_url(&base, session_id)?;
+    match fetch_status(&url) {
+        Some(body) => {
+            let mut next = new_attempt(&base, now);
+            next.fetched_at_ms = Some(now_ms());
+            next.status = serde_json::from_str(&body).ok();
+            crate::usage::write_json_atomic(&path, &next)?;
+            Some(())
+        }
+        // No usable answer, whether the gateway rejected the request or never answered: the
+        // attempt is stamped anyway so the next tick waits out the interval instead of asking
+        // again at once.
+        None => {
+            let failed = carried_attempt(previous.as_ref(), &base, now);
+            crate::usage::write_json_atomic(&path, &failed)
+        }
+    }
+}
+
+/// Removes session files that no tick has written for a day; errors are ignored, the sweep
+/// only tidies.
+pub(crate) fn sweep_sessions(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(SESSION_FILE_MAX_AGE_S));
+    let Some(cutoff) = cutoff else {
+        return;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        if removed >= SESSION_SWEEP_LIMIT {
+            return;
+        }
+        let path = entry.path();
+        // `write_json_atomic` writes `<id>.<pid>.tmp` before it renames, so a child killed in
+        // between leaves one behind that no rename will ever claim.
+        if path.extension().is_none_or(|e| e != "json" && e != "tmp") {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|m| m < cutoff);
+        if old && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+}
+
+/// The session files belong to the proxy path; with the line or the flag off they would only
+/// go stale on disk.
+pub fn remove_session_caches() {
+    if let Some(dir) = sessions_dir() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// The only network touchpoint, kept separate so no test can reach it. It runs in the detached
+/// child on the usage fetch's budget; nothing renders on it. ureq's timeouts do not cover DNS
+/// resolution, so the request runs on its own thread and the total budget is enforced by
+/// `recv_timeout`, which bounds a stuck resolver too. The answer is returned as the response
+/// body, which the child stores as parsed JSON for the render tick to re-check on read.
+pub fn fetch_status(url: &str) -> Option<String> {
+    let total = crate::usage::fetch_timeout();
+    let url = url.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(total)
+            .timeout(total)
+            .build();
+        let body = agent
+            .get(&url)
+            .call()
+            .ok()
+            .and_then(|resp| resp.into_string().ok())
+            .filter(|body| parse_status(body).is_some());
+        let _ = tx.send(body);
+    });
+    rx.recv_timeout(total).ok().flatten()
 }
 
 #[cfg(test)]
@@ -174,6 +436,192 @@ mod tests {
     use super::*;
 
     const NOW: i64 = 1_756_820_000;
+
+    #[test]
+    fn cache_ids_are_file_name_safe() {
+        for ok in ["11111111-2222-4333-8444-555555555555", "a", "A_b.c-9"] {
+            assert!(valid_cache_id(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            ".hidden",
+            "../x",
+            "a/b",
+            "a b",
+            "x\u{0}y",
+            &"a".repeat(129),
+        ] {
+            assert!(!valid_cache_id(bad), "{bad:?}");
+        }
+        assert!(valid_cache_id(&"a".repeat(128)));
+    }
+
+    fn cache(
+        base: &str,
+        attempted: Option<u64>,
+        fetched: Option<u64>,
+        body: Option<&str>,
+    ) -> SessionCache {
+        SessionCache {
+            base_url: Some(base.to_string()),
+            attempted_at_ms: attempted,
+            fetched_at_ms: fetched,
+            status: body.map(|b| serde_json::from_str(b).unwrap()),
+        }
+    }
+
+    const BASE: &str = "http://127.0.0.1:8317";
+    const NOW_MS: u64 = 1_756_820_000_000;
+
+    #[test]
+    fn cached_status_needs_the_base_url_a_fresh_stamp_and_a_valid_body() {
+        let good = cache(
+            BASE,
+            Some(NOW_MS),
+            Some(NOW_MS - 59_000),
+            Some(TWO_ACCOUNTS),
+        );
+        assert_eq!(
+            cached_status(&good, BASE, NOW_MS).map(|s| s.accounts.len()),
+            Some(2)
+        );
+        let stale = cache(
+            BASE,
+            Some(NOW_MS),
+            Some(NOW_MS - 61_000),
+            Some(TWO_ACCOUNTS),
+        );
+        assert!(cached_status(&stale, BASE, NOW_MS).is_none());
+        let ahead = cache(
+            BASE,
+            Some(NOW_MS),
+            Some(NOW_MS + 61_000),
+            Some(TWO_ACCOUNTS),
+        );
+        assert!(
+            cached_status(&ahead, BASE, NOW_MS).is_none(),
+            "a stamp beyond the ceiling reads as expired, as it does for the poll"
+        );
+        let other = cache(
+            "http://other:1",
+            Some(NOW_MS),
+            Some(NOW_MS),
+            Some(TWO_ACCOUNTS),
+        );
+        assert!(cached_status(&other, BASE, NOW_MS).is_none());
+        let empty = cache(
+            BASE,
+            Some(NOW_MS),
+            Some(NOW_MS),
+            Some(r#"{"schema":1,"accounts":[]}"#),
+        );
+        assert!(cached_status(&empty, BASE, NOW_MS).is_none());
+        let none = cache(BASE, Some(NOW_MS), None, None);
+        assert!(cached_status(&none, BASE, NOW_MS).is_none());
+    }
+
+    #[test]
+    fn a_new_attempt_stamps_the_base_url_and_carries_no_answer() {
+        let attempt = new_attempt(BASE, NOW_MS);
+        assert_eq!(attempt.base_url.as_deref(), Some(BASE));
+        assert_eq!(attempt.attempted_at_ms, Some(NOW_MS));
+        assert!(attempt.fetched_at_ms.is_none() && attempt.status.is_none());
+        // The stamped base URL is the one the poll gate compares against.
+        assert!(!fetch_due(Some(&attempt), BASE, 5, NOW_MS));
+    }
+
+    #[test]
+    fn a_carried_attempt_keeps_this_base_urls_answer_only() {
+        let previous = cache(BASE, Some(1), Some(2), Some(TWO_ACCOUNTS));
+        let carried = carried_attempt(Some(&previous), BASE, NOW_MS);
+        assert_eq!(
+            (carried.attempted_at_ms, carried.fetched_at_ms),
+            (Some(NOW_MS), Some(2))
+        );
+        assert_eq!(
+            cached_status(&carried, BASE, 2).map(|s| s.accounts.len()),
+            Some(2),
+            "the last answer still paints until it ages out"
+        );
+        let other = cache("http://other:1", Some(1), Some(2), Some(TWO_ACCOUNTS));
+        let switched = carried_attempt(Some(&other), BASE, NOW_MS);
+        assert!(
+            switched.status.is_none() && switched.fetched_at_ms.is_none(),
+            "another proxy's answer is dropped on a switch: {switched:?}"
+        );
+        let first = carried_attempt(None, BASE, NOW_MS);
+        assert_eq!(first.base_url.as_deref(), Some(BASE));
+        assert!(first.status.is_none() && first.fetched_at_ms.is_none());
+    }
+
+    #[test]
+    fn fetch_is_due_without_a_cache_for_another_base_or_after_the_interval() {
+        assert!(fetch_due(None, BASE, 5, NOW_MS));
+        let other = cache("http://other:1", Some(NOW_MS), None, None);
+        assert!(fetch_due(Some(&other), BASE, 5, NOW_MS));
+        let fresh = cache(BASE, Some(NOW_MS - 4_000), None, None);
+        assert!(!fetch_due(Some(&fresh), BASE, 5, NOW_MS));
+        let old = cache(BASE, Some(NOW_MS - 5_000), None, None);
+        assert!(fetch_due(Some(&old), BASE, 5, NOW_MS));
+        let ahead = cache(BASE, Some(NOW_MS + 6_000), None, None);
+        assert!(
+            fetch_due(Some(&ahead), BASE, 5, NOW_MS),
+            "a stamp beyond the interval reads as expired"
+        );
+        let slightly_ahead = cache(BASE, Some(NOW_MS + 4_000), None, None);
+        assert!(!fetch_due(Some(&slightly_ahead), BASE, 5, NOW_MS));
+        let unstamped = cache(BASE, None, None, None);
+        assert!(fetch_due(Some(&unstamped), BASE, 5, NOW_MS));
+    }
+
+    #[test]
+    fn session_cache_round_trips_and_tolerates_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let written = cache(BASE, Some(1), Some(2), Some(TWO_ACCOUNTS));
+        crate::usage::write_json_atomic(&path, &written).unwrap();
+        let loaded = load_session_cache(&path).unwrap();
+        assert_eq!(loaded.base_url.as_deref(), Some(BASE));
+        assert_eq!(
+            (loaded.attempted_at_ms, loaded.fetched_at_ms),
+            (Some(1), Some(2))
+        );
+        assert!(loaded.status.is_some());
+        std::fs::write(&path, "nope").unwrap();
+        assert!(load_session_cache(&path).is_none());
+        assert!(load_session_cache(&dir.path().join("missing.json")).is_none());
+    }
+
+    #[test]
+    fn sweep_removes_only_old_session_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.json");
+        let young = dir.path().join("young.json");
+        let old_tmp = dir.path().join("old.4242.tmp");
+        let young_tmp = dir.path().join("young.4242.tmp");
+        for path in [&old, &young, &old_tmp, &young_tmp] {
+            std::fs::write(path, "{}").unwrap();
+        }
+        let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 3600);
+        filetime_set(&old, day_ago);
+        filetime_set(&old_tmp, day_ago);
+        sweep_sessions(dir.path());
+        assert!(!old.exists() && young.exists());
+        assert!(
+            !old_tmp.exists() && young_tmp.exists(),
+            "a temporary a killed child left behind ages out with the session files"
+        );
+    }
+
+    /// `File::set_modified` is the only mtime write the standard library offers.
+    fn filetime_set(path: &Path, to: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(to)
+            .unwrap();
+    }
 
     #[test]
     fn status_url_strips_slashes_and_encodes_the_id() {

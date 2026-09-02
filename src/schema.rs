@@ -37,8 +37,6 @@ pub struct Payload {
     pub cwd: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     pub transcript_path: Option<String>,
-    // Unread until a later task wires the CLIProxyAPI session lookup into rendering.
-    #[allow(dead_code)]
     #[serde(default, deserialize_with = "lenient")]
     pub session_id: Option<String>,
     #[serde(default, deserialize_with = "lenient")]

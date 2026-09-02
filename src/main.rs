@@ -40,6 +40,9 @@ struct Cli {
     /// Refresh the update check cache and exit (spawned by render ticks)
     #[arg(long = "fetch-update")]
     fetch_update: bool,
+    /// Poll the CLIProxyAPI plugin route for one session and exit (spawned by render ticks)
+    #[arg(long = "fetch-proxy", value_name = "SESSION_ID")]
+    fetch_proxy: Option<String>,
     /// Render per-task rows for Claude Code's subagentStatusLine hook
     #[arg(long = "subagent-statusline")]
     subagent_statusline: bool,
@@ -64,9 +67,18 @@ const LINE2_DROP: &[&str] = &[
     "git_files",
     "pr",
 ];
-// usage_session is intentionally absent so it never drops: the five-hour
-// window is the limit users hit first.
-const LINE3_DROP: &[&str] = &["usage_plan", "usage_spend", "usage_fable", "usage_week"];
+// usage_session is intentionally last so the five-hour window, the limit users hit first, is
+// the last chip standing. The plan and the account go before the model: behind a proxy the
+// model names why a second row exists, and the windows outrank all three.
+const LINE3_DROP: &[&str] = &[
+    "usage_plan",
+    "usage_account",
+    "usage_model",
+    "usage_spend",
+    "usage_fable",
+    "usage_week",
+    "usage_session",
+];
 const SEP: &str = " \u{2502} ";
 
 fn main() {
@@ -79,6 +91,9 @@ fn main() {
     }
     if cli.fetch_update {
         std::process::exit(update::run_fetch());
+    }
+    if let Some(session_id) = cli.fetch_proxy.as_deref() {
+        std::process::exit(proxy::run_fetch(session_id));
     }
     if cli.install {
         if let Err(e) = commands::install::install(cli.with_subagent_statusline) {
@@ -236,36 +251,71 @@ fn render(raw: &str) -> Option<String> {
 
     // The flag check comes first so the default path never pays the extra
     // ~/.claude.json read on a render tick.
-    let line3 = if config.advanced_usage_limits_enabled {
+    let usage_rows: Vec<String> = if config.advanced_usage_limits_enabled {
         let account = schema::home_dir()
             .map(|h| schema::load_account_info(&h.join(".claude.json")))
             .unwrap_or_default();
-        if usage_line_enabled(&config, &payload, &account, &usage::EndpointEnv::from_env()) {
-            usage::spawn_fetch_if_stale(&config);
-            let snapshot = usage::cache_path()
-                .and_then(|p| usage::load_snapshot(&p, account.account_uuid.as_deref()));
+        let endpoint = usage::EndpointEnv::from_env();
+        let proxy = proxy_status(&config, &payload, &endpoint);
+        if !config.cli_proxy_usage_enabled {
+            proxy::remove_session_caches();
+        }
+        if usage_line_enabled(&config, &payload, &account, &endpoint, proxy.is_some()) {
             let now_epoch_s = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            let limits = usage::merge(
-                payload.rate_limits.as_ref(),
-                snapshot.as_ref().map(|s| &s.utilization),
-                now_epoch_s,
-            );
-            let plan = account
-                .organization_type
-                .as_deref()
-                .and_then(|t| t.strip_prefix("claude_"));
-            compose(
-                sections::line3(&limits, plan, None, None, &style, now_epoch_s),
-                LINE3_DROP,
-            )
+            match &proxy {
+                // The local token belongs to whichever account is logged in
+                // locally, not to the credential the proxy picked, so neither
+                // the claude.ai fetch nor its cache may backfill anything here.
+                Some(status) => status
+                    .accounts
+                    .iter()
+                    .take(config.proxy_max_accounts())
+                    .filter_map(|account| {
+                        let limits = proxy::limits(account, now_epoch_s);
+                        compose(
+                            sections::line3(
+                                &limits,
+                                account.plan.as_deref(),
+                                account.email.as_deref(),
+                                account.last_model(),
+                                &style,
+                                now_epoch_s,
+                            ),
+                            LINE3_DROP,
+                        )
+                    })
+                    .collect(),
+                None => {
+                    usage::spawn_fetch_if_stale(&config);
+                    let snapshot = usage::cache_path()
+                        .and_then(|p| usage::load_snapshot(&p, account.account_uuid.as_deref()));
+                    let limits = usage::merge(
+                        payload.rate_limits.as_ref(),
+                        snapshot.as_ref().map(|s| &s.utilization),
+                        now_epoch_s,
+                    );
+                    let plan = account
+                        .organization_type
+                        .as_deref()
+                        .and_then(|t| t.strip_prefix("claude_"))
+                        .map(str::to_string);
+                    compose(
+                        sections::line3(&limits, plan.as_deref(), None, None, &style, now_epoch_s),
+                        LINE3_DROP,
+                    )
+                    .into_iter()
+                    .collect()
+                }
+            }
         } else {
-            None
+            Vec::new()
         }
     } else {
-        None
+        proxy::remove_session_caches();
+        Vec::new()
     };
 
     let mut line1_chips = sections::line1(&ctx);
@@ -286,10 +336,10 @@ fn render(raw: &str) -> Option<String> {
     let lines: Vec<String> = [
         compose(line1_chips, LINE1_DROP),
         compose(sections::line2(&ctx), LINE2_DROP),
-        line3,
     ]
     .into_iter()
     .flatten()
+    .chain(usage_rows)
     .collect();
     Some(lines.join("\n"))
 }
@@ -300,20 +350,47 @@ fn render(raw: &str) -> Option<String> {
 /// for them. That fallback is a login artifact though: it stays true when
 /// the session talks to a gateway, Bedrock, or Vertex, so a custom
 /// endpoint disables it. Payload rate_limits win unconditionally because
-/// they only appear when Anthropic subscription headers actually flow.
+/// they only appear when Anthropic subscription headers actually flow, and
+/// a status from the CLIProxyAPI plugin route is the same proof for a
+/// proxied session: the proxy only answers for a subscription it serves.
 fn usage_line_enabled(
     config: &schema::Config,
     payload: &schema::Payload,
     account: &schema::AccountInfo,
     endpoint: &usage::EndpointEnv,
+    proxy_status: bool,
 ) -> bool {
     config.advanced_usage_limits_enabled
         && (payload.rate_limits.is_some()
+            || proxy_status
             || (!endpoint.is_custom()
                 && account
                     .organization_type
                     .as_deref()
                     .is_some_and(|t| t.starts_with("claude_"))))
+}
+
+/// Behind CLIProxyAPI the plugin route is the only source that names the serving accounts. The
+/// render tick reads the child's last answer and spawns the child when the poll is due; it
+/// never waits on the network itself. Every precondition errs toward None, which leaves the
+/// official path untouched.
+fn proxy_status(
+    config: &schema::Config,
+    payload: &schema::Payload,
+    endpoint: &usage::EndpointEnv,
+) -> Option<proxy::ProxyStatus> {
+    if !config.cli_proxy_usage_enabled {
+        return None;
+    }
+    let base = endpoint.custom_base_url()?;
+    let session_id = payload.session_id.as_deref()?;
+    let path = proxy::session_cache_path(session_id)?;
+    let now = proxy::now_ms();
+    let cache = proxy::load_session_cache(&path);
+    if proxy::fetch_due(cache.as_ref(), &base, config.proxy_refresh_seconds(), now) {
+        proxy::spawn_fetch_child(session_id);
+    }
+    proxy::cached_status(cache.as_ref()?, &base, now)
 }
 
 #[cfg(test)]
@@ -332,13 +409,16 @@ mod tests {
             &schema::Config::default(),
             &payload,
             &account,
-            &official
+            &official,
+            false
         ));
         let enabled = schema::Config {
             advanced_usage_limits_enabled: true,
             ..schema::Config::default()
         };
-        assert!(usage_line_enabled(&enabled, &payload, &account, &official));
+        assert!(usage_line_enabled(
+            &enabled, &payload, &account, &official, false
+        ));
     }
 
     #[test]
@@ -364,13 +444,18 @@ mod tests {
             &enabled,
             &with_limits,
             &unknown,
-            &official
+            &official,
+            false
         ));
-        assert!(usage_line_enabled(&enabled, &without, &native, &official));
+        assert!(usage_line_enabled(
+            &enabled, &without, &native, &official, false
+        ));
         assert!(!usage_line_enabled(
-            &enabled, &without, &external, &official
+            &enabled, &without, &external, &official, false
         ));
-        assert!(!usage_line_enabled(&enabled, &without, &unknown, &official));
+        assert!(!usage_line_enabled(
+            &enabled, &without, &unknown, &official, false
+        ));
     }
 
     #[test]
@@ -391,8 +476,36 @@ mod tests {
         };
 
         // The login artifact alone no longer keeps the line alive.
-        assert!(!usage_line_enabled(&enabled, &without, &native, &custom));
+        assert!(!usage_line_enabled(
+            &enabled, &without, &native, &custom, false
+        ));
         // Payload rate limits stay ground truth even behind a gateway.
-        assert!(usage_line_enabled(&enabled, &with_limits, &native, &custom));
+        assert!(usage_line_enabled(
+            &enabled,
+            &with_limits,
+            &native,
+            &custom,
+            false
+        ));
+    }
+
+    #[test]
+    fn usage_line_accepts_a_proxy_status_behind_a_custom_endpoint() {
+        let enabled = schema::Config {
+            advanced_usage_limits_enabled: true,
+            ..schema::Config::default()
+        };
+        let without = schema::parse_payload("{}").unwrap();
+        let unknown = schema::AccountInfo::default();
+        let custom = usage::EndpointEnv {
+            base_url: Some("http://127.0.0.1:8317".to_string()),
+            ..usage::EndpointEnv::default()
+        };
+        assert!(usage_line_enabled(
+            &enabled, &without, &unknown, &custom, true
+        ));
+        assert!(!usage_line_enabled(
+            &enabled, &without, &unknown, &custom, false
+        ));
     }
 }

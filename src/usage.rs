@@ -127,8 +127,6 @@ impl EndpointEnv {
     /// The base URL of a custom HTTP endpoint, with trailing slashes removed. None for the
     /// official API and for Bedrock or Vertex sessions, where no HTTP base URL applies and a
     /// proxy route cannot exist. A bearer token alone does not name a host, so it plays no part.
-    // Unread until a later task wires the CLIProxyAPI status lookup into rendering.
-    #[allow(dead_code)]
     pub fn custom_base_url(&self) -> Option<String> {
         if flag_enabled(&self.use_bedrock) || flag_enabled(&self.use_vertex) {
             return None;
@@ -427,11 +425,17 @@ fn read_access_token(credentials_path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The budget of every detached fetch: long enough for a slow network hop, short enough that
+/// a stuck child cannot pile up behind the next tick's spawn.
+pub(crate) fn fetch_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(5)
+}
+
 /// The only network touchpoint, kept separate so no test can reach it.
 fn fetch_body(token: &str) -> Option<String> {
     let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout_connect(fetch_timeout())
+        .timeout(fetch_timeout())
         .build();
     agent
         .get("https://api.anthropic.com/api/oauth/usage")
