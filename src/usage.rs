@@ -574,7 +574,7 @@ fn schedule(
         }
     };
     Schedule {
-        next_at_ms: now_ms.saturating_add(wait.as_millis() as u64),
+        next_at_ms: now_ms.saturating_add(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX)),
         backoff_ms,
     }
 }
@@ -1256,6 +1256,23 @@ mod tests {
                 backoff_ms: Some(600_000)
             }
         );
+    }
+
+    #[test]
+    fn schedule_saturates_an_absurd_retry_after() {
+        let interval = Duration::from_secs(60);
+        // Both waits exceed u64 milliseconds; the low 64 bits of the largest duration are all
+        // ones, so the second wait is the one a truncating conversion would wrap.
+        for wait in [Duration::MAX, Duration::from_secs(1 << 60)] {
+            let held = Outcome::Failure {
+                retry_after: Some(wait),
+            };
+            assert_eq!(
+                schedule(None, &held, interval, 1_000_000).next_at_ms,
+                u64::MAX,
+                "{wait:?}"
+            );
+        }
     }
 
     #[test]
