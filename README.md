@@ -93,13 +93,16 @@ the CLIProxyAPI plugin route makes the same case (see "Behind CLIProxyAPI" below
 Session and weekly values come live from the Claude Code payload. The per-model and spend
 data comes from an unofficial claude.ai endpoint, fetched in the background at most every
 `usage_fetch_interval_seconds` (default 60, `0` disables the fetch) into
-`~/.claude/claude-statusline-usage.json`. That endpoint may change without notice; when it
-does, the affected chips disappear silently while the payload-backed chips keep working.
+`~/.claude/claude-statusline-usage.json`. A fetch that fails is retried when the endpoint's
+`Retry-After` header says so, or otherwise after a backoff that doubles from 2 to 10 minutes.
+That endpoint may change without notice; when it does, the affected chips disappear silently
+while the payload-backed chips keep working.
 
 The account email and the plan come from the claude.ai profile endpoint, fetched by the same
-background process at most once a day; until the first fetch lands, and with the fetch
+background process at most once an hour; until the first fetch lands, and with the fetch
 disabled, they come from `~/.claude.json`. The account chip puts your email on screen;
-`disabled_sections: ["usage_account"]` hides it.
+`disabled_sections: ["usage_account"]` hides it. The cache file is removed when the line or
+the fetch is disabled, and after a login switch, so another account's numbers never linger.
 
 ### Behind CLIProxyAPI
 
@@ -122,7 +125,10 @@ last (`usage_model`), by model id, alias suffix included.
 
 The claude.ai fetch and its cache are not used in that mode, because the local login is not
 the account behind the proxy. Without the plugin the route answers 404 and the line stays
-hidden, as it does for any other custom endpoint.
+hidden, as it does for any other custom endpoint. A base URL that fails is not polled again
+for 5 minutes, remembered in `~/.claude/claude-statusline-proxy.json`; a session the plugin
+does not know yet is polled on the interval, because the first tick of a session comes before
+its first proxied request.
 
 ## Update notification
 
