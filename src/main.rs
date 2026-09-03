@@ -1,3 +1,4 @@
+mod backoff;
 mod bar;
 mod commands;
 mod fit;
