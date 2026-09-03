@@ -83,6 +83,12 @@ const LINE3_DROP: &[&str] = &[
 ];
 const SEP: &str = " \u{2502} ";
 
+/// Whether a composed line carries the usage line glyph, which the fit must leave room for.
+enum LineGlyph {
+    None,
+    Usage,
+}
+
 fn main() {
     let cli = Cli::parse();
     if cli.print_config {
@@ -237,22 +243,24 @@ fn render(raw: &str) -> Option<String> {
 
     let disabled = &config.disabled_sections;
     let compose =
-        |chips: Vec<(&'static str, String)>, drop: &[&str], glyph: bool| -> Option<String> {
+        |chips: Vec<(&'static str, String)>, drop: &[&str], glyph: LineGlyph| -> Option<String> {
             let chips: Vec<(&'static str, String)> = chips
                 .into_iter()
                 .filter(|(name, _)| !disabled.iter().any(|d| d == name))
                 .collect();
-            let max_width = if glyph { width - glyph_width } else { width };
+            let max_width = match glyph {
+                LineGlyph::None => width,
+                LineGlyph::Usage => width - glyph_width,
+            };
             let fitted = fit::fit_line(chips, sep_width, max_width, drop);
             if fitted.is_empty() {
                 return None;
             }
             // The glyph marks the line, not a chip, so it is attached only now,
             // to whichever chip the filter and the fit left first.
-            let fitted = if glyph {
-                sections::with_line_glyph(fitted, &style)
-            } else {
-                fitted
+            let fitted = match glyph {
+                LineGlyph::None => fitted,
+                LineGlyph::Usage => sections::with_line_glyph(fitted, &style),
             };
             Some(
                 fitted
@@ -314,7 +322,7 @@ fn render(raw: &str) -> Option<String> {
                                 now_epoch_s,
                             ),
                             LINE3_DROP,
-                            true,
+                            LineGlyph::Usage,
                         )
                     })
                     .collect(),
@@ -335,7 +343,7 @@ fn render(raw: &str) -> Option<String> {
                             now_epoch_s,
                         ),
                         LINE3_DROP,
-                        true,
+                        LineGlyph::Usage,
                     )
                     .into_iter()
                     .collect()
@@ -368,8 +376,8 @@ fn render(raw: &str) -> Option<String> {
     }
 
     let lines: Vec<String> = [
-        compose(line1_chips, LINE1_DROP, false),
-        compose(sections::line2(&ctx), LINE2_DROP, false),
+        compose(line1_chips, LINE1_DROP, LineGlyph::None),
+        compose(sections::line2(&ctx), LINE2_DROP, LineGlyph::None),
     ]
     .into_iter()
     .flatten()
