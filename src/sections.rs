@@ -282,7 +282,8 @@ pub fn line3(
     if let Some(plan) = plan
         && let Some(first) = plan.chars().next()
     {
-        // Plan names arrive lowercase (max, pro); render them title-cased.
+        // A label arrives title-cased already; the uppercase serves a plugin route that still
+        // publishes the bare family (max, pro).
         let text: String = first.to_uppercase().chain(plan.chars().skip(1)).collect();
         push_visible(&mut out, "usage_plan", s.paint(&text, MAGENTA));
     }
@@ -504,7 +505,7 @@ pub fn usage_preview(style: &Style) -> String {
     let sep = style.paint(" \u{2502} ", COMMENT);
     let chips = line3(
         &sample_limits(),
-        Some("max"),
+        Some("Max 20x"),
         Some("user@example.com"),
         None,
         style,
@@ -1165,7 +1166,7 @@ mod tests {
     #[test]
     fn usage_preview_renders_the_sample_line() {
         let text = usage_preview(&PLAIN);
-        assert!(text.starts_with("\u{2301} user@example.com \u{2502} Max \u{2502} 5h:42%"));
+        assert!(text.starts_with("\u{2301} user@example.com \u{2502} Max 20x \u{2502} 5h:42%"));
         assert!(text.contains(" \u{2502} "));
         assert!(text.contains("spend:$1002/$1000 (100%)"));
     }
