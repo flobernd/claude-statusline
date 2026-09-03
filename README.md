@@ -99,10 +99,11 @@ That endpoint may change without notice; when it does, the affected chips disapp
 while the payload-backed chips keep working.
 
 The account email and the plan come from the claude.ai profile endpoint, fetched by the same
-background process at most once an hour; until the first fetch lands, and with the fetch
-disabled, they come from `~/.claude.json`. The account chip puts your email on screen;
-`disabled_sections: ["usage_account"]` hides it. The cache file is removed when the line or
-the fetch is disabled, and after a login switch, so another account's numbers never linger.
+background process at most once an hour; a failed fetch backs off the same way. Until the
+first fetch lands, and with the fetch disabled, they come from `~/.claude.json`. The account
+chip puts your email on screen; `disabled_sections: ["usage_account"]` hides it. The usage
+cache file is removed when the line or the fetch is disabled, and after a login switch, so
+another account's numbers never linger.
 
 ### Behind CLIProxyAPI
 
@@ -125,10 +126,11 @@ last (`usage_model`), by model id, alias suffix included.
 
 The claude.ai fetch and its cache are not used in that mode, because the local login is not
 the account behind the proxy. Without the plugin the route answers 404 and the line stays
-hidden, as it does for any other custom endpoint. A base URL that fails is not polled again
-for 5 minutes, remembered in `~/.claude/claude-statusline-proxy.json`; a session the plugin
-does not know yet is polled on the interval, because the first tick of a session comes before
-its first proxied request.
+hidden, as it does for any other custom endpoint. A gateway that answers without the plugin is
+not polled again for 5 minutes; a gateway that does not answer at all is retried after 30
+seconds; both waits are remembered in `~/.claude/claude-statusline-proxy.json`. A session the
+plugin does not know yet is polled on the interval, because the first tick of a session comes
+before its first proxied request.
 
 ## Update notification
 
