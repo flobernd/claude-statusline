@@ -43,17 +43,19 @@ pub fn label(plan: &str, rate_limit_tier: Option<&str>) -> String {
     let mut label: String = first.to_uppercase().chain(chars).collect();
     if let Some(multiplier) = rate_limit_tier.and_then(multiplier) {
         label.push(' ');
-        label.push_str(multiplier);
+        label.push_str(&multiplier);
     }
     label
 }
 
 /// The `_<digits>x` suffix of a tier name: `20x` from `default_claude_max_20x`, nothing from
-/// `default_claude_pro`.
-fn multiplier(tier: &str) -> Option<&str> {
-    let (_, suffix) = tier.trim().rsplit_once('_')?;
+/// `default_claude_pro`. Matched on the trimmed, lowercased tier, as the CLIProxyAPI plugin
+/// does, so `_20X` reads as `20x` too.
+fn multiplier(tier: &str) -> Option<String> {
+    let tier = tier.trim().to_ascii_lowercase();
+    let (_, suffix) = tier.rsplit_once('_')?;
     let digits = suffix.strip_suffix('x')?;
-    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then_some(suffix)
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then(|| suffix.to_string())
 }
 
 #[cfg(test)]
@@ -123,6 +125,8 @@ mod tests {
         assert_eq!(label("max", Some("default_claude_max_20x")), "Max 20x");
         assert_eq!(label("max", Some("default_claude_max_5x")), "Max 5x");
         assert_eq!(label("max", Some(" default_claude_max_20x ")), "Max 20x");
+        assert_eq!(label("max", Some("default_claude_max_20X")), "Max 20x");
+        assert_eq!(label("max", Some(" DEFAULT_CLAUDE_MAX_5X ")), "Max 5x");
         assert_eq!(label("pro", Some("default_claude_pro")), "Pro");
         assert_eq!(label("team", None), "Team");
     }
