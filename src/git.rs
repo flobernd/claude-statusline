@@ -36,6 +36,10 @@ pub struct GitInfo {
     pub linked_worktree: bool,
     pub on_default_branch: bool,
     pub repo_name_fallback: Option<String>,
+    /// The directory itself is gone (a removed worktree or deleted
+    /// checkout): git can say nothing, so the render flags the dead
+    /// location instead of silently dropping the git chips.
+    pub missing_dir: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +259,14 @@ pub fn branch_location(dir: &Path) -> Option<BranchLocation> {
 }
 
 pub fn collect(dir: &Path) -> GitInfo {
+    // Ok(false) is the only certain "gone" answer; an Err (permissions,
+    // unreachable mount) must not paint a healthy repo as deleted.
+    if matches!(dir.try_exists(), Ok(false)) {
+        return GitInfo {
+            missing_dir: true,
+            ..GitInfo::default()
+        };
+    }
     let mut info = GitInfo::default();
     let (head, sync, stash, status) = std::thread::scope(|s| {
         let head = s.spawn(|| run_git(dir, HEAD_ARGS));
@@ -393,6 +405,17 @@ mod tests {
         assert!(info.branch.is_none());
         assert_eq!(info.stash, 0);
         assert!(!info.linked_worktree);
+        assert!(!info.missing_dir);
+    }
+
+    #[test]
+    fn missing_dir_sets_the_flag_and_no_git_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("removed-worktree");
+        let info = collect(&gone);
+        assert!(info.missing_dir);
+        assert!(info.branch.is_none());
+        assert_eq!(info.state, None);
     }
 
     #[test]
