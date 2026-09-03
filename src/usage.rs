@@ -70,7 +70,9 @@ pub struct ScopeModel {
     pub display_name: Option<String>,
 }
 
-/// On-disk cache written by the fetch child and read by the render path.
+/// On-disk cache written by the fetch child and read by the render path. The next-at stamps
+/// carry the retry schedule of each kind, so a failed fetch waits out its backoff instead of
+/// being retried on every render tick; a snapshot without them reads as due for both kinds.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Snapshot {
     #[serde(default)]
@@ -83,6 +85,16 @@ pub struct Snapshot {
     pub profile: Option<Profile>,
     #[serde(default, deserialize_with = "lenient")]
     pub profile_fetched_at_ms: Option<u64>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub usage_next_at_ms: Option<u64>,
+    /// Absent after a success, so the ladder restarts at its first rung.
+    #[serde(default, deserialize_with = "lenient")]
+    pub usage_backoff_ms: Option<u64>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub profile_next_at_ms: Option<u64>,
+    /// Absent after a success, so the ladder restarts at its first rung.
+    #[serde(default, deserialize_with = "lenient")]
+    pub profile_backoff_ms: Option<u64>,
 }
 
 /// Account identity from the private api/oauth/profile endpoint, reduced to what the line shows.
@@ -408,6 +420,22 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// A kind is due when its next-at stamp is absent or not in the future. Shared by the render
+/// tick's spawn gate and the fetch child's stampede re-check, so both read one schedule.
+pub(crate) fn due(next_at_ms: Option<u64>, now_ms: u64) -> bool {
+    next_at_ms.is_none_or(|at| at <= now_ms)
+}
+
+/// The spawn gate needs only the two next-at stamps; a corrupt cache then reads as due
+/// instead of dragging the full schema into the render path.
+pub(crate) fn read_next_at_ms(path: &Path) -> (Option<u64>, Option<u64>) {
+    let value: Option<serde_json::Value> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok());
+    let stamp = |key: &str| value.as_ref()?.get(key)?.as_u64();
+    (stamp("usage_next_at_ms"), stamp("profile_next_at_ms"))
+}
+
 pub fn spawn_fetch_if_stale(config: &Config) {
     // Checked before any filesystem access: interval 0 disables fetching.
     if config.usage_fetch_interval_seconds == 0 {
@@ -416,11 +444,9 @@ pub fn spawn_fetch_if_stale(config: &Config) {
     let Some(path) = cache_path() else {
         return;
     };
-    if !fetch_due(
-        config.usage_fetch_interval_seconds,
-        read_fetched_at_ms(&path),
-        now_ms(),
-    ) {
+    let (usage_next_at_ms, profile_next_at_ms) = read_next_at_ms(&path);
+    let now = now_ms();
+    if !due(usage_next_at_ms, now) && !due(profile_next_at_ms, now) {
         return;
     }
     spawn_fetch_child();
@@ -492,6 +518,7 @@ fn try_fetch() -> Option<()> {
         utilization,
         profile,
         profile_fetched_at_ms,
+        ..Snapshot::default()
     };
     write_json_atomic(&path, &snapshot)
 }
@@ -796,8 +823,7 @@ mod tests {
             fetched_at_ms: 1_784_829_600_000,
             account_uuid: Some("u-1".to_string()),
             utilization: full_endpoint(),
-            profile: None,
-            profile_fetched_at_ms: None,
+            ..Snapshot::default()
         };
         write_json_atomic(&path, &snapshot).unwrap();
 
@@ -820,10 +846,7 @@ mod tests {
         let path = dir.path().join("claude-statusline-usage.json");
         let snapshot = Snapshot {
             fetched_at_ms: 1,
-            account_uuid: None,
-            utilization: EndpointUtilization::default(),
-            profile: None,
-            profile_fetched_at_ms: None,
+            ..Snapshot::default()
         };
         write_json_atomic(&path, &snapshot).unwrap();
         assert!(load_snapshot(&path, None).is_some());
@@ -838,12 +861,12 @@ mod tests {
             fetched_at_ms: 1,
             account_uuid: Some("u-1".to_string()),
             utilization: full_endpoint(),
-            profile: None,
-            profile_fetched_at_ms: None,
+            ..Snapshot::default()
         };
         write_json_atomic(&path, &snapshot).unwrap();
         let updated = Snapshot {
             fetched_at_ms: 2,
+            usage_next_at_ms: Some(3),
             ..snapshot
         };
         write_json_atomic(&path, &updated).unwrap();
@@ -854,6 +877,7 @@ mod tests {
         let parsed: Snapshot = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed.fetched_at_ms, 2);
         assert_eq!(read_fetched_at_ms(&path), Some(2));
+        assert_eq!(read_next_at_ms(&path), (Some(3), None));
     }
 
     #[test]
@@ -879,12 +903,12 @@ mod tests {
         let snapshot = Snapshot {
             fetched_at_ms: 5,
             account_uuid: Some("u".to_string()),
-            utilization: EndpointUtilization::default(),
             profile: Some(Profile {
                 email: Some("a@b.c".to_string()),
                 plan: Some("pro".to_string()),
             }),
             profile_fetched_at_ms: Some(4),
+            ..Snapshot::default()
         };
         write_json_atomic(&path, &snapshot).unwrap();
         let loaded = load_snapshot(&path, Some("u")).unwrap();
@@ -897,6 +921,57 @@ mod tests {
         .unwrap();
         let loaded = load_snapshot(&path, Some("u")).unwrap();
         assert!(loaded.profile.is_none() && loaded.profile_fetched_at_ms.is_none());
+    }
+
+    #[test]
+    fn snapshot_round_trips_the_schedule_and_tolerates_its_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let snapshot = Snapshot {
+            account_uuid: Some("u".to_string()),
+            usage_next_at_ms: Some(10),
+            usage_backoff_ms: Some(120_000),
+            profile_next_at_ms: Some(20),
+            profile_backoff_ms: Some(240_000),
+            ..Snapshot::default()
+        };
+        write_json_atomic(&path, &snapshot).unwrap();
+        let loaded = load_snapshot(&path, Some("u")).unwrap();
+        assert_eq!(
+            (loaded.usage_next_at_ms, loaded.usage_backoff_ms),
+            (Some(10), Some(120_000))
+        );
+        assert_eq!(
+            (loaded.profile_next_at_ms, loaded.profile_backoff_ms),
+            (Some(20), Some(240_000))
+        );
+        assert_eq!(read_next_at_ms(&path), (Some(10), Some(20)));
+
+        std::fs::write(
+            &path,
+            r#"{"fetched_at_ms": 5, "account_uuid": "u", "utilization": {}}"#,
+        )
+        .unwrap();
+        let loaded = load_snapshot(&path, Some("u")).unwrap();
+        assert!(loaded.usage_next_at_ms.is_none() && loaded.usage_backoff_ms.is_none());
+        assert!(loaded.profile_next_at_ms.is_none() && loaded.profile_backoff_ms.is_none());
+        assert_eq!(read_next_at_ms(&path), (None, None));
+
+        std::fs::write(&path, "{broken").unwrap();
+        assert_eq!(read_next_at_ms(&path), (None, None));
+        assert_eq!(
+            read_next_at_ms(&dir.path().join("missing.json")),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn due_when_the_stamp_is_absent_or_passed() {
+        assert!(due(None, 0), "a missing stamp is always due");
+        assert!(due(Some(1_000), 1_000));
+        assert!(due(Some(1_000), 1_001));
+        // A stamp in the future (a booked retry, or clock skew) is not due.
+        assert!(!due(Some(1_001), 1_000));
     }
 
     #[test]
