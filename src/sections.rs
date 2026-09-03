@@ -277,14 +277,14 @@ pub fn line3(
         // An email can run long; 32 characters keeps a personal address whole and trims a
         // corporate one before it crowds the windows out.
         let text: String = account.chars().take(32).collect();
-        out.push(("usage_account", s.paint(&text, MAGENTA)));
+        push_visible(&mut out, "usage_account", s.paint(&text, MAGENTA));
     }
     if let Some(plan) = plan
         && let Some(first) = plan.chars().next()
     {
         // Plan names arrive lowercase (max, pro); render them title-cased.
         let text: String = first.to_uppercase().chain(plan.chars().skip(1)).collect();
-        out.push(("usage_plan", s.paint(&text, MAGENTA)));
+        push_visible(&mut out, "usage_plan", s.paint(&text, MAGENTA));
     }
     if let Some(w) = &limits.session {
         out.push(("usage_session", window_chip(s, "5h", w, now_epoch_s)));
@@ -302,9 +302,17 @@ pub fn line3(
     }
     if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
         // Shown whole: shortening the id would hide the alias suffix that tells a 1M session apart.
-        out.push(("usage_model", s.paint(model, MAGENTA)));
+        push_visible(&mut out, "usage_model", s.paint(model, MAGENTA));
     }
     out
+}
+
+/// Painting strips control characters, so free text made of them would leave an empty chip
+/// that still claims a separator and the line glyph.
+fn push_visible(out: &mut Vec<(&'static str, String)>, name: &'static str, painted: String) {
+    if crate::fit::visible_width(&painted) > 0 {
+        out.push((name, painted));
+    }
 }
 
 /// Prefix the line glyph to the first chip. The glyph marks the line, not a chip, so it must ride
@@ -1194,6 +1202,24 @@ mod tests {
         let chips = line3(&limits, None, Some(long), None, &PLAIN, USAGE_NOW_S);
         assert_eq!(chips[0].1, &long[..32]);
         let chips = line3(&limits, None, Some("  "), None, &PLAIN, USAGE_NOW_S);
+        assert_eq!(names(&chips), vec!["usage_session"]);
+    }
+
+    #[test]
+    fn control_character_account_and_plan_yield_no_chip() {
+        let limits = crate::usage::Limits {
+            session: Some(window(1.0, None)),
+            ..crate::usage::Limits::default()
+        };
+        let controls = "\u{1}".repeat(32);
+        let chips = line3(
+            &limits,
+            Some(&controls),
+            Some(&controls),
+            None,
+            &PLAIN,
+            USAGE_NOW_S,
+        );
         assert_eq!(names(&chips), vec!["usage_session"]);
     }
 

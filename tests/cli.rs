@@ -1454,3 +1454,38 @@ fn disabled_account_chip_keeps_the_line_glyph() {
     assert!(!line.contains("biz@example.com"), "usage line: {line}");
     assert!(line.contains("7d:41%"), "usage line: {line}");
 }
+
+/// The email is 32 U+0001 characters, written as JSON escapes so the body stays printable.
+const CONTROL_ACCOUNT_BODY: &str = concat!(
+    r#"{"schema":1,"accounts":[{"email":""#,
+    r"\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001",
+    r"\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001",
+    r"\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001",
+    r"\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001",
+    r#"","plan":"max","#,
+    r#""windows":{"five_hour":{"used_percentage":6,"resets_at":4102444800},"#,
+    r#""seven_day":{"used_percentage":41,"resets_at":4102444800}}}]}"#
+);
+
+#[test]
+fn control_character_account_renders_no_chip() {
+    let home = proxy_home(true);
+    let (base, served) = serve_once(CONTROL_ACCOUNT_BODY);
+    fetch_proxy(home.path(), &base);
+    assert!(
+        served.join().unwrap().is_some(),
+        "the responder saw no request"
+    );
+    let out = run_statusline_with_env(
+        PROXY_PAYLOAD,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_BASE_URL", &base)],
+    );
+    let line = usage_line(&String::from_utf8_lossy(&out.stdout)).to_string();
+    assert!(
+        line.starts_with("\u{2301} Max \u{2502} 5h:6%"),
+        "usage line: {line}"
+    );
+    assert!(!line.contains('\u{1}'), "usage line: {line}");
+}
