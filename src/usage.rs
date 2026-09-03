@@ -156,12 +156,24 @@ pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
     };
     // A 200 whose shape no longer matches (an endpoint change) parses to an
     // empty profile. Reading that as success would overwrite a good cached
-    // profile and stamp it fresh for a day; None instead lets refresh_profile
-    // keep the previous profile and retry on the next child run.
+    // profile and clear its ladder; None instead makes the profile kind a
+    // failure, so the child keeps the previous profile and books the ladder.
     if profile.email.is_none() && profile.plan.is_none() {
         return None;
     }
     Some(profile)
+}
+
+/// A 2xx body that parses but carries no window at all (an error envelope, or a shape the
+/// endpoint no longer sends) mirrors the profile's emptiness guard: reading it as success
+/// would overwrite a good cached utilization and clear its ladder, so it counts as a failure
+/// of the usage kind instead, and the child keeps the previous data and books the ladder.
+fn utilization_from_body(body: &str) -> Option<EndpointUtilization> {
+    let utilization: EndpointUtilization = serde_json::from_str(body).ok()?;
+    let has_window = utilization.five_hour.is_some()
+        || utilization.seven_day.is_some()
+        || utilization.limits.as_ref().is_some_and(|l| !l.is_empty());
+    has_window.then_some(utilization)
 }
 
 pub fn cache_path() -> Option<PathBuf> {
@@ -594,11 +606,15 @@ fn try_fetch_with(home: &Path, fetch: Fetch<'_>, now_ms: u64) -> Option<()> {
     if !usage_due && !profile_due {
         return None;
     }
-    let token = read_access_token(&claude_dir.join(".credentials.json"))?;
+    // A missing or unreadable token is not an early return: every due kind fails without a
+    // network call and books its ladder below, so a session with no OAuth login backs off
+    // one rung per render tick instead of spawning a fresh child on every one.
+    let token = read_access_token(&claude_dir.join(".credentials.json"));
     if usage_due {
-        let (utilization, outcome) = attempt(fetch, USAGE_URL, &token, |body| {
-            serde_json::from_str::<EndpointUtilization>(body).ok()
-        });
+        let (utilization, outcome) = match token.as_deref() {
+            Some(token) => attempt(fetch, USAGE_URL, token, utilization_from_body),
+            None => (None, Outcome::Failure { retry_after: None }),
+        };
         if let Some(utilization) = utilization {
             snapshot.utilization = utilization;
             snapshot.fetched_at_ms = now_ms;
@@ -613,7 +629,10 @@ fn try_fetch_with(home: &Path, fetch: Fetch<'_>, now_ms: u64) -> Option<()> {
         snapshot.usage_backoff_ms = next.backoff_ms;
     }
     if profile_due {
-        let (profile, outcome) = attempt(fetch, PROFILE_URL, &token, profile_from_body);
+        let (profile, outcome) = match token.as_deref() {
+            Some(token) => attempt(fetch, PROFILE_URL, token, profile_from_body),
+            None => (None, Outcome::Failure { retry_after: None }),
+        };
         if let Some(profile) = profile {
             snapshot.profile = Some(profile);
             snapshot.profile_fetched_at_ms = Some(now_ms);
@@ -1262,6 +1281,31 @@ mod tests {
     }
 
     #[test]
+    fn child_treats_an_empty_usage_body_as_a_failure() {
+        let now = 1_000_000;
+        let previous = Snapshot {
+            account_uuid: Some("u-1".to_string()),
+            utilization: full_endpoint(),
+            profile_next_at_ms: Some(now + 1),
+            ..Snapshot::default()
+        };
+        let home = child_home(60, Some(&previous));
+        let (snapshot, calls) = run_child(home.path(), now, |_| body("{}"));
+        let snapshot = snapshot.unwrap();
+        assert_eq!(calls, [USAGE_URL]);
+        assert_eq!(
+            snapshot.utilization.five_hour.unwrap().utilization,
+            Some(42.0),
+            "an error envelope on a 2xx must not empty the cache"
+        );
+        assert_eq!(
+            (snapshot.usage_next_at_ms, snapshot.usage_backoff_ms),
+            (Some(now + 120_000), Some(120_000)),
+            "an error envelope on a 2xx must not clear the ladder"
+        );
+    }
+
+    #[test]
     fn child_success_clears_the_backoff_and_books_the_interval() {
         let now = 1_000_000;
         let previous = Snapshot {
@@ -1370,8 +1414,21 @@ mod tests {
 
         let home = child_home(60, None);
         std::fs::remove_file(home.path().join(".claude").join(".credentials.json")).unwrap();
-        let (snapshot, calls) = run_child(home.path(), 1_000, |_| body(FULL_BODY));
-        assert!(calls.is_empty() && snapshot.is_none());
+        let now = 1_000;
+        let (snapshot, calls) = run_child(home.path(), now, |_| body(FULL_BODY));
+        let snapshot = snapshot.unwrap();
+        assert!(calls.is_empty(), "a missing token makes no request");
+        assert_eq!(snapshot.account_uuid.as_deref(), Some("u-1"));
+        assert_eq!(
+            (snapshot.usage_next_at_ms, snapshot.usage_backoff_ms),
+            (Some(now + 120_000), Some(120_000)),
+            "a missing token books the ladder for the due usage kind"
+        );
+        assert_eq!(
+            (snapshot.profile_next_at_ms, snapshot.profile_backoff_ms),
+            (Some(now + 120_000), Some(120_000)),
+            "a missing token books the ladder for the due profile kind"
+        );
     }
 
     fn endpoint_env(
