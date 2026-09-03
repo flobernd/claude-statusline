@@ -88,7 +88,10 @@ Team/Enterprise spend limits). The wizard asks about it, or set `advanced_usage_
 yourself. The line renders only for native Anthropic subscriptions: Bedrock, Vertex, and
 custom-gateway sessions (a non-Anthropic `ANTHROPIC_BASE_URL` or an `ANTHROPIC_AUTH_TOKEN`)
 hide it unless the Claude Code payload still reports Anthropic rate limits, or a status from
-the CLIProxyAPI plugin route makes the same case (see "Behind CLIProxyAPI" below).
+the CLIProxyAPI plugin route makes the same case (see "Behind CLIProxyAPI" below). Such a
+session then shows the payload windows alone, with no account and plan chips: the claude.ai
+data and the cache behind them describe the login on this machine, not the account that
+serves the session.
 
 Session and weekly values come live from the Claude Code payload. The per-model and spend
 data comes from an unofficial claude.ai endpoint, fetched in the background at most every

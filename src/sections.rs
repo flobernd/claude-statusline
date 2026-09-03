@@ -279,12 +279,10 @@ pub fn line3(
         let text: String = account.chars().take(32).collect();
         push_visible(&mut out, "usage_account", s.paint(&text, MAGENTA));
     }
-    if let Some(plan) = plan
-        && let Some(first) = plan.chars().next()
-    {
-        // A label arrives title-cased already; the uppercase serves a plugin route that still
-        // publishes the bare family (max, pro).
-        let text: String = first.to_uppercase().chain(plan.chars().skip(1)).collect();
+    if let Some(plan) = plan {
+        // A plugin route may publish the bare family (max, pro), so the same rule that labels
+        // a fetched plan also title-cases one that arrives labelled already.
+        let text = crate::plan::label(plan, None);
         push_visible(&mut out, "usage_plan", s.paint(&text, MAGENTA));
     }
     if let Some(w) = &limits.session {
