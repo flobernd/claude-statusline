@@ -5,10 +5,16 @@
 use crate::schema::{self, lenient, lenient_vec};
 use crate::usage::{Limits, Window};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const ROUTE_PATH: &str = "/v0/resource/plugins/cpa-claude-statusline/session";
+
+/// A base URL that failed is left alone for this long: long enough that a gateway without
+/// the plugin costs one request per five minutes instead of one per tick, short enough that
+/// a restarted proxy shows up within a coffee break.
+pub const NEGATIVE_CACHE_S: u64 = 5 * 60;
 
 /// Milliseconds since the epoch. A clock set before it reads as 0, which makes every stamp
 /// look due rather than parking the poll.
@@ -204,6 +210,63 @@ pub fn limits(account: &ProxyAccount, now_epoch_s: i64) -> Limits {
     }
 }
 
+/// One remembered failure per base URL. The key is the trimmed base URL as
+/// `EndpointEnv::custom_base_url` returns it; a BTreeMap keeps the file stable across
+/// rewrites.
+pub type NegativeCache = BTreeMap<String, NegativeEntry>;
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct NegativeEntry {
+    #[serde(default, deserialize_with = "lenient")]
+    pub retry_at_ms: Option<u64>,
+}
+
+pub fn negative_cache_path() -> Option<PathBuf> {
+    schema::home_dir().map(|h| h.join(".claude").join("claude-statusline-proxy.json"))
+}
+
+/// A corrupt file, or an entry that is not an object, reads as empty: the cache only saves
+/// requests, so losing it costs one GET and never the line.
+pub fn load_negative_cache(path: &Path) -> NegativeCache {
+    let Some(serde_json::Value::Object(entries)) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+    else {
+        return NegativeCache::new();
+    };
+    entries
+        .into_iter()
+        .filter_map(|(base, entry)| Some((base, serde_json::from_value(entry).ok()?)))
+        .collect()
+}
+
+/// Deletes the file when nothing is left in it, so a healthy setup leaves no trace. Errors
+/// are ignored on purpose: the render path can do nothing about them.
+pub fn store_negative_cache(path: &Path, cache: &NegativeCache) {
+    if cache.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let _ = crate::usage::write_json_atomic(path, cache);
+}
+
+pub fn retry_pending(cache: &NegativeCache, base_url: &str, now_ms: u64) -> bool {
+    cache
+        .get(base_url)
+        .and_then(|entry| entry.retry_at_ms)
+        .is_some_and(|at| at > now_ms)
+}
+
+pub fn note_failure(cache: &mut NegativeCache, base_url: &str, now_ms: u64) {
+    let retry_at_ms = now_ms.saturating_add(NEGATIVE_CACHE_S.saturating_mul(1_000));
+    cache.insert(
+        base_url.to_string(),
+        NegativeEntry {
+            retry_at_ms: Some(retry_at_ms),
+        },
+    );
+}
+
 /// A stored route answer older than this is not shown: the plugin refreshes on every poll, so
 /// a minute of silence means the child stopped landing and the line must not paint numbers that
 /// no longer describe the session.
@@ -310,8 +373,9 @@ fn new_attempt(base_url: &str, now_ms: u64) -> SessionCache {
 }
 
 /// The same stamped attempt with the previous answer riding along, so one failed poll shows the
-/// last numbers until `cached_status`'s freshness window runs out instead of blanking the line
-/// at once. An answer stored for another base URL is dropped: it belongs to another proxy.
+/// last numbers until `cached_status`'s freshness window runs out instead of blanking the line at
+/// once and then holding it blank for the negative cache's wait. An answer stored for another
+/// base URL is dropped: it belongs to another proxy.
 fn carried_attempt(previous: Option<&SessionCache>, base_url: &str, now_ms: u64) -> SessionCache {
     let kept = previous.filter(|c| same_base(c, base_url));
     SessionCache {
@@ -379,10 +443,19 @@ fn try_fetch(session_id: &str) -> Option<()> {
         let _ = std::fs::create_dir_all(dir);
         sweep_sessions(dir);
     }
-    let url = status_url(&base, session_id)?;
     let mut next = new_attempt(&base, now);
+    let negative_path = negative_cache_path()?;
+    let mut negative = load_negative_cache(&negative_path);
+    if retry_pending(&negative, &base, now) {
+        let waiting = carried_attempt(previous.as_ref(), &base, now);
+        return crate::usage::write_json_atomic(&path, &waiting);
+    }
+    let url = status_url(&base, session_id)?;
     match fetch_status(&url) {
         RouteResult::Status(body) => {
+            if negative.remove(&base).is_some() {
+                store_negative_cache(&negative_path, &negative);
+            }
             next.fetched_at_ms = Some(now_ms());
             next.status = serde_json::from_str(&body).ok();
             crate::usage::write_json_atomic(&path, &next)?;
@@ -391,9 +464,11 @@ fn try_fetch(session_id: &str) -> Option<()> {
         // The plugin answered and knows nothing of the session, so nothing about it is worth
         // keeping: no status is stored and the next tick hides the line.
         RouteResult::UnknownSession => crate::usage::write_json_atomic(&path, &next),
-        // No answer worth keeping: the attempt is stamped with the previous answer riding
-        // along, so the next tick waits out the interval instead of asking again at once.
+        // No answer worth keeping: the base URL is left alone for the wait, and the attempt is
+        // stamped with the previous answer riding along so the line does not blank at once.
         RouteResult::Failed => {
+            note_failure(&mut negative, &base, now);
+            store_negative_cache(&negative_path, &negative);
             let failed = carried_attempt(previous.as_ref(), &base, now);
             crate::usage::write_json_atomic(&path, &failed)
         }
@@ -763,6 +838,51 @@ mod tests {
                 "{status} {body:?} must fail"
             );
         }
+    }
+
+    #[test]
+    fn negative_cache_round_trips_and_reads_corruption_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude-statusline-proxy.json");
+        assert!(load_negative_cache(&path).is_empty());
+
+        let mut cache = NegativeCache::new();
+        note_failure(&mut cache, "http://127.0.0.1:8317", 1_000);
+        store_negative_cache(&path, &cache);
+        let loaded = load_negative_cache(&path);
+        assert_eq!(loaded["http://127.0.0.1:8317"].retry_at_ms, Some(301_000));
+        assert!(retry_pending(&loaded, "http://127.0.0.1:8317", 300_999));
+        assert!(!retry_pending(&loaded, "http://127.0.0.1:8317", 301_000));
+        assert!(!retry_pending(&loaded, "http://other", 0));
+
+        std::fs::write(
+            &path,
+            r#"{"http://a": {"retry_at_ms": "soon"}, "http://b": 5, "http://c": {"retry_at_ms": 9}}"#,
+        )
+        .unwrap();
+        let loaded = load_negative_cache(&path);
+        assert!(loaded["http://a"].retry_at_ms.is_none());
+        assert!(!loaded.contains_key("http://b"));
+        assert_eq!(loaded["http://c"].retry_at_ms, Some(9));
+        for corrupt in ["{broken", "[1]", "null"] {
+            std::fs::write(&path, corrupt).unwrap();
+            assert!(load_negative_cache(&path).is_empty(), "{corrupt:?}");
+        }
+    }
+
+    #[test]
+    fn storing_an_empty_negative_cache_removes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude-statusline-proxy.json");
+        let mut cache = NegativeCache::new();
+        note_failure(&mut cache, "http://proxy", 0);
+        store_negative_cache(&path, &cache);
+        assert!(path.exists());
+        assert!(cache.remove("http://proxy").is_some());
+        store_negative_cache(&path, &cache);
+        assert!(!path.exists());
+        // Storing an empty cache without a file is not an error either.
+        store_negative_cache(&path, &cache);
     }
 
     #[test]
