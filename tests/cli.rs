@@ -1098,7 +1098,8 @@ fn serve_once(body: &'static str) -> (String, std::thread::JoinHandle<Option<Str
 const PROXY_BODY: &str = r#"{"schema":1,"accounts":[
  {"provider":"claude","email":"biz@example.com","plan":"max",
   "windows":{"five_hour":{"used_percentage":6,"resets_at":4102444800},
-             "seven_day":{"used_percentage":41,"resets_at":4102444800}},
+             "seven_day":{"used_percentage":41,"resets_at":4102444800},
+             "fable":{"used_percentage":12,"resets_at":4102444800}},
   "spend":{"enabled":true,"used_cents":1234,"limit_cents":5000,"used_percentage":24.7},
   "models":[{"id":"claude-fable-5-1[1m]","last_served_at":1756820000}],
   "last_served_at":1756820000},
@@ -1488,4 +1489,73 @@ fn control_character_account_renders_no_chip() {
         "usage line: {line}"
     );
     assert!(!line.contains('\u{1}'), "usage line: {line}");
+}
+
+/// Column arithmetic, measured with NO_COLOR on the first row PROXY_BODY renders. The
+/// far-future reset renders as a five-digit day count until 2072, so the window chips keep
+/// their width: glyph 2, separator 3, account 15, plan 3, 5h 14, 7d 15, fable 18, spend 25
+/// (24 to 28, its countdown runs to the next month), model 26, which is 136 columns for the
+/// whole row. The fit sees the width minus the glyph, which is attached afterwards, so 51
+/// columns leave 49: dropping the plan, the account, and the model in that order gets the row
+/// to 81, the spend to 53, and the Fable window to the 14 + 3 + 15 = 32 of the two windows
+/// that stay. 20 columns, the narrowest width the binary accepts, leave 18, below that 32, so
+/// the week drops too. 200 columns hold everything.
+
+#[test]
+fn line3_drop_order_keeps_the_session_window() {
+    let render = |width: &str| -> String {
+        let home = proxy_home(true);
+        let (base, served) = serve_once(PROXY_BODY);
+        fetch_proxy(home.path(), &base);
+        assert!(
+            served.join().unwrap().is_some(),
+            "the responder saw no request"
+        );
+        let out = run_statusline_with_env(
+            PROXY_PAYLOAD,
+            width,
+            home.path(),
+            &[("ANTHROPIC_BASE_URL", &base)],
+        );
+        usage_line(&String::from_utf8_lossy(&out.stdout)).to_string()
+    };
+    let wide = render("200");
+    assert!(
+        wide.starts_with("\u{2301} biz@example.com \u{2502} Max \u{2502} 5h:6%"),
+        "usage line: {wide}"
+    );
+    for chip in ["7d:41%", "fable:12%", "spend:"] {
+        assert!(wide.contains(chip), "usage line: {wide}");
+    }
+    assert!(wide.ends_with("claude-fable-5-1[1m]"), "usage line: {wide}");
+
+    let two_windows = render("51");
+    let chips: Vec<&str> = two_windows.split(" \u{2502} ").collect();
+    assert_eq!(chips.len(), 2, "usage line: {two_windows}");
+    assert!(
+        chips[0].starts_with("\u{2301} 5h:6% ("),
+        "usage line: {two_windows}"
+    );
+    assert!(
+        chips[1].starts_with("7d:41% ("),
+        "usage line: {two_windows}"
+    );
+    assert!(
+        two_windows.chars().count() <= 51,
+        "usage line: {two_windows}"
+    );
+
+    let session_only = render("20");
+    assert!(
+        session_only.starts_with("\u{2301} 5h:6% ("),
+        "usage line: {session_only}"
+    );
+    assert!(
+        !session_only.contains('\u{2502}'),
+        "usage line: {session_only}"
+    );
+    assert!(
+        session_only.chars().count() <= 20,
+        "usage line: {session_only}"
+    );
 }
