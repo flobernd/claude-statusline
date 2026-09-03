@@ -6,7 +6,8 @@ use std::time::Duration;
 pub const LADDER_FIRST: Duration = Duration::from_secs(2 * 60);
 pub const LADDER_MAX: Duration = Duration::from_secs(10 * 60);
 /// Equal to the default fetch interval, so an honored wait never polls faster than the
-/// configuration allows.
+/// default; a configured interval above 60 seconds can still be undercut by a short
+/// Retry-After.
 pub const RETRY_AFTER_MIN: Duration = Duration::from_secs(60);
 pub const RETRY_AFTER_MAX: Duration = Duration::from_secs(60 * 60);
 
