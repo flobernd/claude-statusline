@@ -1810,18 +1810,20 @@ fn usage_cache(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".claude").join("claude-statusline-usage.json")
 }
 
-/// A snapshot whose next-at stamps sit a day ahead, so the render tick under test never
-/// spawns a fetch child and the file stays exactly as seeded.
+/// A snapshot whose next-at stamps sit thirty minutes ahead, so the render tick under test
+/// never spawns a fetch child and the file stays exactly as seeded. The stamps must stay under
+/// the due() ceiling (the larger of the configured interval and one hour) or they read as due
+/// again and the tick spawns a real child into this test's HOME.
 fn parked_snapshot(account_uuid: &str, email: &str) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    let tomorrow = now + 86_400_000;
+    let parked = now + 1_800_000;
     format!(
         r#"{{"fetched_at_ms": {now}, "account_uuid": {account_uuid:?}, "utilization": {{}},
             "profile": {{"email": {email:?}, "plan": "team"}}, "profile_fetched_at_ms": {now},
-            "usage_next_at_ms": {tomorrow}, "profile_next_at_ms": {tomorrow}}}"#
+            "usage_next_at_ms": {parked}, "profile_next_at_ms": {parked}}}"#
     )
 }
 

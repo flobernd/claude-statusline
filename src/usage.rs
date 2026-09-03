@@ -484,7 +484,10 @@ pub fn spawn_fetch_if_stale(config: &Config) {
     let now = now_ms();
     // The ceiling is the larger of the kind's own interval and one hour, so a configured
     // interval under an hour still allows a stamp to sit that far out without reading as due.
-    let usage_ceiling_ms = config.usage_fetch_interval_seconds.max(PROFILE_INTERVAL_S) * 1_000;
+    let usage_ceiling_ms = config
+        .usage_fetch_interval_seconds
+        .max(PROFILE_INTERVAL_S)
+        .saturating_mul(1_000);
     let profile_ceiling_ms = PROFILE_INTERVAL_S * 1_000;
     if !due(usage_next_at_ms, now, usage_ceiling_ms)
         && !due(profile_next_at_ms, now, profile_ceiling_ms)
@@ -614,7 +617,10 @@ fn try_fetch_with(home: &Path, fetch: Fetch<'_>, now_ms: u64) -> Option<()> {
     snapshot.account_uuid = account_uuid;
     // Re-checking the schedule doubles as stampede protection when several render ticks
     // spawn children before the first snapshot lands.
-    let usage_ceiling_ms = config.usage_fetch_interval_seconds.max(PROFILE_INTERVAL_S) * 1_000;
+    let usage_ceiling_ms = config
+        .usage_fetch_interval_seconds
+        .max(PROFILE_INTERVAL_S)
+        .saturating_mul(1_000);
     let profile_ceiling_ms = PROFILE_INTERVAL_S * 1_000;
     let usage_due = due(snapshot.usage_next_at_ms, now_ms, usage_ceiling_ms);
     let profile_due = due(snapshot.profile_next_at_ms, now_ms, profile_ceiling_ms);
@@ -1439,6 +1445,16 @@ mod tests {
             snapshot.profile.is_none(),
             "another account's profile never carries over"
         );
+    }
+
+    #[test]
+    fn child_survives_an_extreme_configured_interval() {
+        // usage_ceiling_ms multiplies the configured interval by 1_000; an absurd config must
+        // saturate rather than panic a debug build's overflow check.
+        let home = child_home(u64::MAX, None);
+        let (snapshot, calls) = run_child(home.path(), 1_000, |_| body(FULL_BODY));
+        assert_eq!(calls, [USAGE_URL, PROFILE_URL]);
+        assert!(snapshot.is_some());
     }
 
     #[test]

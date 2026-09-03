@@ -268,7 +268,11 @@ fn cache_key(base_url: &str) -> String {
     let Some((scheme, rest)) = base_url.split_once("://") else {
         return base_url.to_string();
     };
-    let (authority, tail) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+    // The authority ends at the first path, query, or fragment delimiter; an '@' past that
+    // point belongs to the request, not to userinfo, and must not be cut out.
+    let (authority, tail) = rest
+        .find(['/', '?', '#'])
+        .map_or((rest, ""), |i| rest.split_at(i));
     match authority.rsplit_once('@') {
         Some((_, host)) => format!("{scheme}://{host}{tail}"),
         None => base_url.to_string(),
@@ -969,6 +973,20 @@ mod tests {
             "the removal must strip it too"
         );
         assert!(cache.is_empty());
+
+        // An '@' past the authority belongs to the request, not to userinfo: cutting the
+        // authority at the first '/', '?', or '#' keeps it out of the strip.
+        let query = "http://host?t=a@b";
+        note_failure(&mut cache, query, 0, NEGATIVE_CACHE_S);
+        assert!(
+            cache.contains_key(query),
+            "a query-string '@' must not be read as userinfo: {cache:?}"
+        );
+
+        // A plain URL with no userinfo at all is used as its own key, unchanged.
+        let plain = "http://proxy.example.com";
+        note_failure(&mut cache, plain, 0, NEGATIVE_CACHE_S);
+        assert!(cache.contains_key(plain), "{cache:?}");
     }
 
     #[test]
