@@ -1949,6 +1949,27 @@ fn native_usage_line_renders_from_a_snapshot_alone() {
     assert!(line.contains("7d:33%"), "usage line: {line}");
 }
 
+/// A fetched profile opens the line on its own: the account and plan chips render, and no
+/// window chip follows them, because neither the payload nor the snapshot carries one.
+#[test]
+fn profile_only_snapshot_renders_the_account_chips() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "fetched@example.com", "plan": "max", "tier": "default_claude_max_20x"}"#,
+            "{}",
+        )),
+    );
+    let out = run_statusline("{}", "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.contains('\u{2301}'))
+        .unwrap_or_else(|| panic!("no usage line in stdout: {stdout}"));
+    assert_eq!(line, "\u{2301} fetched@example.com \u{2502} Max 20x");
+}
+
 #[test]
 fn native_usage_line_without_rate_limits_or_a_snapshot_stays_hidden() {
     let home = native_home(0, None);
