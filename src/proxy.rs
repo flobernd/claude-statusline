@@ -141,6 +141,38 @@ pub fn parse_status(body: &str) -> Option<ProxyStatus> {
     Some(status)
 }
 
+/// What the route answered. `UnknownSession` is the plugin's own 404 for a session it has not
+/// seen a request from yet; a transport error, the budget, every other status, and a 2xx
+/// without the schema are `Failed`.
+pub enum RouteResult {
+    /// `Status` carries the response body, which the child stores as parsed JSON for the
+    /// render tick to re-check on read.
+    Status(String),
+    UnknownSession,
+    Failed,
+}
+
+/// The plugin's 404 body, as opposed to the host's own 404 for a route that does not exist.
+fn is_unknown_session(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error")?.as_str().map(|e| e == "unknown_session"))
+        .unwrap_or(false)
+}
+
+/// The classification of a response, apart from the network so a test can drive it with a
+/// status and a body.
+pub(crate) fn classify(status: u16, body: &str) -> RouteResult {
+    match status {
+        200..=299 => match parse_status(body) {
+            Some(_) => RouteResult::Status(body.to_string()),
+            None => RouteResult::Failed,
+        },
+        404 if is_unknown_session(body) => RouteResult::UnknownSession,
+        _ => RouteResult::Failed,
+    }
+}
+
 /// A window whose reset has passed is dropped, as Claude Code drops stale payload windows;
 /// spend is built by `usage::spend_from_parts`, the same amounts-first rule the native endpoint
 /// uses.
@@ -348,18 +380,20 @@ fn try_fetch(session_id: &str) -> Option<()> {
         sweep_sessions(dir);
     }
     let url = status_url(&base, session_id)?;
+    let mut next = new_attempt(&base, now);
     match fetch_status(&url) {
-        Some(body) => {
-            let mut next = new_attempt(&base, now);
+        RouteResult::Status(body) => {
             next.fetched_at_ms = Some(now_ms());
             next.status = serde_json::from_str(&body).ok();
             crate::usage::write_json_atomic(&path, &next)?;
             Some(())
         }
-        // No usable answer, whether the gateway rejected the request or never answered: the
-        // attempt is stamped anyway so the next tick waits out the interval instead of asking
-        // again at once.
-        None => {
+        // The plugin answered and knows nothing of the session, so nothing about it is worth
+        // keeping: no status is stored and the next tick hides the line.
+        RouteResult::UnknownSession => crate::usage::write_json_atomic(&path, &next),
+        // No answer worth keeping: the attempt is stamped with the previous answer riding
+        // along, so the next tick waits out the interval instead of asking again at once.
+        RouteResult::Failed => {
             let failed = carried_attempt(previous.as_ref(), &base, now);
             crate::usage::write_json_atomic(&path, &failed)
         }
@@ -409,9 +443,8 @@ pub fn remove_session_caches() {
 /// The only network touchpoint, kept separate so no test can reach it. It runs in the detached
 /// child on the usage fetch's budget; nothing renders on it. ureq's timeouts do not cover DNS
 /// resolution, so the request runs on its own thread and the total budget is enforced by
-/// `recv_timeout`, which bounds a stuck resolver too. The answer is returned as the response
-/// body, which the child stores as parsed JSON for the render tick to re-check on read.
-pub fn fetch_status(url: &str) -> Option<String> {
+/// `recv_timeout`, which bounds a stuck resolver too.
+pub fn fetch_status(url: &str) -> RouteResult {
     let total = crate::usage::fetch_timeout();
     let url = url.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -420,15 +453,18 @@ pub fn fetch_status(url: &str) -> Option<String> {
             .timeout_connect(total)
             .timeout(total)
             .build();
-        let body = agent
-            .get(&url)
-            .call()
-            .ok()
-            .and_then(|resp| resp.into_string().ok())
-            .filter(|body| parse_status(body).is_some());
-        let _ = tx.send(body);
+        let result = match agent.get(&url).call() {
+            Ok(response) | Err(ureq::Error::Status(_, response)) => {
+                let status = response.status();
+                response
+                    .into_string()
+                    .map_or(RouteResult::Failed, |body| classify(status, &body))
+            }
+            Err(ureq::Error::Transport(_)) => RouteResult::Failed,
+        };
+        let _ = tx.send(result);
     });
-    rx.recv_timeout(total).ok().flatten()
+    rx.recv_timeout(total).unwrap_or(RouteResult::Failed)
 }
 
 #[cfg(test)]
@@ -699,6 +735,34 @@ mod tests {
         // A model without a usable id, absent or blank, is skipped, so the last model is the
         // first usable one.
         assert_eq!(account.last_model(), Some("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn classify_separates_the_plugin_404_from_every_other_failure() {
+        let good = r#"{"schema":1,"accounts":[{"email":"biz@example.com"}]}"#;
+        assert!(matches!(classify(200, good), RouteResult::Status(body) if body == good));
+        assert!(matches!(
+            classify(404, r#"{"error":"unknown_session"}"#),
+            RouteResult::UnknownSession
+        ));
+        assert!(matches!(
+            classify(404, r#" {"error": "unknown_session", "id": "x"} "#),
+            RouteResult::UnknownSession
+        ));
+        for (status, body) in [
+            (200, r#"{"account":{}}"#),
+            (200, r#"{"schema":1,"accounts":[]}"#),
+            (200, "nope"),
+            (404, "404 page not found"),
+            (404, r#"{"error":"not_found"}"#),
+            (500, r#"{"error":"unknown_session"}"#),
+            (503, ""),
+        ] {
+            assert!(
+                matches!(classify(status, body), RouteResult::Failed),
+                "{status} {body:?} must fail"
+            );
+        }
     }
 
     #[test]
