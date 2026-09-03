@@ -2039,3 +2039,43 @@ fn disabled_fetch_removes_the_usage_cache_behind_a_custom_endpoint() {
     assert!(!line.contains("7d:"), "usage line: {line}");
     assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
 }
+
+/// Without the proxy flag a custom endpoint has no route to ask, and the local login's cache
+/// still describes some other account than the one that endpoint serves, so the tick neither
+/// reads the cache nor rewrites it.
+#[test]
+fn custom_base_url_without_the_proxy_flag_leaves_the_cache_alone() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "fetched@example.com", "plan": "max"}"#,
+            FETCHED_UTILIZATION,
+        )),
+    );
+    // A closed loopback port: no request may go out, and one that did would fail at once
+    // instead of reaching a service on this machine.
+    let base = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{addr}")
+    };
+    let before = std::fs::read(usage_cache(home.path())).unwrap();
+    let out = run_statusline_with_env(
+        NATIVE_PAYLOAD,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_BASE_URL", base.as_str())],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = usage_line(&stdout);
+    assert!(line.starts_with("\u{2301} 5h:42%"), "usage line: {line}");
+    assert!(!line.contains("7d:"), "usage line: {line}");
+    assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
+    assert_eq!(
+        std::fs::read(usage_cache(home.path())).unwrap(),
+        before,
+        "a custom endpoint must not touch the local login's cache"
+    );
+}
