@@ -304,7 +304,13 @@ fn render(raw: &str) -> Option<String> {
                     })
                     .collect(),
                 None => {
-                    usage::spawn_fetch_if_stale(&config);
+                    // The cache belongs to the fetch: with the fetch off it
+                    // would show numbers that never refresh again.
+                    if config.usage_fetch_interval_seconds == 0 {
+                        usage::remove_cache();
+                    } else {
+                        usage::spawn_fetch_if_stale(&config);
+                    }
                     let snapshot = usage::cache_path()
                         .and_then(|p| usage::load_snapshot(&p, account.account_uuid.as_deref()));
                     let limits = usage::merge(
@@ -333,6 +339,9 @@ fn render(raw: &str) -> Option<String> {
             Vec::new()
         }
     } else {
+        // With the line off, a cache from an earlier opt-in would only go
+        // stale on disk.
+        usage::remove_cache();
         proxy::remove_session_caches();
         Vec::new()
     };

@@ -245,14 +245,24 @@ fn is_official_url(url: &str) -> bool {
 }
 
 /// A snapshot taken under a different account must read as absent so a
-/// /login switch never shows another account's numbers.
+/// /login switch never shows another account's numbers. The file goes with
+/// it, so those numbers do not sit on disk until the next child run either.
 pub fn load_snapshot(path: &Path, current_uuid: Option<&str>) -> Option<Snapshot> {
     let text = std::fs::read_to_string(path).ok()?;
     let snapshot: Snapshot = serde_json::from_str(&text).ok()?;
     if snapshot.account_uuid.as_deref() != current_uuid {
+        let _ = std::fs::remove_file(path);
         return None;
     }
     Some(snapshot)
+}
+
+/// Every error is ignored: a missing file is the common case, and a render
+/// tick can do nothing about a file it cannot unlink.
+pub fn remove_cache() {
+    if let Some(path) = cache_path() {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[derive(Debug)]
@@ -926,9 +936,12 @@ mod tests {
             Some(42.0)
         );
 
-        assert!(load_snapshot(&path, Some("u-2")).is_none());
-        assert!(load_snapshot(&path, None).is_none());
         assert!(load_snapshot(&dir.path().join("missing.json"), Some("u-1")).is_none());
+        assert!(load_snapshot(&path, Some("u-2")).is_none());
+        assert!(!path.exists(), "another account's snapshot is removed");
+        write_json_atomic(&path, &snapshot).unwrap();
+        assert!(load_snapshot(&path, None).is_none());
+        assert!(!path.exists());
     }
 
     #[test]

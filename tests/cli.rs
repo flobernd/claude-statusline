@@ -1560,13 +1560,15 @@ fn line3_drop_order_keeps_the_session_window() {
     );
 }
 
-fn native_home(snapshot: Option<&str>) -> tempfile::TempDir {
+fn native_home(interval_s: u64, snapshot: Option<&str>) -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let dir = home.path().join(".claude");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("claude-statusline.json"),
-        r#"{"advanced_usage_limits_enabled": true, "usage_fetch_interval_seconds": 0}"#,
+        format!(
+            r#"{{"advanced_usage_limits_enabled": true, "usage_fetch_interval_seconds": {interval_s}}}"#
+        ),
     )
     .unwrap();
     std::fs::write(
@@ -1584,9 +1586,28 @@ fn native_home(snapshot: Option<&str>) -> tempfile::TempDir {
 const NATIVE_PAYLOAD: &str =
     r#"{"rate_limits": {"five_hour": {"used_percentage": 42, "resets_at": 4102444800}}}"#;
 
+fn usage_cache(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".claude").join("claude-statusline-usage.json")
+}
+
+/// A snapshot whose next-at stamps sit a day ahead, so the render tick under test never
+/// spawns a fetch child and the file stays exactly as seeded.
+fn parked_snapshot(account_uuid: &str, email: &str) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let tomorrow = now + 86_400_000;
+    format!(
+        r#"{{"fetched_at_ms": {now}, "account_uuid": {account_uuid:?}, "utilization": {{}},
+            "profile": {{"email": {email:?}, "plan": "team"}}, "profile_fetched_at_ms": {now},
+            "usage_next_at_ms": {tomorrow}, "profile_next_at_ms": {tomorrow}}}"#
+    )
+}
+
 #[test]
 fn native_usage_line_shows_the_local_email_without_a_snapshot() {
-    let home = native_home(None);
+    let home = native_home(0, None);
     let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("local@example.com"), "stdout: {stdout}");
@@ -1596,18 +1617,55 @@ fn native_usage_line_shows_the_local_email_without_a_snapshot() {
 
 #[test]
 fn native_usage_line_prefers_the_snapshot_profile() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let snapshot = format!(
-        r#"{{"fetched_at_ms": {now}, "account_uuid": "acct-1", "utilization": {{}},
-            "profile": {{"email": "fetched@example.com", "plan": "team"}}, "profile_fetched_at_ms": {now}}}"#
-    );
-    let home = native_home(Some(&snapshot));
+    let home = native_home(60, Some(&parked_snapshot("acct-1", "fetched@example.com")));
     let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("fetched@example.com"), "stdout: {stdout}");
     assert!(stdout.contains("Team"), "stdout: {stdout}");
     assert!(!stdout.contains("local@example.com"), "stdout: {stdout}");
+    assert!(
+        usage_cache(home.path()).exists(),
+        "a matching snapshot stays on disk"
+    );
+}
+
+#[test]
+fn account_switch_removes_the_usage_cache() {
+    let home = native_home(60, Some(&parked_snapshot("acct-2", "other@example.com")));
+    let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !usage_cache(home.path()).exists(),
+        "another account's snapshot must go"
+    );
+    assert!(stdout.contains("local@example.com"), "stdout: {stdout}");
+    assert!(!stdout.contains("other@example.com"), "stdout: {stdout}");
+}
+
+#[test]
+fn disabled_fetch_removes_the_usage_cache() {
+    let home = native_home(0, Some(&parked_snapshot("acct-1", "fetched@example.com")));
+    let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !usage_cache(home.path()).exists(),
+        "interval 0 drops the cache"
+    );
+    assert!(stdout.contains("local@example.com"), "stdout: {stdout}");
+    assert!(stdout.contains("5h:42%"), "stdout: {stdout}");
+    assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
+}
+
+#[test]
+fn disabled_line_removes_the_usage_cache() {
+    let home = native_home(60, Some(&parked_snapshot("acct-1", "fetched@example.com")));
+    std::fs::write(
+        home.path().join(".claude").join("claude-statusline.json"),
+        r#"{"advanced_usage_limits_enabled": false}"#,
+    )
+    .unwrap();
+    let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!usage_cache(home.path()).exists(), "the line is off");
+    assert!(!stdout.contains("5h:"), "stdout: {stdout}");
 }
