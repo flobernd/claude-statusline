@@ -447,26 +447,6 @@ fn next_month_start(now_epoch_s: i64) -> Option<i64> {
         .map(|dt| dt.timestamp())
 }
 
-/// Pure staleness decision shared by the render-side spawn and the fetch
-/// child's stampede re-check; interval 0 always reads as "not due".
-pub(crate) fn fetch_due(interval_s: u64, fetched_at_ms: Option<u64>, now_ms: u64) -> bool {
-    if interval_s == 0 {
-        return false;
-    }
-    match fetched_at_ms {
-        Some(at) => now_ms.saturating_sub(at) >= interval_s.saturating_mul(1_000),
-        None => true,
-    }
-}
-
-/// Staleness needs only fetched_at_ms; a corrupt cache then simply reads
-/// as stale instead of dragging the full schema into the render path.
-pub(crate) fn read_fetched_at_ms(path: &Path) -> Option<u64> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    value.get("fetched_at_ms")?.as_u64()
-}
-
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1047,7 +1027,6 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let parsed: Snapshot = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed.fetched_at_ms, 2);
-        assert_eq!(read_fetched_at_ms(&path), Some(2));
         assert_eq!(read_next_at_ms(&path), (Some(3), None));
     }
 
@@ -1174,17 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn staleness_decision_at_the_interval_boundary() {
-        assert!(fetch_due(60, None, 0), "missing cache is always stale");
-        assert!(!fetch_due(60, Some(1_000), 60_999));
-        assert!(fetch_due(60, Some(1_000), 61_000));
-        // A cache stamped in the future (clock skew) reads as fresh.
-        assert!(!fetch_due(60, Some(10_000), 5_000));
-    }
-
-    #[test]
     fn interval_zero_short_circuits_fetching() {
-        assert!(!fetch_due(0, None, 1_000_000));
         let config = Config {
             usage_fetch_interval_seconds: 0,
             ..Config::default()

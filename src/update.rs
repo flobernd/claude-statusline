@@ -96,9 +96,29 @@ const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/flobernd/claude-statusline/releases/latest";
 
 /// The config unit is minutes because sub-minute update checks are never
-/// sensible; the shared staleness helper speaks seconds.
+/// sensible; the staleness helper speaks seconds.
 fn interval_seconds(config: &Config) -> u64 {
     config.update_check_interval_minutes.saturating_mul(60)
+}
+
+/// Pure staleness decision shared by the render-side spawn and the fetch
+/// child's stampede re-check; interval 0 always reads as "not due".
+fn fetch_due(interval_s: u64, fetched_at_ms: Option<u64>, now_ms: u64) -> bool {
+    if interval_s == 0 {
+        return false;
+    }
+    match fetched_at_ms {
+        Some(at) => now_ms.saturating_sub(at) >= interval_s.saturating_mul(1_000),
+        None => true,
+    }
+}
+
+/// Staleness needs only fetched_at_ms; a corrupt cache then simply reads
+/// as stale instead of dragging the full schema into the render path.
+fn read_fetched_at_ms(path: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("fetched_at_ms")?.as_u64()
 }
 
 pub fn spawn_check_if_stale(config: &Config) {
@@ -109,9 +129,9 @@ pub fn spawn_check_if_stale(config: &Config) {
     let Some(path) = cache_path() else {
         return;
     };
-    if !usage::fetch_due(
+    if !fetch_due(
         interval_seconds(config),
-        usage::read_fetched_at_ms(&path),
+        read_fetched_at_ms(&path),
         usage::now_ms(),
     ) {
         return;
@@ -153,9 +173,9 @@ fn try_fetch() -> Option<()> {
     let path = cache_path()?;
     // Re-checking staleness doubles as stampede protection when several
     // render ticks spawn children before the first snapshot lands.
-    if !usage::fetch_due(
+    if !fetch_due(
         interval_seconds(&config),
-        usage::read_fetched_at_ms(&path),
+        read_fetched_at_ms(&path),
         usage::now_ms(),
     ) {
         return None;
@@ -282,11 +302,29 @@ mod tests {
         assert_eq!(loaded.fetched_at_ms, 1);
         assert_eq!(loaded.latest_version.as_deref(), Some("0.2.0"));
         assert_eq!(loaded.release_url.as_deref(), Some("https://example.com/r"));
+        assert_eq!(read_fetched_at_ms(&path), Some(1));
         assert!(load_snapshot(&dir.path().join("missing.json")).is_none());
+        assert_eq!(read_fetched_at_ms(&dir.path().join("missing.json")), None);
+        std::fs::write(&path, "{broken").unwrap();
+        assert_eq!(
+            read_fetched_at_ms(&path),
+            None,
+            "a corrupt cache reads as stale"
+        );
+    }
+
+    #[test]
+    fn staleness_decision_at_the_interval_boundary() {
+        assert!(fetch_due(60, None, 0), "missing cache is always stale");
+        assert!(!fetch_due(60, Some(1_000), 60_999));
+        assert!(fetch_due(60, Some(1_000), 61_000));
+        // A cache stamped in the future (clock skew) reads as fresh.
+        assert!(!fetch_due(60, Some(10_000), 5_000));
     }
 
     #[test]
     fn interval_zero_short_circuits_checking() {
+        assert!(!fetch_due(0, None, 1_000_000));
         let config = schema::Config::default();
         assert_eq!(config.update_check_interval_minutes, 0);
         // Must return without touching the cache file or spawning.
