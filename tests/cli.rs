@@ -1414,3 +1414,43 @@ fn proxy_route_is_off_on_the_official_endpoint() {
     );
     assert!(!stdout.contains("biz@example.com"), "stdout: {stdout}");
 }
+
+/// The usage line is the one that carries the session window. Its index is not fixed: the
+/// first line holds the model, and an empty second line is omitted rather than printed blank.
+fn usage_line(stdout: &str) -> &str {
+    stdout
+        .lines()
+        .find(|line| line.contains("5h:"))
+        .unwrap_or_else(|| panic!("no usage line in stdout: {stdout}"))
+}
+
+#[test]
+fn disabled_account_chip_keeps_the_line_glyph() {
+    let home = proxy_home(true);
+    std::fs::write(
+        home.path().join(".claude").join("claude-statusline.json"),
+        r#"{"advanced_usage_limits_enabled": true, "cli_proxy_usage_enabled": true,
+            "cli_proxy_usage_refresh_seconds": 3600, "disabled_sections": ["usage_account"],
+            "usage_fetch_interval_seconds": 0}"#,
+    )
+    .unwrap();
+    let (base, served) = serve_once(PROXY_BODY);
+    fetch_proxy(home.path(), &base);
+    assert!(
+        served.join().unwrap().is_some(),
+        "the responder saw no request"
+    );
+    let out = run_statusline_with_env(
+        PROXY_PAYLOAD,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_BASE_URL", &base)],
+    );
+    let line = usage_line(&String::from_utf8_lossy(&out.stdout)).to_string();
+    assert!(
+        line.starts_with("\u{2301} Max \u{2502} 5h:6%"),
+        "usage line: {line}"
+    );
+    assert!(!line.contains("biz@example.com"), "usage line: {line}");
+    assert!(line.contains("7d:41%"), "usage line: {line}");
+}

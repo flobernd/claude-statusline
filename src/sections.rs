@@ -304,12 +304,19 @@ pub fn line3(
         // Shown whole: shortening the id would hide the alias suffix that tells a 1M session apart.
         out.push(("usage_model", s.paint(model, MAGENTA)));
     }
-    // The glyph marks the line, not a specific chip, so it rides on
-    // whichever chip happens to render first.
-    if let Some(first) = out.first_mut() {
+    out
+}
+
+/// Prefix the line glyph to the first chip. The glyph marks the line, not a chip, so it must ride
+/// on whichever chip survives the filter and the fit.
+pub fn with_line_glyph(
+    mut chips: Vec<(&'static str, String)>,
+    s: &Style,
+) -> Vec<(&'static str, String)> {
+    if let Some(first) = chips.first_mut() {
         first.1 = format!("{}{}", s.paint("\u{2301} ", COMMENT), first.1);
     }
-    out
+    chips
 }
 
 fn window_chip(s: &Style, label: &str, w: &crate::usage::Window, now_epoch_s: i64) -> String {
@@ -487,18 +494,19 @@ fn sample_limits() -> crate::usage::Limits {
 /// must not advertise a line that is off by default.
 pub fn usage_preview(style: &Style) -> String {
     let sep = style.paint(" \u{2502} ", COMMENT);
-    line3(
+    let chips = line3(
         &sample_limits(),
         Some("max"),
         None,
         None,
         style,
         USAGE_SAMPLE_NOW_S,
-    )
-    .into_iter()
-    .map(|(_, r)| r)
-    .collect::<Vec<_>>()
-    .join(&sep)
+    );
+    with_line_glyph(chips, style)
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect::<Vec<_>>()
+        .join(&sep)
 }
 
 #[cfg(test)]
@@ -957,7 +965,7 @@ mod tests {
             names(&chips),
             vec!["usage_session", "usage_week", "usage_fable", "usage_spend"]
         );
-        assert_eq!(text_of(&chips, "usage_session"), "\u{2301} 5h:42% (2h10m)");
+        assert_eq!(text_of(&chips, "usage_session"), "5h:42% (2h10m)");
         assert_eq!(text_of(&chips, "usage_week"), "7d:63% (3d)");
         assert_eq!(text_of(&chips, "usage_fable"), "fable:81% (5d)");
         assert_eq!(
@@ -967,25 +975,50 @@ mod tests {
     }
 
     #[test]
-    fn line3_glyph_moves_to_the_first_present_chip() {
+    fn line3_returns_bare_chips() {
         let limits = crate::usage::Limits {
             week: Some(window(63.0, None)),
             ..crate::usage::Limits::default()
         };
         let chips = line3(&limits, None, None, None, &PLAIN, USAGE_NOW_S);
         assert_eq!(names(&chips), vec!["usage_week"]);
-        assert_eq!(chips[0].1, "\u{2301} 7d:63%");
+        assert_eq!(chips[0].1, "7d:63%");
     }
 
     #[test]
-    fn plan_chip_renders_first_and_carries_the_glyph() {
+    fn with_line_glyph_prefixes_the_first_chip_only() {
+        let chips = with_line_glyph(
+            vec![
+                ("usage_plan", "Max".to_string()),
+                ("usage_session", "5h:42%".to_string()),
+            ],
+            &PLAIN,
+        );
+        assert_eq!(chips[0].1, "\u{2301} Max");
+        assert_eq!(chips[1].1, "5h:42%");
+
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
+        let chips = with_line_glyph(vec![("usage_session", "5h:42%".to_string())], &colored);
+        assert_eq!(chips[0].1, "\x1b[38;2;86;95;137m\u{2301} \x1b[0m5h:42%");
+    }
+
+    #[test]
+    fn with_line_glyph_leaves_an_empty_vector_alone() {
+        assert!(with_line_glyph(Vec::new(), &PLAIN).is_empty());
+    }
+
+    #[test]
+    fn plan_chip_renders_first_and_title_cased() {
         let limits = crate::usage::Limits {
             session: Some(window(42.0, None)),
             ..crate::usage::Limits::default()
         };
         let chips = line3(&limits, Some("max"), None, None, &PLAIN, USAGE_NOW_S);
         assert_eq!(names(&chips), vec!["usage_plan", "usage_session"]);
-        assert_eq!(chips[0].1, "\u{2301} Max");
+        assert_eq!(chips[0].1, "Max");
         assert_eq!(chips[1].1, "5h:42%");
 
         let colored = Style {
@@ -1031,7 +1064,7 @@ mod tests {
             ..crate::usage::Limits::default()
         };
         let chips = line3(&limits, None, None, None, &PLAIN, USAGE_NOW_S);
-        assert_eq!(text_of(&chips, "usage_session"), "\u{2301} 5h:42%");
+        assert_eq!(text_of(&chips, "usage_session"), "5h:42%");
         assert_eq!(text_of(&chips, "usage_week"), "7d:63%");
         assert_eq!(text_of(&chips, "usage_fable"), "fable:81%");
     }
@@ -1048,7 +1081,7 @@ mod tests {
             ..crate::usage::Limits::default()
         };
         let chips = line3(&limits, None, None, None, &PLAIN, USAGE_NOW_S);
-        assert_eq!(chips[0].1, "\u{2301} spend:37%");
+        assert_eq!(chips[0].1, "spend:37%");
     }
 
     #[test]
@@ -1079,8 +1112,7 @@ mod tests {
         let chips = line3(&limits, None, None, None, &colored, USAGE_NOW_S);
         assert_eq!(
             text_of(&chips, "usage_session"),
-            "\x1b[38;2;86;95;137m\u{2301} \x1b[0m\
-             \x1b[38;2;86;95;137m5h:\x1b[0m\
+            "\x1b[38;2;86;95;137m5h:\x1b[0m\
              \x1b[38;2;158;206;106m42%\x1b[0m"
         );
         assert!(text_of(&chips, "usage_week").contains("\x1b[38;2;247;118;142m90%\x1b[0m"));
@@ -1131,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn account_chip_renders_first_and_carries_the_glyph() {
+    fn account_chip_renders_first() {
         let limits = crate::usage::Limits {
             session: Some(window(42.0, None)),
             ..crate::usage::Limits::default()
@@ -1148,7 +1180,7 @@ mod tests {
             names(&chips),
             vec!["usage_account", "usage_plan", "usage_session"]
         );
-        assert_eq!(chips[0].1, "\u{2301} biz@example.com");
+        assert_eq!(chips[0].1, "biz@example.com");
         assert_eq!(chips[1].1, "Max");
     }
 
@@ -1160,7 +1192,7 @@ mod tests {
         };
         let long = "abcdefghijklmnopqrstuvwxyz0123456789@example.com";
         let chips = line3(&limits, None, Some(long), None, &PLAIN, USAGE_NOW_S);
-        assert_eq!(chips[0].1, format!("\u{2301} {}", &long[..32]));
+        assert_eq!(chips[0].1, &long[..32]);
         let chips = line3(&limits, None, Some("  "), None, &PLAIN, USAGE_NOW_S);
         assert_eq!(names(&chips), vec!["usage_session"]);
     }

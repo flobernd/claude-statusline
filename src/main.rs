@@ -80,6 +80,9 @@ const LINE3_DROP: &[&str] = &[
     "usage_session",
 ];
 const SEP: &str = " \u{2502} ";
+// The usage line glyph is attached after the fit, so the fit must leave its
+// two columns free.
+const GLYPH_WIDTH: usize = 2;
 
 fn main() {
     let cli = Cli::parse();
@@ -231,23 +234,32 @@ fn render(raw: &str) -> Option<String> {
     let sep_width = fit::visible_width(&sep);
 
     let disabled = &config.disabled_sections;
-    let compose = |chips: Vec<(&'static str, String)>, drop: &[&str]| -> Option<String> {
-        let chips: Vec<(&'static str, String)> = chips
-            .into_iter()
-            .filter(|(name, _)| !disabled.iter().any(|d| d == name))
-            .collect();
-        let fitted = fit::fit_line(chips, sep_width, width, drop);
-        if fitted.is_empty() {
-            return None;
-        }
-        Some(
-            fitted
+    let compose =
+        |chips: Vec<(&'static str, String)>, drop: &[&str], glyph: bool| -> Option<String> {
+            let chips: Vec<(&'static str, String)> = chips
                 .into_iter()
-                .map(|(_, r)| r)
-                .collect::<Vec<_>>()
-                .join(&sep),
-        )
-    };
+                .filter(|(name, _)| !disabled.iter().any(|d| d == name))
+                .collect();
+            let max_width = if glyph { width - GLYPH_WIDTH } else { width };
+            let fitted = fit::fit_line(chips, sep_width, max_width, drop);
+            if fitted.is_empty() {
+                return None;
+            }
+            // The glyph marks the line, not a chip, so it is attached only now,
+            // to whichever chip the filter and the fit left first.
+            let fitted = if glyph {
+                sections::with_line_glyph(fitted, &style)
+            } else {
+                fitted
+            };
+            Some(
+                fitted
+                    .into_iter()
+                    .map(|(_, r)| r)
+                    .collect::<Vec<_>>()
+                    .join(&sep),
+            )
+        };
 
     // The flag check comes first so the default path never pays the extra
     // ~/.claude.json read on a render tick.
@@ -285,6 +297,7 @@ fn render(raw: &str) -> Option<String> {
                                 now_epoch_s,
                             ),
                             LINE3_DROP,
+                            true,
                         )
                     })
                     .collect(),
@@ -305,6 +318,7 @@ fn render(raw: &str) -> Option<String> {
                     compose(
                         sections::line3(&limits, plan.as_deref(), None, None, &style, now_epoch_s),
                         LINE3_DROP,
+                        true,
                     )
                     .into_iter()
                     .collect()
@@ -334,8 +348,8 @@ fn render(raw: &str) -> Option<String> {
     }
 
     let lines: Vec<String> = [
-        compose(line1_chips, LINE1_DROP),
-        compose(sections::line2(&ctx), LINE2_DROP),
+        compose(line1_chips, LINE1_DROP, false),
+        compose(sections::line2(&ctx), LINE2_DROP, false),
     ]
     .into_iter()
     .flatten()
@@ -487,6 +501,16 @@ mod tests {
             &custom,
             false
         ));
+    }
+
+    #[test]
+    fn glyph_width_matches_the_painted_glyph() {
+        let style = theme::Style {
+            colors: true,
+            links: false,
+        };
+        let chips = sections::with_line_glyph(vec![("usage_session", String::new())], &style);
+        assert_eq!(fit::visible_width(&chips[0].1), GLYPH_WIDTH);
     }
 
     #[test]
