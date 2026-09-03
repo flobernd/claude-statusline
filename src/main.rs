@@ -303,6 +303,20 @@ fn render(raw: &str) -> Option<String> {
                         )
                     })
                     .collect(),
+                None if config.cli_proxy_usage_enabled && endpoint.custom_base_url().is_some() => {
+                    // The route answered nothing this tick, but the session is still a
+                    // proxied one: the local login is not the account behind the proxy, so
+                    // the payload windows are all that may render, and the local cache and
+                    // fetch child stay untouched.
+                    let limits = usage::merge(payload.rate_limits.as_ref(), None, now_epoch_s);
+                    compose(
+                        sections::line3(&limits, None, None, None, &style, now_epoch_s),
+                        LINE3_DROP,
+                        true,
+                    )
+                    .into_iter()
+                    .collect()
+                }
                 None => {
                     // The cache belongs to the fetch: with the fetch off it
                     // would show numbers that never refresh again.

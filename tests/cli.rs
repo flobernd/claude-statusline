@@ -1588,6 +1588,54 @@ fn unknown_session_is_polled_on_the_interval() {
     );
 }
 
+/// A proxied session whose route gave no status must not fall back to the local login: the
+/// local token belongs to whichever account is logged in locally, not to the credential the
+/// proxy picked, so neither the local snapshot nor its account may backfill anything here.
+#[test]
+fn proxy_route_failure_never_falls_back_to_the_local_login() {
+    let home = proxy_home(true);
+    // A live fetch interval, so the surviving cache proves the proxied path left it alone
+    // rather than that a disabled fetch had already removed it.
+    std::fs::write(
+        home.path().join(".claude").join("claude-statusline.json"),
+        r#"{"advanced_usage_limits_enabled": true, "cli_proxy_usage_enabled": true,
+            "cli_proxy_usage_refresh_seconds": 3600, "usage_fetch_interval_seconds": 60}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join(".claude.json"),
+        r#"{"oauthAccount": {"organizationType": "claude_max", "accountUuid": "acct-1",
+            "emailAddress": "local@example.com"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.path()
+            .join(".claude")
+            .join("claude-statusline-usage.json"),
+        parked_snapshot("acct-1", "fetched@example.com"),
+    )
+    .unwrap();
+    let (base, served) = serve("404 Not Found", "404 page not found", 1);
+    let payload = r#"{"session_id": "11111111-2222-4333-8444-555555555555",
+        "rate_limits": {"five_hour": {"used_percentage": 42, "resets_at": 4102444800}}}"#;
+    fetch_proxy(home.path(), &base);
+    let out = run_statusline_with_env(
+        payload,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_BASE_URL", base.as_str())],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(served.join().unwrap().len(), 1, "the route is asked once");
+    assert!(stdout.contains("5h:42%"), "stdout: {stdout}");
+    assert!(!stdout.contains("local@example.com"), "stdout: {stdout}");
+    assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
+    assert!(
+        usage_cache(home.path()).exists(),
+        "a proxied session must not touch the local login's cache"
+    );
+}
+
 /// The usage line is the one that carries the session window. Its index is not fixed: the
 /// first line holds the model, and an empty second line is omitted rather than printed blank.
 fn usage_line(stdout: &str) -> &str {
