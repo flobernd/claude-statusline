@@ -447,13 +447,6 @@ fn next_month_start(now_epoch_s: i64) -> Option<i64> {
         .map(|dt| dt.timestamp())
 }
 
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// A kind is due when its next-at stamp is absent, not in the future, or further ahead than
 /// `max_ahead_ms`: the largest wait the code books for that kind, so a stamp beyond it could
 /// only come from a clock that jumped forward and back, and must not park the poll for days.
@@ -482,7 +475,7 @@ pub fn spawn_fetch_if_stale(config: &Config) {
         return;
     };
     let (usage_next_at_ms, profile_next_at_ms) = read_next_at_ms(&path);
-    let now = now_ms();
+    let now = crate::clock::now_ms();
     // The ceiling is the larger of the kind's own interval and one hour, so a configured
     // interval under an hour still allows a stamp to sit that far out without reading as due.
     let usage_ceiling_ms = config
@@ -598,7 +591,7 @@ fn attempt<T>(
 
 fn try_fetch() -> Option<()> {
     let home = schema::home_dir()?;
-    try_fetch_with(&home, &fetch_json, now_ms())
+    try_fetch_with(&home, &fetch_json, crate::clock::now_ms())
 }
 
 /// The control flow of the child. Each kind runs on its own schedule, usage first, and the
@@ -709,7 +702,7 @@ fn fetch_json(url: &str, token: &str) -> Fetched {
         Err(ureq::Error::Status(_, response)) => Fetched::Failed {
             retry_after: backoff::retry_after(
                 response.header("Retry-After"),
-                (now_ms() / 1_000) as i64,
+                (crate::clock::now_ms() / 1_000) as i64,
             ),
         },
         Err(ureq::Error::Transport(_)) => Fetched::Failed { retry_after: None },

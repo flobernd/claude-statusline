@@ -365,10 +365,7 @@ pub fn render(raw: &str, config: &Config, style: &Style, fallback_width: usize) 
         .filter(|c| (10.0..=4000.0).contains(c))
         .map(|c| c as usize)
         .unwrap_or(fallback_width);
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+    let now_ms = crate::clock::now_ms() as i64;
 
     let session_cwd = payload.cwd.clone().or_else(|| {
         std::env::current_dir()

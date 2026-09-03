@@ -1,5 +1,6 @@
 mod backoff;
 mod bar;
+mod clock;
 mod commands;
 mod fit;
 mod format;
@@ -201,8 +202,10 @@ fn render(raw: &str) -> Option<String> {
     let style = theme::Style::from_env(config.clickable_links);
     let width = terminal_width();
 
-    // A missing working directory only loses the git chips; Line 1 must
-    // still render, so this never aborts the whole pipeline.
+    // With no resolvable directory the git chips simply stay absent, but
+    // Line 1 must still render, so this never aborts the whole pipeline.
+    // A directory that resolves yet no longer exists is handled in
+    // git::collect, which flags it for the red missing-dir rendering.
     let git_dir = payload
         .workspace
         .as_ref()
@@ -217,11 +220,7 @@ fn render(raw: &str) -> Option<String> {
 
     let cache_age_ms = payload.transcript_path.as_deref().and_then(|p| {
         let ts = transcript::last_assistant_timestamp_ms(p)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_millis() as i64;
-        Some(now - ts)
+        Some(clock::now_ms() as i64 - ts)
     });
     let cache_ttl_ms = payload
         .transcript_path
@@ -301,10 +300,7 @@ fn render(raw: &str) -> Option<String> {
             proxy.is_some(),
             snapshot.as_ref(),
         ) {
-            let now_epoch_s = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
+            let now_epoch_s = (clock::now_ms() / 1000) as i64;
             match &proxy {
                 Some(status) => status
                     .accounts
@@ -423,7 +419,7 @@ fn proxy_status(
     let base = endpoint.custom_base_url()?;
     let session_id = payload.session_id.as_deref()?;
     let path = proxy::session_cache_path(session_id)?;
-    let now = proxy::now_ms();
+    let now = clock::now_ms();
     let cache = proxy::load_session_cache(&path);
     if proxy::fetch_due(cache.as_ref(), &base, config.proxy_refresh_seconds(), now) {
         proxy::spawn_fetch_child(session_id);

@@ -1,8 +1,8 @@
 <!-- markdownlint-disable-file MD033 MD041 -->
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
-    <img src="assets/logo-light.png" alt="claude-statusline" width="360">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo-light.svg" alt="claude-statusline" width="360">
   </picture>
 </div>
 
@@ -113,7 +113,8 @@ linger.
 
 With `cli_proxy_usage_enabled` set, a session whose `ANTHROPIC_BASE_URL` points at a
 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance that runs the
-`cpa-claude-statusline` plugin gets the line from that plugin instead. A detached child polls
+[cpa-claude-statusline](https://github.com/flobernd/cpa-claude-statusline) plugin gets the line
+from that plugin instead. A detached child polls
 `<base-url>/v0/resource/plugins/cpa-claude-statusline/session?id=<session-id>` every
 `cli_proxy_usage_refresh_seconds` (default 5, the floor) into
 `~/.claude/claude-statusline-sessions/<session-id>.json`, and each render tick reads that file;
@@ -228,8 +229,8 @@ A negative age, meaning the transcript timestamp sits ahead of the clock, hides 
 
 | Chip           | Coloring                                                                       |
 | -------------- | ------------------------------------------------------------------------------ |
-| `cwd`          | Cyan; renders only outside a git repository                                     |
-| `branch`       | Repo name cyan; the branch green on a default branch, magenta on any other      |
+| `cwd`          | Cyan; renders only outside a git repository. Red when the directory itself no longer exists |
+| `branch`       | Repo name cyan; the branch green on a default branch, magenta on any other. Entirely red when the working directory no longer exists, with the identity taken from the Claude Code worktree payload |
 | `git_files`    | `+added` green, `-removed` red, `~changed` amber                               |
 | `git_stash`    | Amber                                                                          |
 | `git_sync`     | Comment: ahead and behind counts are informational, not a problem               |

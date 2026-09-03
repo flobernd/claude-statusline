@@ -18,14 +18,6 @@ const ROUTE_PATH: &str = "/v0/resource/plugins/cpa-claude-statusline/session";
 /// enforces, since it is the only wait this module books.
 pub const NEGATIVE_CACHE_S: u64 = 5 * 60;
 
-/// Milliseconds since the epoch. A clock set before it reads as 0, which makes every stamp
-/// look due rather than parking the poll.
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
-}
-
 /// The route body. Every field below `schema` parses leniently: a wrong-typed field costs
 /// that field, never the line, and unknown keys are ignored so the plugin can grow the schema.
 #[derive(Debug, Default, Deserialize)]
@@ -259,7 +251,7 @@ pub fn store_negative_cache(path: &Path, cache: &NegativeCache) {
 /// A base URL can carry embedded credentials as userinfo (`user:pass@host`); stripped before
 /// it becomes a file key so a saved credential never lands in
 /// `~/.claude/claude-statusline-proxy.json`.
-fn cache_key(base_url: &str) -> String {
+pub(crate) fn cache_key(base_url: &str) -> String {
     let Some((scheme, rest)) = base_url.split_once("://") else {
         return base_url.to_string();
     };
@@ -465,7 +457,7 @@ fn try_fetch(session_id: &str) -> Option<()> {
     let endpoint = crate::usage::EndpointEnv::from_env();
     let base = endpoint.custom_base_url()?;
     let path = session_cache_path(session_id)?;
-    let now = now_ms();
+    let now = crate::clock::now_ms();
     let previous = load_session_cache(&path);
     // Re-checking the gate doubles as stampede protection when several render ticks spawn
     // children before the first answer lands.
@@ -494,7 +486,7 @@ fn try_fetch(session_id: &str) -> Option<()> {
             if forget_failure(&mut negative, &base) {
                 store_negative_cache(&negative_path, &negative);
             }
-            next.fetched_at_ms = Some(now_ms());
+            next.fetched_at_ms = Some(crate::clock::now_ms());
             next.status = serde_json::from_str(&body).ok();
             crate::usage::write_json_atomic(&path, &next)?;
             Some(())

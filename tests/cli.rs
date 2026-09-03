@@ -38,9 +38,9 @@ fn run_statusline(stdin_data: &str, width: &str, home: &std::path::Path) -> std:
 /// Run the binary with controlled env: NO_COLOR output, fixed width, HOME pointed at a temp dir
 /// so no real config or transcript leaks in. The working directory is also pinned to that temp
 /// dir: without it the child inherits cargo's cwd, this crate's own checkout, and a payload with
-/// no explicit workspace would grow a false line2 branch chip. The endpoint variables are
-/// cleared first so a developer shell that points at a proxy can never leak into a test; `env`
-/// then sets what one test needs.
+/// no explicit workspace would grow a false line2 branch chip. The endpoint variables and the
+/// preview clock override are cleared first so a developer shell that points at a proxy, or a
+/// preview capture, can never leak into a test; `env` then sets what one test needs.
 fn run_statusline_with_env(
     stdin_data: &str,
     width: &str,
@@ -54,6 +54,7 @@ fn run_statusline_with_env(
         .env("CLAUDE_STATUSLINE_WIDTH", width)
         .env("HOME", home)
         .env("USERPROFILE", home)
+        .env_remove("CLAUDE_STATUSLINE_NOW_MS")
         .current_dir(home);
     for var in ENDPOINT_VARS {
         command.env_remove(var);
@@ -228,6 +229,41 @@ fn cache_age_renders_from_transcript_under_home() {
     let out = run_statusline(&payload, "200", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("cache_age:"), "stdout: {stdout}");
+}
+
+#[test]
+fn pinned_clock_renders_exact_cache_age() {
+    let home = tempfile::tempdir().unwrap();
+    let claude = home.path().join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    // 72 s before the pinned now of 2026-07-24T00:00:00Z.
+    std::fs::write(
+        claude.join("t.jsonl"),
+        "{\"type\":\"assistant\",\"timestamp\":\"2026-07-23T23:58:48Z\",\"message\":{\"role\":\"assistant\"}}\n",
+    )
+    .unwrap();
+    let transcript = claude
+        .join("t.jsonl")
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    let payload = format!(
+        r#"{{"model": {{"display_name": "Sonnet 5"}}, "transcript_path": "{transcript}",
+            "context_window": {{"used_percentage": 42, "context_window_size": 200000,
+                "current_usage": {{"input_tokens": 5200, "cache_read_input_tokens": 37200}}}}}}"#
+    );
+    let out = run_statusline_with_env(
+        &payload,
+        "200",
+        home.path(),
+        &[("CLAUDE_STATUSLINE_NOW_MS", "1784851200000")],
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("cache_age:1m12s"),
+        "expected pinned cache age, got: {stdout}"
+    );
 }
 
 fn print_config(settings: Option<&str>) -> (std::process::Output, tempfile::TempDir) {
@@ -2097,4 +2133,23 @@ fn custom_base_url_without_the_proxy_flag_leaves_the_cache_alone() {
         before,
         "a custom endpoint must not touch the local login's cache"
     );
+}
+
+#[test]
+fn missing_workspace_dir_renders_the_red_branch_chip() {
+    let home = tempfile::tempdir().unwrap();
+    let gone = home.path().join("removed-wt");
+    let payload = format!(
+        r#"{{"workspace": {{"current_dir": {dir:?}, "repo": {{"name": "myrepo"}}}},
+            "worktree": {{"name": "wt", "branch": "feat/x"}}}}"#,
+        dir = gone.to_string_lossy()
+    );
+    let out = run_statusline_colored(&payload, home.path());
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("{RED_SEQ}\u{2387} myrepo/feat/x")),
+        "stdout: {stdout}"
+    );
+    assert!(!stdout.contains('\u{2302}'), "stdout: {stdout}");
 }

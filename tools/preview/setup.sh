@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build scratch git states and capture real statusline output for the SVG
 # previews. Everything stays under this folder (out/ and work/, both
-# gitignored). The main captures run against scratch HOME directories so the
+# gitignored). The captures run against scratch HOME directories so the
 # machine's real statusline config, account file, and usage cache can never
 # leak into the previews; the transcript lives inside each scratch HOME
 # because the transcript reader only trusts paths under ~/.claude.
@@ -15,14 +15,31 @@ PHOME=$WORK/home
 UHOME=$WORK/home-usage
 
 rm -rf "$OUT" "$WORK"
-mkdir -p "$OUT" "$PHOME/.claude" "$UHOME/.claude"
+# dev/notes has to exist on disk: the statusline paints a directory that is
+# gone as a dead location, and this capture stands for the healthy chip a
+# plain directory outside any repository gets.
+mkdir -p "$OUT" "$PHOME/.claude" "$PHOME/dev/notes" "$UHOME/.claude"
 
 # Hermetic git so the scratch repos are deterministic and never touch the
 # user's config.
 g() { git -C "$1" -c init.defaultBranch=main -c user.name=dev -c user.email=dev@example.com -c commit.gpgsign=false -c advice.detachedHead=false "${@:2}"; }
 
+# Everything time-dependent runs off one pinned instant, 2026-07-24T00:00:00Z.
+# A fixed date rather than "now" keeps calendar-derived output stable (the
+# spend reset renders the distance to the next 1st of the month), and the
+# binary reads the same instant via CLAUDE_STATUSLINE_NOW_MS, so captures are
+# byte-identical on any machine, any day. TZ is pinned because the spend
+# reset boundary is computed in local time.
+export TZ=UTC
+NOW_S=1784851200
+NOW_MS=$((NOW_S * 1000))
+# Byte-exact regeneration must not depend on machine speed: a slow runner can
+# blow the default git budget and silently drop branch/ahead-behind/worktree
+# chips, capturing wrong SVGs instead of failing loudly.
+export CLAUDE_STATUSLINE_GIT_TIMEOUT_MS=10000
+
 # --- transcripts: one assistant message ~72s ago -> cache_age chip ---------
-TS=$(date -u -d '72 seconds ago' +%Y-%m-%dT%H:%M:%SZ)
+TS=$(date -u -d "@$((NOW_S - 72))" +%Y-%m-%dT%H:%M:%SZ)
 for h in "$PHOME" "$UHOME"; do
   printf '{"type":"assistant","timestamp":"%s","message":{"role":"assistant"}}\n' "$TS" > "$h/.claude/t.jsonl"
 done
@@ -38,9 +55,8 @@ JSON
 cat > "$UHOME/.claude.json" <<'JSON'
 {"oauthAccount": {"accountUuid": "acct-preview"}}
 JSON
-NOW_MS=$(date +%s%3N)
 PARKED_MS=$((NOW_MS + 1800000))
-FABLE_RESET=$(date -u -d '+5 days' +%Y-%m-%dT%H:%M:%SZ)
+FABLE_RESET=$(date -u -d "@$((NOW_S + 432000))" +%Y-%m-%dT%H:%M:%SZ)
 cat > "$UHOME/.claude/claude-statusline-usage.json" <<JSON
 {
   "fetched_at_ms": $NOW_MS,
@@ -123,7 +139,6 @@ JSON
 
 # Session + weekly ride the payload like a live session; fable and spend
 # come from the seeded snapshot in UHOME.
-NOW_S=$(date +%s)
 cat > "$OUT/p-usage.json" <<JSON
 { $(common_line1 "$UHOME"),
   "cwd": "$REPO",
@@ -136,29 +151,32 @@ cat > "$OUT/p-usage.json" <<JSON
 }
 JSON
 
-NOW=$(date +%s%3N)
 cat > "$OUT/p-subagent.json" <<JSON
 {
   "columns": 220,
-  "cwd": "$HOME/workspace/claude-statusline",
+  "cwd": "$REPO",
   "tasks": [
-    {"id":"t1","type":"local_agent","name":"Explore","label":"Searching for callers","startTime": $((NOW-83000)), "model":"claude-sonnet-5","contextWindowSize":200000,"tokenCount":82000},
-    {"id":"t2","type":"local_agent","name":"Plan","label":"Drafting the migration steps","startTime": $((NOW-23000)), "model":"claude-opus-4-8","effort":"high","contextWindowSize":200000,"tokenCount":45000},
-    {"id":"t3","type":"local_agent","name":"Explore","label":"Auditing the hotfix","startTime": $((NOW-41000)), "model":"claude-sonnet-5","contextWindowSize":200000,"tokenCount":58000,"cwd":"$WT"}
+    {"id":"t1","type":"local_agent","name":"Explore","label":"Searching for callers","startTime": $((NOW_MS - 83000)), "model":"claude-sonnet-5","contextWindowSize":200000,"tokenCount":82000},
+    {"id":"t2","type":"local_agent","name":"Plan","label":"Drafting the migration steps","startTime": $((NOW_MS - 23000)), "model":"claude-opus-4-8","effort":"high","contextWindowSize":200000,"tokenCount":45000},
+    {"id":"t3","type":"local_agent","name":"Explore","label":"Auditing the hotfix","startTime": $((NOW_MS - 41000)), "model":"claude-sonnet-5","contextWindowSize":200000,"tokenCount":58000,"cwd":"$WT"}
   ]
 }
 JSON
 
 # --- capture real output --------------------------------------------------
-export FORCE_COLOR=1 CLAUDE_STATUSLINE_WIDTH=220
+# work/ sits inside this repository, so git discovery would climb out of the
+# scratch tree and resolve the captures against claude-statusline itself.
+export GIT_CEILING_DIRECTORIES=$WORK
+export FORCE_COLOR=1 CLAUDE_STATUSLINE_WIDTH=220 CLAUDE_STATUSLINE_NOW_MS=$NOW_MS
 unset NO_COLOR || true
 for v in cwd repo worktree; do
   HOME=$PHOME "$BIN" < "$OUT/p-$v.json" > "$OUT/main-$v.ansi"
 done
 HOME=$UHOME "$BIN" < "$OUT/p-usage.json" > "$OUT/main-usage.ansi"
-# The subagent capture keeps the real HOME: task location chips resolve via
-# git against the session cwd, and t1/t2 point at this repository.
-"$BIN" --subagent-statusline < "$OUT/p-subagent.json" > "$OUT/subagent.ndjson"
+# The subagent capture also runs against scratch state: session cwd and HOME
+# point at the scratch clone and home, so location chips and config never
+# depend on this machine's real checkout or settings.
+HOME=$PHOME "$BIN" --subagent-statusline < "$OUT/p-subagent.json" > "$OUT/subagent.ndjson"
 
 echo "=== main-cwd ===";      cat -v "$OUT/main-cwd.ansi"
 echo "=== main-repo ===";     cat -v "$OUT/main-repo.ansi"
