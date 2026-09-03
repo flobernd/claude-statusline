@@ -268,10 +268,17 @@ fn render(raw: &str) -> Option<String> {
     let usage_rows: Vec<String> = if config.advanced_usage_limits_enabled {
         let endpoint = usage::EndpointEnv::from_env();
         let proxy = proxy_status(&config, &payload, &endpoint);
-        // The local login is the account behind the numbers on the official endpoint only. A
-        // custom endpoint or a bearer token serves some other account, so such a session
-        // neither reads the local cache nor spawns the child, whatever the proxy route said.
-        let snapshot = if endpoint.is_custom() {
+        let snapshot = if config.usage_fetch_interval_seconds == 0 {
+            // The cache belongs to the fetch on every endpoint: with the fetch off it would
+            // show numbers that never refresh again, and a custom endpoint reaches this line
+            // whenever the base URL changed after the cache was written.
+            usage::remove_cache();
+            None
+        } else if endpoint.is_custom() {
+            // The local login is the account behind the numbers on the official endpoint
+            // only. A custom endpoint or a bearer token serves some other account, so such a
+            // session neither reads the local cache nor spawns the child, whatever the proxy
+            // route said.
             None
         } else {
             native_snapshot(&config)
@@ -416,16 +423,11 @@ fn proxy_status(
     proxy::cached_status(cache.as_ref()?, &base, now)
 }
 
-/// The cache and the child that fills it belong to the local login. With
-/// the fetch off the cache would show numbers that never refresh again, so
-/// interval 0 removes it instead. The spawn precedes the gate because a
-/// seat whose payload carries no rate limits needs that first fetch before
-/// the line can open at all.
+/// The cache and the child that fills it belong to the local login, so the
+/// snapshot is matched against it. The caller handles a disabled fetch. The
+/// spawn precedes the gate because a seat whose payload carries no rate
+/// limits needs that first fetch before the line can open at all.
 fn native_snapshot(config: &schema::Config) -> Option<usage::Snapshot> {
-    if config.usage_fetch_interval_seconds == 0 {
-        usage::remove_cache();
-        return None;
-    }
     usage::spawn_fetch_if_stale(config);
     let account_uuid = schema::home_dir()
         .map(|h| schema::load_account_info(&h.join(".claude.json")))

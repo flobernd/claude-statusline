@@ -1810,10 +1810,7 @@ fn usage_cache(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".claude").join("claude-statusline-usage.json")
 }
 
-/// A snapshot whose next-at stamps sit thirty minutes ahead, so the render tick under test
-/// never spawns a fetch child and the file stays exactly as seeded. The stamps must stay under
-/// the due() ceiling (the larger of the configured interval and one hour) or they read as due
-/// again and the tick spawns a real child into this test's HOME.
+/// The snapshot most tests want: a team plan and an email, no fetched windows.
 fn parked_snapshot(account_uuid: &str, email: &str) -> String {
     parked_snapshot_with(
         account_uuid,
@@ -1823,7 +1820,10 @@ fn parked_snapshot(account_uuid: &str, email: &str) -> String {
 }
 
 /// `profile` and `utilization` are JSON objects, so a test seeds exactly the fetched content
-/// its case needs.
+/// its case needs. The next-at stamps sit thirty minutes ahead, so the render tick under test
+/// never spawns a fetch child and the file stays exactly as seeded. They must stay under the
+/// due() ceiling (the larger of the configured interval and one hour) or they read as due
+/// again and the tick spawns a real child into this test's HOME.
 fn parked_snapshot_with(account_uuid: &str, profile: &str, utilization: &str) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2009,4 +2009,33 @@ fn auth_token_session_renders_the_payload_windows_only() {
         usage_cache(home.path()).exists(),
         "a token session must not touch the local login's cache"
     );
+}
+
+/// The cache outlives the base URL that was set after it was written, so a disabled fetch has
+/// to remove it on a custom endpoint too.
+#[test]
+fn disabled_fetch_removes_the_usage_cache_behind_a_custom_endpoint() {
+    let home = native_home(
+        0,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "fetched@example.com", "plan": "max"}"#,
+            FETCHED_UTILIZATION,
+        )),
+    );
+    let out = run_statusline_with_env(
+        NATIVE_PAYLOAD,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_BASE_URL", "https://gateway.example.com")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = usage_line(&stdout);
+    assert!(
+        !usage_cache(home.path()).exists(),
+        "interval 0 drops the cache on every endpoint"
+    );
+    assert!(line.starts_with("\u{2301} 5h:42%"), "usage line: {line}");
+    assert!(!line.contains("7d:"), "usage line: {line}");
+    assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
 }
