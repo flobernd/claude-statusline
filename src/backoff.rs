@@ -5,11 +5,15 @@ use std::time::Duration;
 
 pub const LADDER_FIRST: Duration = Duration::from_secs(2 * 60);
 pub const LADDER_MAX: Duration = Duration::from_secs(10 * 60);
-pub const RETRY_AFTER_MIN: Duration = Duration::from_secs(10);
+/// Equal to the default fetch interval, so an honored wait never polls faster than the
+/// configuration allows.
+pub const RETRY_AFTER_MIN: Duration = Duration::from_secs(60);
 pub const RETRY_AFTER_MAX: Duration = Duration::from_secs(60 * 60);
 
 /// The wait a Retry-After header asks for: delay-seconds or an RFC 7231 date, clamped to
-/// [RETRY_AFTER_MIN, RETRY_AFTER_MAX]. None for an absent or unreadable header.
+/// [RETRY_AFTER_MIN, RETRY_AFTER_MAX]. None for an absent or unreadable header, and for a date
+/// that is not in the future: a past date carries no schedule, and a skewed clock would
+/// otherwise turn it into the floor.
 pub fn retry_after(header: Option<&str>, now_epoch_s: i64) -> Option<Duration> {
     let raw = header?.trim();
     let seconds = match raw.parse::<u64>() {
@@ -18,7 +22,10 @@ pub fn retry_after(header: Option<&str>, now_epoch_s: i64) -> Option<Duration> {
         // parser does not.
         Err(_) => {
             let at = chrono::DateTime::parse_from_rfc2822(raw).ok()?.timestamp();
-            u64::try_from(at.saturating_sub(now_epoch_s)).unwrap_or(0)
+            if at <= now_epoch_s {
+                return None;
+            }
+            u64::try_from(at - now_epoch_s).unwrap_or(0)
         }
     };
     Some(Duration::from_secs(seconds).clamp(RETRY_AFTER_MIN, RETRY_AFTER_MAX))
@@ -71,11 +78,9 @@ mod tests {
         assert_eq!(retry_after(Some("0"), NOW_S), Some(RETRY_AFTER_MIN));
         assert_eq!(retry_after(Some("1"), NOW_S), Some(RETRY_AFTER_MIN));
         assert_eq!(retry_after(Some("99999"), NOW_S), Some(RETRY_AFTER_MAX));
-        // A date already in the past still yields the minimum wait, never an instant retry.
-        assert_eq!(
-            retry_after(Some("Sun, 06 Nov 1994 08:00:00 GMT"), NOW_S),
-            Some(RETRY_AFTER_MIN)
-        );
+        // A date already in the past carries no schedule, so the ladder applies instead of
+        // an instant retry at the floor.
+        assert!(retry_after(Some("Sun, 06 Nov 1994 08:00:00 GMT"), NOW_S).is_none());
     }
 
     #[test]
