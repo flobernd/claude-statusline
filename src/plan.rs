@@ -35,7 +35,6 @@ pub fn derive(
 
 /// The chip text for a plan and its rate-limit tier. `derive` names the family; this names the
 /// tier a user actually runs at, which is what decides how far the windows go.
-#[allow(dead_code)]
 pub fn label(plan: &str, rate_limit_tier: Option<&str>) -> String {
     let mut chars = plan.chars();
     let Some(first) = chars.next() else {

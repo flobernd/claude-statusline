@@ -234,12 +234,8 @@ pub fn home_dir() -> Option<PathBuf> {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct AccountInfo {
-    #[serde(default, deserialize_with = "lenient", rename = "organizationType")]
-    pub organization_type: Option<String>,
     #[serde(default, deserialize_with = "lenient", rename = "accountUuid")]
     pub account_uuid: Option<String>,
-    #[serde(default, deserialize_with = "lenient", rename = "emailAddress")]
-    pub email: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -248,9 +244,9 @@ struct ClaudeJson {
     oauth_account: Option<AccountInfo>,
 }
 
-/// Account identity from Claude Code's ~/.claude.json. Anything missing or
-/// malformed yields None fields; absence just means "no native subscription
-/// signal", never an error the statusline should surface.
+/// The login the usage cache is matched against, from Claude Code's
+/// ~/.claude.json. Anything missing or malformed yields None, which reads
+/// as an unknown login, never as an error the statusline should surface.
 pub fn load_account_info(claude_json_path: &Path) -> AccountInfo {
     let Ok(text) = std::fs::read_to_string(claude_json_path) else {
         return AccountInfo::default();
@@ -441,9 +437,7 @@ mod tests {
         )
         .unwrap();
         let info = load_account_info(&path);
-        assert_eq!(info.organization_type.as_deref(), Some("claude_max"));
         assert_eq!(info.account_uuid.as_deref(), Some("u-1"));
-        assert_eq!(info.email.as_deref(), Some("me@example.com"));
     }
 
     #[test]
@@ -451,11 +445,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".claude.json");
         let info = load_account_info(&path);
-        assert!(info.organization_type.is_none() && info.account_uuid.is_none());
+        assert!(info.account_uuid.is_none());
 
-        std::fs::write(&path, r#"{"oauthAccount":{"organizationType": 42}}"#).unwrap();
+        std::fs::write(&path, r#"{"oauthAccount":{"accountUuid": 42}}"#).unwrap();
         let info = load_account_info(&path);
-        assert!(info.organization_type.is_none() && info.account_uuid.is_none());
+        assert!(info.account_uuid.is_none());
     }
 
     #[test]

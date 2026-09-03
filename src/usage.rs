@@ -21,6 +21,15 @@ pub struct EndpointUtilization {
     pub limits: Option<Vec<ScopedLimit>>,
 }
 
+impl EndpointUtilization {
+    /// One definition of fetched content for the child's emptiness guard and the line's gate.
+    fn has_window(&self) -> bool {
+        self.five_hour.is_some()
+            || self.seven_day.is_some()
+            || self.limits.as_ref().is_some_and(|l| !l.is_empty())
+    }
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct EndpointWindow {
     /// 0..100, same scale as the payload percentage (verified live).
@@ -97,6 +106,15 @@ pub struct Snapshot {
     /// Absent after a success, so the ladder restarts at its first rung.
     #[serde(default, deserialize_with = "lenient")]
     pub profile_backoff_ms: Option<u64>,
+}
+
+impl Snapshot {
+    /// The child writes the file as soon as it books its first retry, so only fetched content
+    /// proves a subscription. A stored utilization always has a window: the child treats a body
+    /// without one as a failure.
+    pub fn has_fetched_data(&self) -> bool {
+        self.profile.is_some() || self.utilization.has_window()
+    }
 }
 
 /// Account identity from the private api/oauth/profile endpoint, reduced to what the line shows.
@@ -176,10 +194,7 @@ pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
 /// of the usage kind instead, and the child keeps the previous data and books the ladder.
 fn utilization_from_body(body: &str) -> Option<EndpointUtilization> {
     let utilization: EndpointUtilization = serde_json::from_str(body).ok()?;
-    let has_window = utilization.five_hour.is_some()
-        || utilization.seven_day.is_some()
-        || utilization.limits.as_ref().is_some_and(|l| !l.is_empty());
-    has_window.then_some(utilization)
+    utilization.has_window().then_some(utilization)
 }
 
 pub fn cache_path() -> Option<PathBuf> {

@@ -266,23 +266,31 @@ fn render(raw: &str) -> Option<String> {
     // The flag check comes first so the default path never pays the extra
     // ~/.claude.json read on a render tick.
     let usage_rows: Vec<String> = if config.advanced_usage_limits_enabled {
-        let account = schema::home_dir()
-            .map(|h| schema::load_account_info(&h.join(".claude.json")))
-            .unwrap_or_default();
         let endpoint = usage::EndpointEnv::from_env();
         let proxy = proxy_status(&config, &payload, &endpoint);
+        // The local login is the account behind the numbers on the official endpoint only. A
+        // custom endpoint or a bearer token serves some other account, so such a session
+        // neither reads the local cache nor spawns the child, whatever the proxy route said.
+        let snapshot = if endpoint.is_custom() {
+            None
+        } else {
+            native_snapshot(&config)
+        };
         if !config.cli_proxy_usage_enabled {
             proxy::remove_session_caches();
         }
-        if usage_line_enabled(&config, &payload, &account, &endpoint, proxy.is_some()) {
+        if usage_line_enabled(
+            &config,
+            &payload,
+            &endpoint,
+            proxy.is_some(),
+            snapshot.as_ref(),
+        ) {
             let now_epoch_s = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             match &proxy {
-                // The local token belongs to whichever account is logged in
-                // locally, not to the credential the proxy picked, so neither
-                // the claude.ai fetch nor its cache may backfill anything here.
                 Some(status) => status
                     .accounts
                     .iter()
@@ -303,36 +311,13 @@ fn render(raw: &str) -> Option<String> {
                         )
                     })
                     .collect(),
-                None if config.cli_proxy_usage_enabled && endpoint.custom_base_url().is_some() => {
-                    // The route answered nothing this tick, but the session is still a
-                    // proxied one: the local login is not the account behind the proxy, so
-                    // the payload windows are all that may render, and the local cache and
-                    // fetch child stay untouched.
-                    let limits = usage::merge(payload.rate_limits.as_ref(), None, now_epoch_s);
-                    compose(
-                        sections::line3(&limits, None, None, None, &style, now_epoch_s),
-                        LINE3_DROP,
-                        true,
-                    )
-                    .into_iter()
-                    .collect()
-                }
                 None => {
-                    // The cache belongs to the fetch: with the fetch off it
-                    // would show numbers that never refresh again.
-                    if config.usage_fetch_interval_seconds == 0 {
-                        usage::remove_cache();
-                    } else {
-                        usage::spawn_fetch_if_stale(&config);
-                    }
-                    let snapshot = usage::cache_path()
-                        .and_then(|p| usage::load_snapshot(&p, account.account_uuid.as_deref()));
                     let limits = usage::merge(
                         payload.rate_limits.as_ref(),
                         snapshot.as_ref().map(|s| &s.utilization),
                         now_epoch_s,
                     );
-                    let (email, plan) = native_account(snapshot.as_ref(), &account);
+                    let (email, plan) = native_account(snapshot.as_ref());
                     compose(
                         sections::line3(
                             &limits,
@@ -386,30 +371,26 @@ fn render(raw: &str) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-/// The usage line is for native Anthropic subscriptions only. Enterprise
-/// seats may receive no payload rate_limits at all, so the account type
-/// from ~/.claude.json is the alternate signal that keeps the line alive
-/// for them. That fallback is a login artifact though: it stays true when
-/// the session talks to a gateway, Bedrock, or Vertex, so a custom
-/// endpoint disables it. Payload rate_limits win unconditionally because
-/// they only appear when Anthropic subscription headers actually flow, and
-/// a status from the CLIProxyAPI plugin route is the same proof for a
-/// proxied session: the proxy only answers for a subscription it serves.
+/// The usage line is for native Anthropic subscriptions only. Payload
+/// rate_limits prove one unconditionally, because they only appear when
+/// Anthropic subscription headers actually flow, and a status from the
+/// CLIProxyAPI plugin route is the same proof for a proxied session: the
+/// proxy only answers for a subscription it serves. An enterprise seat may
+/// receive no payload rate_limits at all, so on the official endpoint a
+/// snapshot with fetched content keeps the line alive for it: the child
+/// fetched it with the local login, which is the account behind the numbers
+/// there and nowhere else.
 fn usage_line_enabled(
     config: &schema::Config,
     payload: &schema::Payload,
-    account: &schema::AccountInfo,
     endpoint: &usage::EndpointEnv,
     proxy_status: bool,
+    snapshot: Option<&usage::Snapshot>,
 ) -> bool {
     config.advanced_usage_limits_enabled
         && (payload.rate_limits.is_some()
             || proxy_status
-            || (!endpoint.is_custom()
-                && account
-                    .organization_type
-                    .as_deref()
-                    .is_some_and(|t| t.starts_with("claude_"))))
+            || (!endpoint.is_custom() && snapshot.is_some_and(usage::Snapshot::has_fetched_data)))
 }
 
 /// Behind CLIProxyAPI the plugin route is the only source that names the serving accounts. The
@@ -435,120 +416,185 @@ fn proxy_status(
     proxy::cached_status(cache.as_ref()?, &base, now)
 }
 
-/// The fetched profile names the account the numbers belong to. The local
-/// file fills each gap: before the first child run, when the fetch is off,
-/// and for a field the endpoint left empty.
-fn native_account(
-    snapshot: Option<&usage::Snapshot>,
-    account: &schema::AccountInfo,
-) -> (Option<String>, Option<String>) {
-    let profile = snapshot.and_then(|s| s.profile.as_ref());
-    let email = profile
-        .and_then(|p| p.email.clone())
-        .or_else(|| account.email.clone());
+/// The cache and the child that fills it belong to the local login. With
+/// the fetch off the cache would show numbers that never refresh again, so
+/// interval 0 removes it instead. The spawn precedes the gate because a
+/// seat whose payload carries no rate limits needs that first fetch before
+/// the line can open at all.
+fn native_snapshot(config: &schema::Config) -> Option<usage::Snapshot> {
+    if config.usage_fetch_interval_seconds == 0 {
+        usage::remove_cache();
+        return None;
+    }
+    usage::spawn_fetch_if_stale(config);
+    let account_uuid = schema::home_dir()
+        .map(|h| schema::load_account_info(&h.join(".claude.json")))
+        .unwrap_or_default()
+        .account_uuid;
+    usage::cache_path().and_then(|p| usage::load_snapshot(&p, account_uuid.as_deref()))
+}
+
+/// The fetched profile names the account the numbers belong to, and nothing
+/// else may: the local login is a substitute the chips would misattribute.
+/// Before the first profile fetch both chips stay absent. The plan carries
+/// its rate-limit tier as one label, so the chip reads "Max 20x".
+fn native_account(snapshot: Option<&usage::Snapshot>) -> (Option<String>, Option<String>) {
+    let Some(profile) = snapshot.and_then(|s| s.profile.as_ref()) else {
+        return (None, None);
+    };
     let plan = profile
-        .and_then(|p| p.plan.clone())
-        .or_else(|| plan::derive(account.organization_type.as_deref(), None, None, None));
-    (email, plan)
+        .plan
+        .as_deref()
+        .map(|plan| plan::label(plan, profile.tier.as_deref()));
+    (profile.email.clone(), plan)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn enabled() -> schema::Config {
+        schema::Config {
+            advanced_usage_limits_enabled: true,
+            ..schema::Config::default()
+        }
+    }
+
+    fn fetched_profile() -> usage::Snapshot {
+        usage::Snapshot {
+            profile: Some(usage::Profile {
+                email: Some("fetched@example.com".to_string()),
+                ..usage::Profile::default()
+            }),
+            ..usage::Snapshot::default()
+        }
+    }
+
     #[test]
     fn usage_line_requires_the_config_flag() {
         let payload = schema::parse_payload(r#"{"rate_limits": {}}"#).unwrap();
-        let account = schema::AccountInfo {
-            organization_type: Some("claude_max".to_string()),
-            account_uuid: None,
-            email: None,
-        };
         let official = usage::EndpointEnv::default();
         assert!(!usage_line_enabled(
             &schema::Config::default(),
             &payload,
-            &account,
             &official,
-            false
+            false,
+            None
         ));
-        let enabled = schema::Config {
-            advanced_usage_limits_enabled: true,
-            ..schema::Config::default()
-        };
         assert!(usage_line_enabled(
-            &enabled, &payload, &account, &official, false
+            &enabled(),
+            &payload,
+            &official,
+            false,
+            None
         ));
     }
 
     #[test]
-    fn usage_line_needs_a_payload_or_account_subscription_signal() {
-        let enabled = schema::Config {
-            advanced_usage_limits_enabled: true,
-            ..schema::Config::default()
-        };
+    fn usage_line_needs_a_payload_proxy_or_snapshot_signal() {
         let with_limits = schema::parse_payload(r#"{"rate_limits": {}}"#).unwrap();
         let without = schema::parse_payload("{}").unwrap();
-        let native = schema::AccountInfo {
-            organization_type: Some("claude_enterprise".to_string()),
-            account_uuid: None,
-            email: None,
-        };
-        let external = schema::AccountInfo {
-            organization_type: Some("external".to_string()),
-            account_uuid: None,
-            email: None,
-        };
-        let unknown = schema::AccountInfo::default();
         let official = usage::EndpointEnv::default();
+        let windows = usage::Snapshot {
+            utilization: usage::EndpointUtilization {
+                five_hour: Some(usage::EndpointWindow {
+                    utilization: Some(1.0),
+                    resets_at: None,
+                }),
+                ..usage::EndpointUtilization::default()
+            },
+            ..usage::Snapshot::default()
+        };
+        // The child writes the file as soon as it books its first retry, so a schedule alone
+        // proves nothing.
+        let booked = usage::Snapshot {
+            usage_next_at_ms: Some(1),
+            ..usage::Snapshot::default()
+        };
 
         assert!(usage_line_enabled(
-            &enabled,
+            &enabled(),
             &with_limits,
-            &unknown,
             &official,
-            false
+            false,
+            None
         ));
         assert!(usage_line_enabled(
-            &enabled, &without, &native, &official, false
+            &enabled(),
+            &without,
+            &official,
+            false,
+            Some(&fetched_profile())
+        ));
+        assert!(usage_line_enabled(
+            &enabled(),
+            &without,
+            &official,
+            false,
+            Some(&windows)
         ));
         assert!(!usage_line_enabled(
-            &enabled, &without, &external, &official, false
+            &enabled(),
+            &without,
+            &official,
+            false,
+            Some(&booked)
         ));
         assert!(!usage_line_enabled(
-            &enabled, &without, &unknown, &official, false
+            &enabled(),
+            &without,
+            &official,
+            false,
+            None
         ));
     }
 
     #[test]
-    fn usage_line_custom_endpoint_disables_only_the_account_fallback() {
-        let enabled = schema::Config {
-            advanced_usage_limits_enabled: true,
-            ..schema::Config::default()
-        };
+    fn usage_line_custom_endpoint_ignores_the_snapshot() {
         let with_limits = schema::parse_payload(r#"{"rate_limits": {}}"#).unwrap();
         let without = schema::parse_payload("{}").unwrap();
-        let native = schema::AccountInfo {
-            organization_type: Some("claude_max".to_string()),
-            account_uuid: None,
-            email: None,
-        };
         let custom = usage::EndpointEnv {
             base_url: Some("https://gateway.example.com".to_string()),
             ..usage::EndpointEnv::default()
         };
-
-        // The login artifact alone no longer keeps the line alive.
+        // The local login's snapshot cannot vouch for a session another account serves.
         assert!(!usage_line_enabled(
-            &enabled, &without, &native, &custom, false
+            &enabled(),
+            &without,
+            &custom,
+            false,
+            Some(&fetched_profile())
         ));
         // Payload rate limits stay ground truth even behind a gateway.
         assert!(usage_line_enabled(
-            &enabled,
+            &enabled(),
             &with_limits,
-            &native,
             &custom,
-            false
+            false,
+            None
+        ));
+    }
+
+    #[test]
+    fn usage_line_accepts_a_proxy_status_behind_a_custom_endpoint() {
+        let without = schema::parse_payload("{}").unwrap();
+        let custom = usage::EndpointEnv {
+            base_url: Some("http://127.0.0.1:8317".to_string()),
+            ..usage::EndpointEnv::default()
+        };
+        assert!(usage_line_enabled(
+            &enabled(),
+            &without,
+            &custom,
+            true,
+            None
+        ));
+        assert!(!usage_line_enabled(
+            &enabled(),
+            &without,
+            &custom,
+            false,
+            None
         ));
     }
 
@@ -563,64 +609,38 @@ mod tests {
     }
 
     #[test]
-    fn usage_line_accepts_a_proxy_status_behind_a_custom_endpoint() {
-        let enabled = schema::Config {
-            advanced_usage_limits_enabled: true,
-            ..schema::Config::default()
+    fn native_account_reads_the_snapshot_profile_only() {
+        assert_eq!(native_account(None), (None, None));
+        let booked = usage::Snapshot {
+            usage_next_at_ms: Some(1),
+            ..usage::Snapshot::default()
         };
-        let without = schema::parse_payload("{}").unwrap();
-        let unknown = schema::AccountInfo::default();
-        let custom = usage::EndpointEnv {
-            base_url: Some("http://127.0.0.1:8317".to_string()),
-            ..usage::EndpointEnv::default()
-        };
-        assert!(usage_line_enabled(
-            &enabled, &without, &unknown, &custom, true
-        ));
-        assert!(!usage_line_enabled(
-            &enabled, &without, &unknown, &custom, false
-        ));
-    }
-
-    #[test]
-    fn native_account_prefers_the_snapshot_profile_per_field() {
-        let account = schema::AccountInfo {
-            organization_type: Some("claude_max".to_string()),
-            account_uuid: None,
-            email: Some("local@example.com".to_string()),
-        };
-        assert_eq!(
-            native_account(None, &account),
-            (
-                Some("local@example.com".to_string()),
-                Some("max".to_string())
-            )
-        );
-        let fetched = usage::Snapshot {
+        assert_eq!(native_account(Some(&booked)), (None, None));
+        let labeled = usage::Snapshot {
             profile: Some(usage::Profile {
                 email: Some("fetched@example.com".to_string()),
-                plan: Some("team".to_string()),
-                tier: None,
+                plan: Some("max".to_string()),
+                tier: Some("default_claude_max_20x".to_string()),
             }),
             ..usage::Snapshot::default()
         };
         assert_eq!(
-            native_account(Some(&fetched), &account),
+            native_account(Some(&labeled)),
             (
                 Some("fetched@example.com".to_string()),
-                Some("team".to_string())
+                Some("Max 20x".to_string())
             )
         );
-        let partial = usage::Snapshot {
-            profile: Some(usage::Profile::default()),
+        let family_only = usage::Snapshot {
+            profile: Some(usage::Profile {
+                plan: Some("team".to_string()),
+                ..usage::Profile::default()
+            }),
             ..usage::Snapshot::default()
         };
         assert_eq!(
-            native_account(Some(&partial), &account),
-            (
-                Some("local@example.com".to_string()),
-                Some("max".to_string())
-            )
+            native_account(Some(&family_only)),
+            (None, Some("Team".to_string()))
         );
     }
 }

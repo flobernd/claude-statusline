@@ -1815,30 +1815,48 @@ fn usage_cache(home: &std::path::Path) -> std::path::PathBuf {
 /// the due() ceiling (the larger of the configured interval and one hour) or they read as due
 /// again and the tick spawns a real child into this test's HOME.
 fn parked_snapshot(account_uuid: &str, email: &str) -> String {
+    parked_snapshot_with(
+        account_uuid,
+        &format!(r#"{{"email": {email:?}, "plan": "team"}}"#),
+        "{}",
+    )
+}
+
+/// `profile` and `utilization` are JSON objects, so a test seeds exactly the fetched content
+/// its case needs.
+fn parked_snapshot_with(account_uuid: &str, profile: &str, utilization: &str) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
     let parked = now + 1_800_000;
     format!(
-        r#"{{"fetched_at_ms": {now}, "account_uuid": {account_uuid:?}, "utilization": {{}},
-            "profile": {{"email": {email:?}, "plan": "team"}}, "profile_fetched_at_ms": {now},
+        r#"{{"fetched_at_ms": {now}, "account_uuid": {account_uuid:?}, "utilization": {utilization},
+            "profile": {profile}, "profile_fetched_at_ms": {now},
             "usage_next_at_ms": {parked}, "profile_next_at_ms": {parked}}}"#
     )
 }
 
+/// Windows the payload under test never carries, so a merged snapshot and the payload windows
+/// alone read differently.
+const FETCHED_UTILIZATION: &str = r#"{"five_hour": {"utilization": 12, "resets_at": "2100-01-01T00:00:00Z"},
+        "seven_day": {"utilization": 33, "resets_at": "2100-01-01T00:00:00Z"}}"#;
+
+/// The local login file names an organization type and an email, and neither reaches the
+/// line: only fetched data may describe the account behind the numbers.
 #[test]
-fn native_usage_line_shows_the_local_email_without_a_snapshot() {
+fn native_usage_line_without_a_snapshot_shows_the_payload_windows_only() {
     let home = native_home(0, None);
     let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("local@example.com"), "stdout: {stdout}");
-    assert!(stdout.contains("Max"), "stdout: {stdout}");
-    assert!(stdout.contains("5h:42%"), "stdout: {stdout}");
+    let line = usage_line(&stdout);
+    assert!(line.starts_with("\u{2301} 5h:42%"), "usage line: {line}");
+    assert!(!stdout.contains("local@example.com"), "stdout: {stdout}");
+    assert!(!stdout.contains("Max"), "stdout: {stdout}");
 }
 
 #[test]
-fn native_usage_line_prefers_the_snapshot_profile() {
+fn native_usage_line_shows_the_snapshot_profile() {
     let home = native_home(60, Some(&parked_snapshot("acct-1", "fetched@example.com")));
     let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1860,7 +1878,7 @@ fn account_switch_removes_the_usage_cache() {
         !usage_cache(home.path()).exists(),
         "another account's snapshot must go"
     );
-    assert!(stdout.contains("local@example.com"), "stdout: {stdout}");
+    assert!(stdout.contains("5h:42%"), "stdout: {stdout}");
     assert!(!stdout.contains("other@example.com"), "stdout: {stdout}");
 }
 
@@ -1873,7 +1891,6 @@ fn disabled_fetch_removes_the_usage_cache() {
         !usage_cache(home.path()).exists(),
         "interval 0 drops the cache"
     );
-    assert!(stdout.contains("local@example.com"), "stdout: {stdout}");
     assert!(stdout.contains("5h:42%"), "stdout: {stdout}");
     assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
 }
@@ -1890,4 +1907,106 @@ fn disabled_line_removes_the_usage_cache() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!usage_cache(home.path()).exists(), "the line is off");
     assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+}
+
+#[test]
+fn native_usage_line_labels_the_plan_with_the_snapshot_tier() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "fetched@example.com", "plan": "max", "tier": "default_claude_max_20x"}"#,
+            "{}",
+        )),
+    );
+    let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = usage_line(&stdout);
+    assert!(
+        line.starts_with("\u{2301} fetched@example.com \u{2502} Max 20x \u{2502} 5h:42%"),
+        "usage line: {line}"
+    );
+}
+
+/// A seat whose payload carries no rate limits gets its line from the snapshot alone.
+#[test]
+fn native_usage_line_renders_from_a_snapshot_alone() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "fetched@example.com", "plan": "max"}"#,
+            FETCHED_UTILIZATION,
+        )),
+    );
+    let out = run_statusline("{}", "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = usage_line(&stdout);
+    assert!(
+        line.starts_with("\u{2301} fetched@example.com \u{2502} Max \u{2502} 5h:12%"),
+        "usage line: {line}"
+    );
+    assert!(line.contains("7d:33%"), "usage line: {line}");
+}
+
+#[test]
+fn native_usage_line_without_rate_limits_or_a_snapshot_stays_hidden() {
+    let home = native_home(0, None);
+    let out = run_statusline("{}", "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+    assert!(!stdout.contains("local@example.com"), "stdout: {stdout}");
+}
+
+/// The child spawns before the gate decides, so a seat whose payload carries no rate limits
+/// gets the first fetch that later opens its line. Without a token the child books its ladder
+/// and writes the schedule without a network call, which is what the poll waits for.
+#[test]
+fn a_seat_without_rate_limits_still_spawns_the_first_fetch() {
+    let home = native_home(60, None);
+    let out = run_statusline("{}", "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+    let cache = usage_cache(home.path());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !cache.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let text = std::fs::read_to_string(&cache).expect("the child wrote its schedule");
+    assert!(text.contains("usage_next_at_ms"), "cache: {text}");
+}
+
+/// A bearer token names some other account than the local login, so even with the proxy flag
+/// on and no proxy host to ask, the local cache stays unread and untouched.
+#[test]
+fn auth_token_session_renders_the_payload_windows_only() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "fetched@example.com", "plan": "max"}"#,
+            FETCHED_UTILIZATION,
+        )),
+    );
+    std::fs::write(
+        home.path().join(".claude").join("claude-statusline.json"),
+        r#"{"advanced_usage_limits_enabled": true, "cli_proxy_usage_enabled": true,
+            "usage_fetch_interval_seconds": 60}"#,
+    )
+    .unwrap();
+    let out = run_statusline_with_env(
+        NATIVE_PAYLOAD,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_AUTH_TOKEN", "sk-ant-gateway")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = usage_line(&stdout);
+    assert!(line.starts_with("\u{2301} 5h:42%"), "usage line: {line}");
+    assert!(!line.contains("7d:"), "usage line: {line}");
+    assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
+    assert!(
+        usage_cache(home.path()).exists(),
+        "a token session must not touch the local login's cache"
+    );
 }
