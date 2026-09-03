@@ -1666,6 +1666,19 @@ fn usage_line(stdout: &str) -> &str {
         .unwrap_or_else(|| panic!("no usage line in stdout: {stdout}"))
 }
 
+/// The usage line of a proxied session at `width`, fed by a loopback responder that answers
+/// the route once with `body` and must have seen that request.
+fn render_proxied(home: &std::path::Path, body: &'static str, width: &str) -> String {
+    let (base, served) = serve_once(body);
+    fetch_proxy(home, &base);
+    assert!(
+        served.join().unwrap().is_some(),
+        "the responder saw no request"
+    );
+    let out = run_statusline_with_env(PROXY_PAYLOAD, width, home, &[("ANTHROPIC_BASE_URL", &base)]);
+    usage_line(&String::from_utf8_lossy(&out.stdout)).to_string()
+}
+
 #[test]
 fn disabled_account_chip_keeps_the_line_glyph() {
     let home = proxy_home(true);
@@ -1676,19 +1689,7 @@ fn disabled_account_chip_keeps_the_line_glyph() {
             "usage_fetch_interval_seconds": 0}"#,
     )
     .unwrap();
-    let (base, served) = serve_once(PROXY_BODY);
-    fetch_proxy(home.path(), &base);
-    assert!(
-        served.join().unwrap().is_some(),
-        "the responder saw no request"
-    );
-    let out = run_statusline_with_env(
-        PROXY_PAYLOAD,
-        "200",
-        home.path(),
-        &[("ANTHROPIC_BASE_URL", &base)],
-    );
-    let line = usage_line(&String::from_utf8_lossy(&out.stdout)).to_string();
+    let line = render_proxied(home.path(), PROXY_BODY, "200");
     assert!(
         line.starts_with("\u{2301} Max \u{2502} 5h:6%"),
         "usage line: {line}"
@@ -1712,19 +1713,7 @@ const CONTROL_ACCOUNT_BODY: &str = concat!(
 #[test]
 fn control_character_account_renders_no_chip() {
     let home = proxy_home(true);
-    let (base, served) = serve_once(CONTROL_ACCOUNT_BODY);
-    fetch_proxy(home.path(), &base);
-    assert!(
-        served.join().unwrap().is_some(),
-        "the responder saw no request"
-    );
-    let out = run_statusline_with_env(
-        PROXY_PAYLOAD,
-        "200",
-        home.path(),
-        &[("ANTHROPIC_BASE_URL", &base)],
-    );
-    let line = usage_line(&String::from_utf8_lossy(&out.stdout)).to_string();
+    let line = render_proxied(home.path(), CONTROL_ACCOUNT_BODY, "200");
     assert!(
         line.starts_with("\u{2301} Max \u{2502} 5h:6%"),
         "usage line: {line}"
@@ -1741,25 +1730,13 @@ fn control_character_account_renders_no_chip() {
 /// to 81, the spend to 53, and the Fable window to the 14 + 3 + 15 = 32 of the two windows
 /// that stay. 20 columns, the narrowest width the binary accepts, leave 18, below that 32, so
 /// the week drops too. 200 columns hold everything.
-
 #[test]
 fn line3_drop_order_keeps_the_session_window() {
     let render = |width: &str| -> String {
         let home = proxy_home(true);
-        let (base, served) = serve_once(PROXY_BODY);
-        fetch_proxy(home.path(), &base);
-        assert!(
-            served.join().unwrap().is_some(),
-            "the responder saw no request"
-        );
-        let out = run_statusline_with_env(
-            PROXY_PAYLOAD,
-            width,
-            home.path(),
-            &[("ANTHROPIC_BASE_URL", &base)],
-        );
-        usage_line(&String::from_utf8_lossy(&out.stdout)).to_string()
+        render_proxied(home.path(), PROXY_BODY, width)
     };
+
     let wide = render("200");
     assert!(
         wide.starts_with("\u{2301} biz@example.com \u{2502} Max \u{2502} 5h:6%"),
