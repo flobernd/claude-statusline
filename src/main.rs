@@ -82,9 +82,6 @@ const LINE3_DROP: &[&str] = &[
     "usage_session",
 ];
 const SEP: &str = " \u{2502} ";
-// The usage line glyph is attached after the fit, so the fit must leave its
-// two columns free.
-const GLYPH_WIDTH: usize = 2;
 
 fn main() {
     let cli = Cli::parse();
@@ -234,6 +231,9 @@ fn render(raw: &str) -> Option<String> {
     };
     let sep = style.paint(SEP, theme::COMMENT);
     let sep_width = fit::visible_width(&sep);
+    // The usage line glyph is attached after the fit, so the fit must leave its
+    // columns free.
+    let glyph_width = sections::line_glyph_width();
 
     let disabled = &config.disabled_sections;
     let compose =
@@ -242,7 +242,7 @@ fn render(raw: &str) -> Option<String> {
                 .into_iter()
                 .filter(|(name, _)| !disabled.iter().any(|d| d == name))
                 .collect();
-            let max_width = if glyph { width - GLYPH_WIDTH } else { width };
+            let max_width = if glyph { width - glyph_width } else { width };
             let fitted = fit::fit_line(chips, sep_width, max_width, drop);
             if fitted.is_empty() {
                 return None;
@@ -599,16 +599,6 @@ mod tests {
             false,
             None
         ));
-    }
-
-    #[test]
-    fn glyph_width_matches_the_painted_glyph() {
-        let style = theme::Style {
-            colors: true,
-            links: false,
-        };
-        let chips = sections::with_line_glyph(vec![("usage_session", String::new())], &style);
-        assert_eq!(fit::visible_width(&chips[0].1), GLYPH_WIDTH);
     }
 
     #[test]

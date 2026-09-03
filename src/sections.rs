@@ -314,6 +314,13 @@ fn push_visible(out: &mut Vec<(&'static str, String)>, name: &'static str, paint
     }
 }
 
+const USAGE_LINE_GLYPH: &str = "\u{2301} ";
+
+/// Columns the fit must leave free for `with_line_glyph`, which is attached after the fit.
+pub fn line_glyph_width() -> usize {
+    crate::fit::visible_width(USAGE_LINE_GLYPH)
+}
+
 /// Prefix the line glyph to the first chip. The glyph marks the line, not a chip, so it must ride
 /// on whichever chip survives the filter and the fit.
 pub fn with_line_glyph(
@@ -321,7 +328,7 @@ pub fn with_line_glyph(
     s: &Style,
 ) -> Vec<(&'static str, String)> {
     if let Some(first) = chips.first_mut() {
-        first.1 = format!("{}{}", s.paint("\u{2301} ", COMMENT), first.1);
+        first.1 = format!("{}{}", s.paint(USAGE_LINE_GLYPH, COMMENT), first.1);
     }
     chips
 }
@@ -1015,6 +1022,18 @@ mod tests {
     #[test]
     fn with_line_glyph_leaves_an_empty_vector_alone() {
         assert!(with_line_glyph(Vec::new(), &PLAIN).is_empty());
+    }
+
+    #[test]
+    fn glyph_width_matches_the_painted_glyph() {
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
+        let chips = with_line_glyph(vec![("usage_session", String::new())], &colored);
+        assert_eq!(crate::fit::visible_width(&chips[0].1), line_glyph_width());
+        // The drop-order arithmetic in tests/cli.rs counts on two columns.
+        assert_eq!(line_glyph_width(), 2);
     }
 
     #[test]
