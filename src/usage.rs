@@ -453,10 +453,13 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// A kind is due when its next-at stamp is absent or not in the future. Shared by the render
-/// tick's spawn gate and the fetch child's stampede re-check, so both read one schedule.
-pub(crate) fn due(next_at_ms: Option<u64>, now_ms: u64) -> bool {
-    next_at_ms.is_none_or(|at| at <= now_ms)
+/// A kind is due when its next-at stamp is absent, not in the future, or further ahead than
+/// `max_ahead_ms`: the largest wait the code books for that kind, so a stamp beyond it could
+/// only come from a clock that jumped forward and back, and must not park the poll for days.
+/// Shared by the render tick's spawn gate and the fetch child's stampede re-check, so both read
+/// one schedule.
+pub(crate) fn due(next_at_ms: Option<u64>, now_ms: u64, max_ahead_ms: u64) -> bool {
+    next_at_ms.is_none_or(|at| at <= now_ms || at.saturating_sub(now_ms) > max_ahead_ms)
 }
 
 /// The spawn gate needs only the two next-at stamps; a corrupt cache then reads as due
@@ -479,7 +482,13 @@ pub fn spawn_fetch_if_stale(config: &Config) {
     };
     let (usage_next_at_ms, profile_next_at_ms) = read_next_at_ms(&path);
     let now = now_ms();
-    if !due(usage_next_at_ms, now) && !due(profile_next_at_ms, now) {
+    // The ceiling is the larger of the kind's own interval and one hour, so a configured
+    // interval under an hour still allows a stamp to sit that far out without reading as due.
+    let usage_ceiling_ms = config.usage_fetch_interval_seconds.max(PROFILE_INTERVAL_S) * 1_000;
+    let profile_ceiling_ms = PROFILE_INTERVAL_S * 1_000;
+    if !due(usage_next_at_ms, now, usage_ceiling_ms)
+        && !due(profile_next_at_ms, now, profile_ceiling_ms)
+    {
         return;
     }
     spawn_fetch_child();
@@ -605,8 +614,10 @@ fn try_fetch_with(home: &Path, fetch: Fetch<'_>, now_ms: u64) -> Option<()> {
     snapshot.account_uuid = account_uuid;
     // Re-checking the schedule doubles as stampede protection when several render ticks
     // spawn children before the first snapshot lands.
-    let usage_due = due(snapshot.usage_next_at_ms, now_ms);
-    let profile_due = due(snapshot.profile_next_at_ms, now_ms);
+    let usage_ceiling_ms = config.usage_fetch_interval_seconds.max(PROFILE_INTERVAL_S) * 1_000;
+    let profile_ceiling_ms = PROFILE_INTERVAL_S * 1_000;
+    let usage_due = due(snapshot.usage_next_at_ms, now_ms, usage_ceiling_ms);
+    let profile_due = due(snapshot.profile_next_at_ms, now_ms, profile_ceiling_ms);
     if !usage_due && !profile_due {
         return None;
     }
@@ -1100,11 +1111,25 @@ mod tests {
 
     #[test]
     fn due_when_the_stamp_is_absent_or_passed() {
-        assert!(due(None, 0), "a missing stamp is always due");
-        assert!(due(Some(1_000), 1_000));
-        assert!(due(Some(1_000), 1_001));
+        assert!(due(None, 0, 10_000), "a missing stamp is always due");
+        assert!(due(Some(1_000), 1_000, 10_000));
+        assert!(due(Some(1_000), 1_001, 10_000));
         // A stamp in the future (a booked retry, or clock skew) is not due.
-        assert!(!due(Some(1_001), 1_000));
+        assert!(!due(Some(1_001), 1_000, 10_000));
+    }
+
+    #[test]
+    fn due_treats_a_stamp_beyond_the_ceiling_as_due() {
+        // A clock that jumped forward and back must not park the poll for days: a stamp
+        // beyond the ceiling reads as due, the same as a missing one.
+        assert!(
+            !due(Some(11_000), 1_000, 10_000),
+            "within the ceiling stays not due"
+        );
+        assert!(
+            due(Some(11_001), 1_000, 10_000),
+            "beyond the ceiling reads as due"
+        );
     }
 
     #[test]
