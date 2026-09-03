@@ -112,7 +112,7 @@ pub fn spawn_check_if_stale(config: &Config) {
     if !usage::fetch_due(
         interval_seconds(config),
         usage::read_fetched_at_ms(&path),
-        usage::now_ms(),
+        crate::clock::now_ms(),
     ) {
         return;
     }
@@ -156,12 +156,12 @@ fn try_fetch() -> Option<()> {
     if !usage::fetch_due(
         interval_seconds(&config),
         usage::read_fetched_at_ms(&path),
-        usage::now_ms(),
+        crate::clock::now_ms(),
     ) {
         return None;
     }
     let release = fetch_release();
-    let snapshot = next_snapshot(release, load_snapshot(&path), usage::now_ms());
+    let snapshot = next_snapshot(release, load_snapshot(&path), crate::clock::now_ms());
     usage::write_json_atomic(&path, &snapshot)
 }
 

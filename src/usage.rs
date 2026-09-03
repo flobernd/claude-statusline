@@ -401,13 +401,6 @@ pub(crate) fn read_fetched_at_ms(path: &Path) -> Option<u64> {
     value.get("fetched_at_ms")?.as_u64()
 }
 
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 pub fn spawn_fetch_if_stale(config: &Config) {
     // Checked before any filesystem access: interval 0 disables fetching.
     if config.usage_fetch_interval_seconds == 0 {
@@ -419,7 +412,7 @@ pub fn spawn_fetch_if_stale(config: &Config) {
     if !fetch_due(
         config.usage_fetch_interval_seconds,
         read_fetched_at_ms(&path),
-        now_ms(),
+        crate::clock::now_ms(),
     ) {
         return;
     }
@@ -468,7 +461,7 @@ fn try_fetch() -> Option<()> {
     if !fetch_due(
         config.usage_fetch_interval_seconds,
         read_fetched_at_ms(&path),
-        now_ms(),
+        crate::clock::now_ms(),
     ) {
         return None;
     }
@@ -484,10 +477,10 @@ fn try_fetch() -> Option<()> {
         &token,
         previous.profile,
         previous.profile_fetched_at_ms,
-        now_ms(),
+        crate::clock::now_ms(),
     );
     let snapshot = Snapshot {
-        fetched_at_ms: now_ms(),
+        fetched_at_ms: crate::clock::now_ms(),
         account_uuid,
         utilization,
         profile,
