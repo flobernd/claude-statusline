@@ -1503,6 +1503,40 @@ fn failed_poll_keeps_the_last_answer_for_a_minute() {
 }
 
 #[test]
+fn unreachable_gateway_is_retried_after_thirty_seconds() {
+    let home = proxy_home(true);
+    // A closed loopback port refuses the connection immediately, the same shape of failure as
+    // a black-holing hostname without the multi-second wait one would cost this test.
+    let base = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{addr}")
+    };
+    fetch_proxy(home.path(), &base);
+    let out = run_statusline_with_env(
+        PROXY_PAYLOAD,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_BASE_URL", base.as_str())],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+    let entry: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(negative_cache(home.path())).unwrap())
+            .unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let retry_at_ms = entry[&base]["retry_at_ms"].as_u64().unwrap();
+    assert!(
+        retry_at_ms > now_ms && retry_at_ms <= now_ms + 30_000,
+        "retry_at_ms {retry_at_ms} must sit within thirty seconds of now {now_ms}"
+    );
+}
+
+#[test]
 fn gateway_success_clears_the_negative_entry() {
     let home = proxy_home(true);
     let (base, served) = serve_once(PROXY_BODY);
