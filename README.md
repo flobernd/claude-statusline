@@ -126,11 +126,10 @@ last (`usage_model`), by model id, alias suffix included.
 
 The claude.ai fetch and its cache are not used in that mode, because the local login is not
 the account behind the proxy. Without the plugin the route answers 404 and the line stays
-hidden, as it does for any other custom endpoint. A gateway that answers without the plugin is
-not polled again for 5 minutes; a gateway that does not answer at all is retried after 30
-seconds; both waits are remembered in `~/.claude/claude-statusline-proxy.json`. A session the
-plugin does not know yet is polled on the interval, because the first tick of a session comes
-before its first proxied request.
+hidden, as it does for any other custom endpoint. A base URL that fails, by an answer without
+the plugin or by no answer at all, is not polled again for 5 minutes, remembered in
+`~/.claude/claude-statusline-proxy.json`. A session the plugin does not know yet is polled on
+the interval, because the first tick of a session comes before its first proxied request.
 
 ## Update notification
 

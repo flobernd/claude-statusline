@@ -11,16 +11,12 @@ use std::process::{Command, Stdio};
 
 const ROUTE_PATH: &str = "/v0/resource/plugins/cpa-claude-statusline/session";
 
-/// A base URL that gave a conclusive answer without the plugin is left alone for this long:
-/// long enough that a gateway without the plugin costs one request per five minutes instead of
-/// one per tick, short enough that a restarted proxy shows up within a coffee break. Also the
-/// ceiling `retry_pending` enforces, since it is the longer of the two waits this module books.
+/// A base URL whose route failed is left alone for this long, whether the failure was a
+/// conclusive answer without the plugin or no answer at all: long enough that a gateway
+/// without the plugin costs one request per five minutes instead of one per tick, short enough
+/// that a restarted proxy shows up within a coffee break. Also the ceiling `retry_pending`
+/// enforces, since it is the only wait this module books.
 pub const NEGATIVE_CACHE_S: u64 = 5 * 60;
-
-/// A base URL that gave no answer at all is retried much sooner than a conclusive rejection: a
-/// slow poll or a still-warming proxy costs half a minute of hidden line, not five, while a
-/// black-holing hostname still stops costing the budget on every poll.
-pub const UNREACHABLE_CACHE_S: u64 = 30;
 
 /// Milliseconds since the epoch. A clock set before it reads as 0, which makes every stamp
 /// look due rather than parking the poll.
@@ -156,9 +152,8 @@ pub fn parse_status(body: &str) -> Option<ProxyStatus> {
 /// What the route answered. `UnknownSession` is the plugin's own 404 for a session it has not
 /// seen a request from yet. `Rejected` is a conclusive answer without the plugin: every other
 /// status, or a 2xx body without the schema. `Unreachable` is no answer at all: a transport
-/// error, a body the connection dropped before it finished, or the budget. The two failure
-/// kinds are booked for different waits, because a gateway that answered has told the render
-/// path something a black-holed one has not.
+/// error, a body the connection dropped before it finished, or the budget. `try_fetch` books
+/// the same wait for both.
 pub enum RouteResult {
     /// `Status` carries the response body, which the child stores as parsed JSON for the
     /// render tick to re-check on read.
@@ -279,8 +274,8 @@ fn cache_key(base_url: &str) -> String {
     }
 }
 
-/// A stamp further ahead than `NEGATIVE_CACHE_S`, the longer of the two waits this module
-/// books, reads as expired: a clock that jumped forward and back must not park the poll.
+/// A stamp further ahead than `NEGATIVE_CACHE_S`, the wait this module books, reads as
+/// expired: a clock that jumped forward and back must not park the poll.
 pub fn retry_pending(cache: &NegativeCache, base_url: &str, now_ms: u64) -> bool {
     cache
         .get(&cache_key(base_url))
@@ -508,17 +503,10 @@ fn try_fetch(session_id: &str) -> Option<()> {
         // keeping: no status is stored and the next tick hides the line.
         RouteResult::UnknownSession => crate::usage::write_json_atomic(&path, &next),
         // Rejected names a gateway that answered without the plugin; Unreachable names one
-        // that gave no answer at all and might just be mid-restart, so it is retried sooner.
-        // Either way the attempt is stamped with the previous answer riding along, so the line
-        // does not blank at once.
-        RouteResult::Rejected => {
+        // that gave no answer at all. Both book the same wait by decision, so a slow or
+        // restarting gateway costs the poll the same as an absent plugin.
+        RouteResult::Rejected | RouteResult::Unreachable => {
             note_failure(&mut negative, &base, now, NEGATIVE_CACHE_S);
-            store_negative_cache(&negative_path, &negative);
-            let failed = carried_attempt(previous.as_ref(), &base, now);
-            crate::usage::write_json_atomic(&path, &failed)
-        }
-        RouteResult::Unreachable => {
-            note_failure(&mut negative, &base, now, UNREACHABLE_CACHE_S);
             store_negative_cache(&negative_path, &negative);
             let failed = carried_attempt(previous.as_ref(), &base, now);
             crate::usage::write_json_atomic(&path, &failed)
@@ -991,17 +979,18 @@ mod tests {
 
     #[test]
     fn note_failure_books_the_wait_it_is_given() {
+        // note_failure stays generic over the wait even though every caller in this codebase
+        // now passes NEGATIVE_CACHE_S for both failure kinds.
         let mut cache = NegativeCache::new();
-        note_failure(&mut cache, "http://proxy", 0, UNREACHABLE_CACHE_S);
-        assert_eq!(cache["http://proxy"].retry_at_ms, Some(30_000));
+        note_failure(&mut cache, "http://proxy", 0, 45);
+        assert_eq!(cache["http://proxy"].retry_at_ms, Some(45_000));
     }
 
     #[test]
     fn retry_pending_treats_a_stamp_beyond_the_ceiling_as_expired() {
         let mut cache = NegativeCache::new();
         // A clock that jumped forward and back must not park the poll for days: only a stamp
-        // within NEGATIVE_CACHE_S of now, the longer of the two waits this module books, is
-        // honored.
+        // within NEGATIVE_CACHE_S of now, the wait this module books, is honored.
         cache.insert(
             "http://proxy".to_string(),
             NegativeEntry {

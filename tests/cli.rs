@@ -1503,7 +1503,7 @@ fn failed_poll_keeps_the_last_answer_for_a_minute() {
 }
 
 #[test]
-fn unreachable_gateway_is_retried_after_thirty_seconds() {
+fn unreachable_gateway_is_remembered_for_five_minutes() {
     let home = proxy_home(true);
     // A closed loopback port refuses the connection immediately, the same shape of failure as
     // a black-holing hostname without the multi-second wait one would cost this test.
@@ -1531,8 +1531,8 @@ fn unreachable_gateway_is_retried_after_thirty_seconds() {
         .as_millis() as u64;
     let retry_at_ms = entry[&base]["retry_at_ms"].as_u64().unwrap();
     assert!(
-        retry_at_ms > now_ms && retry_at_ms <= now_ms + 30_000,
-        "retry_at_ms {retry_at_ms} must sit within thirty seconds of now {now_ms}"
+        retry_at_ms > now_ms + 240_000 && retry_at_ms <= now_ms + 300_000,
+        "retry_at_ms {retry_at_ms} must sit within five minutes of now {now_ms}, beyond four"
     );
 }
 
