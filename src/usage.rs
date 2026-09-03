@@ -256,14 +256,18 @@ fn is_official_url(url: &str) -> bool {
     normalized == "https://api.anthropic.com" || normalized == "https://api.claude.com"
 }
 
-/// A snapshot taken under a different account must read as absent so a
-/// /login switch never shows another account's numbers. The file goes with
-/// it, so those numbers do not sit on disk until the next child run either.
+/// A snapshot taken under a different known account must read as absent so a /login switch
+/// never shows another account's numbers; the file goes with it, so those numbers do not sit
+/// on disk until the next child run either. When the local account is not known, a mismatch
+/// still reads as absent but the file stays: a torn read of `~/.claude.json` mid-write by
+/// Claude Code must not destroy a good cache over a transient read failure.
 pub fn load_snapshot(path: &Path, current_uuid: Option<&str>) -> Option<Snapshot> {
     let text = std::fs::read_to_string(path).ok()?;
     let snapshot: Snapshot = serde_json::from_str(&text).ok()?;
     if snapshot.account_uuid.as_deref() != current_uuid {
-        let _ = std::fs::remove_file(path);
+        if current_uuid.is_some() {
+            let _ = std::fs::remove_file(path);
+        }
         return None;
     }
     Some(snapshot)
@@ -957,10 +961,16 @@ mod tests {
 
         assert!(load_snapshot(&dir.path().join("missing.json"), Some("u-1")).is_none());
         assert!(load_snapshot(&path, Some("u-2")).is_none());
-        assert!(!path.exists(), "another account's snapshot is removed");
+        assert!(
+            !path.exists(),
+            "another known account's snapshot is removed"
+        );
         write_json_atomic(&path, &snapshot).unwrap();
         assert!(load_snapshot(&path, None).is_none());
-        assert!(!path.exists());
+        assert!(
+            path.exists(),
+            "an unknown local account must not destroy the cache"
+        );
     }
 
     #[test]
