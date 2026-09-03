@@ -100,12 +100,15 @@ pub struct Snapshot {
 }
 
 /// Account identity from the private api/oauth/profile endpoint, reduced to what the line shows.
+/// The plan and the tier stay raw so a changed label rule needs no refetch.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Profile {
     #[serde(default, deserialize_with = "lenient")]
     pub email: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     pub plan: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub tier: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -131,6 +134,8 @@ struct ProfileOrganization {
     #[serde(default, deserialize_with = "lenient")]
     organization_type: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
+    rate_limit_tier: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
     subscription_status: Option<String>,
 }
 
@@ -153,6 +158,7 @@ pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
             account.has_claude_pro,
             organization.subscription_status.as_deref(),
         ),
+        tier: organization.rate_limit_tier,
     };
     // A 200 whose shape no longer matches (an endpoint change) parses to an
     // empty profile. Reading that as success would overwrite a good cached
@@ -1031,16 +1037,19 @@ mod tests {
     }
 
     #[test]
-    fn profile_body_maps_to_email_and_plan() {
+    fn profile_body_maps_to_email_plan_and_tier() {
         let body = r#"{"account":{"email":" biz@example.com ","has_claude_max":true,"has_claude_pro":false},
-            "organization":{"organization_type":"claude_max","subscription_status":"active"}}"#;
+            "organization":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x",
+            "subscription_status":"active"}}"#;
         let p = profile_from_body(body).unwrap();
         assert_eq!(p.email.as_deref(), Some("biz@example.com"));
         assert_eq!(p.plan.as_deref(), Some("max"));
+        assert_eq!(p.tier.as_deref(), Some("default_claude_max_20x"));
         let body = r#"{"account":{"email":"a@b.c","has_claude_max":"yes"},
-            "organization":{"organization_type":"claude_enterprise"}}"#;
+            "organization":{"organization_type":"claude_enterprise","rate_limit_tier":7}}"#;
         let p = profile_from_body(body).unwrap();
         assert_eq!(p.plan.as_deref(), Some("enterprise"));
+        assert!(p.tier.is_none());
         assert!(profile_from_body("nope").is_none());
         assert!(profile_from_body("{}").is_none());
         assert!(profile_from_body(r#"{"account":{"uuid":"u"}}"#).is_none());
@@ -1056,14 +1065,25 @@ mod tests {
             profile: Some(Profile {
                 email: Some("a@b.c".to_string()),
                 plan: Some("pro".to_string()),
+                tier: Some("default_claude_pro".to_string()),
             }),
             profile_fetched_at_ms: Some(4),
             ..Snapshot::default()
         };
         write_json_atomic(&path, &snapshot).unwrap();
         let loaded = load_snapshot(&path, Some("u")).unwrap();
-        assert_eq!(loaded.profile.unwrap().email.as_deref(), Some("a@b.c"));
+        let profile = loaded.profile.unwrap();
+        assert_eq!(profile.email.as_deref(), Some("a@b.c"));
+        assert_eq!(profile.tier.as_deref(), Some("default_claude_pro"));
         assert_eq!(loaded.profile_fetched_at_ms, Some(4));
+        std::fs::write(
+            &path,
+            r#"{"fetched_at_ms": 5, "account_uuid": "u", "utilization": {},
+                "profile": {"email": "a@b.c", "plan": "pro"}}"#,
+        )
+        .unwrap();
+        let loaded = load_snapshot(&path, Some("u")).unwrap();
+        assert!(loaded.profile.unwrap().tier.is_none());
         std::fs::write(
             &path,
             r#"{"fetched_at_ms": 5, "account_uuid": "u", "utilization": {}}"#,
@@ -1390,7 +1410,7 @@ mod tests {
             account_uuid: Some("u-1".to_string()),
             profile: Some(Profile {
                 email: Some("kept@example.com".to_string()),
-                plan: None,
+                ..Profile::default()
             }),
             profile_fetched_at_ms: Some(7),
             profile_next_at_ms: Some(now + 1),
@@ -1426,7 +1446,7 @@ mod tests {
             account_uuid: Some("u-2".to_string()),
             profile: Some(Profile {
                 email: Some("other@example.com".to_string()),
-                plan: None,
+                ..Profile::default()
             }),
             usage_next_at_ms: Some(now + 1),
             profile_next_at_ms: Some(now + 1),

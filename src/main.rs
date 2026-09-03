@@ -600,6 +600,7 @@ mod tests {
             profile: Some(usage::Profile {
                 email: Some("fetched@example.com".to_string()),
                 plan: Some("team".to_string()),
+                tier: None,
             }),
             ..usage::Snapshot::default()
         };
