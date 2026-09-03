@@ -281,7 +281,7 @@ fn render(raw: &str) -> Option<String> {
             // route said.
             None
         } else {
-            native_snapshot(&config)
+            spawn_then_load_snapshot(&config)
         };
         if !config.cli_proxy_usage_enabled {
             proxy::remove_session_caches();
@@ -423,11 +423,12 @@ fn proxy_status(
     proxy::cached_status(cache.as_ref()?, &base, now)
 }
 
+/// Spawns the fetch child when the schedule is due, then loads the snapshot.
 /// The cache and the child that fills it belong to the local login, so the
 /// snapshot is matched against it. The caller handles a disabled fetch. The
 /// spawn precedes the gate because a seat whose payload carries no rate
 /// limits needs that first fetch before the line can open at all.
-fn native_snapshot(config: &schema::Config) -> Option<usage::Snapshot> {
+fn spawn_then_load_snapshot(config: &schema::Config) -> Option<usage::Snapshot> {
     usage::spawn_fetch_if_stale(config);
     let account_uuid = schema::home_dir()
         .map(|h| schema::load_account_info(&h.join(".claude.json")))
