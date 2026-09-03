@@ -1568,6 +1568,19 @@ fn gateway_success_clears_the_negative_entry() {
 fn unknown_session_is_polled_on_the_interval() {
     let home = proxy_home(true);
     let (base, served) = serve("404 Not Found", r#"{"error":"unknown_session"}"#, 2);
+    // Another gateway's booked wait sits in the cache, so the polls prove they leave entries
+    // they did not write alone.
+    let other = "http://127.0.0.1:1";
+    let retry_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    std::fs::write(
+        negative_cache(home.path()),
+        format!(r#"{{{other:?}: {{"retry_at_ms": {retry_at_ms}}}}}"#),
+    )
+    .unwrap();
     let env = [("ANTHROPIC_BASE_URL", base.as_str())];
     fetch_proxy(home.path(), &base);
     // Only the interval holds the next poll back, so the stamp goes and the route is asked
@@ -1582,8 +1595,16 @@ fn unknown_session_is_polled_on_the_interval() {
     let out = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+    let cache: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(negative_cache(home.path())).unwrap())
+            .unwrap();
+    assert_eq!(
+        cache[other],
+        serde_json::json!({"retry_at_ms": retry_at_ms}),
+        "another gateway's entry survives untouched"
+    );
     assert!(
-        !negative_cache(home.path()).exists(),
+        cache.get(&base).is_none(),
         "an unknown session is not a gateway failure"
     );
 }
