@@ -241,8 +241,9 @@ A negative age, meaning the transcript timestamp sits ahead of the clock, hides 
 
 ### Usage limits line
 
-Every chip here pairs a comment label with a value on the fill scale, so the line reads as a row of
-meters: the further into a budget, the warmer the number.
+The window and spend chips pair a comment label with a value on the fill scale, so the line reads as
+a row of meters: the further into a budget, the warmer the number. The account, plan, and model chips
+are plain magenta text.
 
 | Chip            | Coloring                                                                      |
 | --------------- | ------------------------------------------------------------------------------ |
