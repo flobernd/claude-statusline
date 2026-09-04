@@ -14,12 +14,31 @@ where
     Ok(serde_json::from_value(v).ok())
 }
 
+/// A list parses element by element: a malformed entry becomes nothing rather than failing the
+/// whole list, and a value that is not a list at all reads as empty.
+pub(crate) fn lenient_vec<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    let serde_json::Value::Array(items) = v else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| serde_json::from_value(item).ok())
+        .collect())
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct Payload {
     #[serde(default, deserialize_with = "lenient")]
     pub cwd: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     pub transcript_path: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub session_id: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     pub model: Option<Model>,
     #[serde(default, deserialize_with = "lenient")]
@@ -147,6 +166,9 @@ pub fn parse_payload(raw: &str) -> Option<Payload> {
 #[serde(default)]
 pub struct Config {
     pub advanced_usage_limits_enabled: bool,
+    pub cli_proxy_usage_enabled: bool,
+    pub cli_proxy_usage_max_accounts: usize,
+    pub cli_proxy_usage_refresh_seconds: u64,
     pub clickable_links: bool,
     pub disabled_sections: Vec<String>,
     pub subagent_disabled_sections: Vec<String>,
@@ -158,12 +180,32 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             advanced_usage_limits_enabled: false,
+            cli_proxy_usage_enabled: false,
+            cli_proxy_usage_max_accounts: 3,
+            cli_proxy_usage_refresh_seconds: 5,
             clickable_links: true,
             disabled_sections: Vec::new(),
             subagent_disabled_sections: Vec::new(),
             update_check_interval_minutes: 0,
             usage_fetch_interval_seconds: 60,
         }
+    }
+}
+
+/// The proxy poll interval floor: one request per five seconds is what a render every ten
+/// seconds needs at most, and a lower value would turn the poll into a busy loop on a fast
+/// refresh interval.
+pub const PROXY_REFRESH_FLOOR_S: u64 = 5;
+
+impl Config {
+    /// At least one row, so a zero in the file cannot hide a line the user turned on.
+    pub fn proxy_max_accounts(&self) -> usize {
+        self.cli_proxy_usage_max_accounts.max(1)
+    }
+
+    pub fn proxy_refresh_seconds(&self) -> u64 {
+        self.cli_proxy_usage_refresh_seconds
+            .max(PROXY_REFRESH_FLOOR_S)
     }
 }
 
@@ -442,5 +484,54 @@ mod tests {
         // The new key must not disturb the other defaults.
         assert!(c.clickable_links && c.disabled_sections.is_empty());
         assert_eq!(c.usage_fetch_interval_seconds, 60);
+    }
+
+    #[test]
+    fn session_id_parses_and_a_wrong_type_becomes_none() {
+        let p = parse_payload(r#"{"session_id": "11111111-2222-4333-8444-555555555555"}"#).unwrap();
+        assert_eq!(
+            p.session_id.as_deref(),
+            Some("11111111-2222-4333-8444-555555555555")
+        );
+        let p = parse_payload(r#"{"session_id": 42}"#).unwrap();
+        assert!(p.session_id.is_none());
+    }
+
+    #[test]
+    fn cli_proxy_flag_defaults_off_and_parses() {
+        assert!(!Config::default().cli_proxy_usage_enabled);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude-statusline.json");
+        std::fs::write(&path, r#"{"cli_proxy_usage_enabled": true}"#).unwrap();
+        assert!(load_config(&path).cli_proxy_usage_enabled);
+    }
+
+    #[test]
+    fn proxy_keys_default_and_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude-statusline.json");
+        let c = load_config(&path);
+        assert_eq!(c.cli_proxy_usage_max_accounts, 3);
+        assert_eq!(c.cli_proxy_usage_refresh_seconds, 5);
+        assert_eq!(c.proxy_max_accounts(), 3);
+        assert_eq!(c.proxy_refresh_seconds(), 5);
+
+        std::fs::write(
+            &path,
+            r#"{"cli_proxy_usage_max_accounts": 0, "cli_proxy_usage_refresh_seconds": 1}"#,
+        )
+        .unwrap();
+        let c = load_config(&path);
+        assert_eq!(c.proxy_max_accounts(), 1, "below one reads as one");
+        assert_eq!(c.proxy_refresh_seconds(), 5, "below five reads as five");
+
+        std::fs::write(
+            &path,
+            r#"{"cli_proxy_usage_max_accounts": 2, "cli_proxy_usage_refresh_seconds": 30}"#,
+        )
+        .unwrap();
+        let c = load_config(&path);
+        assert_eq!(c.proxy_max_accounts(), 2);
+        assert_eq!(c.proxy_refresh_seconds(), 30);
     }
 }

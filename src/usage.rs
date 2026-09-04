@@ -123,6 +123,20 @@ impl EndpointEnv {
             || flag_enabled(&self.use_bedrock)
             || flag_enabled(&self.use_vertex)
     }
+
+    /// The base URL of a custom HTTP endpoint, with trailing slashes removed. None for the
+    /// official API and for Bedrock or Vertex sessions, where no HTTP base URL applies and a
+    /// proxy route cannot exist. A bearer token alone does not name a host, so it plays no part.
+    pub fn custom_base_url(&self) -> Option<String> {
+        if flag_enabled(&self.use_bedrock) || flag_enabled(&self.use_vertex) {
+            return None;
+        }
+        let url = self.base_url.as_deref()?.trim();
+        if url.is_empty() || is_official_url(url) {
+            return None;
+        }
+        Some(url.trim_end_matches('/').to_string())
+    }
 }
 
 fn is_set(value: &Option<String>) -> bool {
@@ -244,18 +258,34 @@ fn fable_window(endpoint: &EndpointUtilization) -> Option<Window> {
 }
 
 fn spend_from(extra: &ExtraUsage, now_epoch_s: i64) -> Option<Spend> {
+    spend_from_parts(
+        extra.used_credits,
+        extra.monthly_limit,
+        extra.utilization,
+        now_epoch_s,
+    )
+}
+
+/// Shared by the native endpoint and the CLIProxyAPI proxy route, which report the same shape
+/// under different field names.
+pub(crate) fn spend_from_parts(
+    used_cents: Option<f64>,
+    limit_cents: Option<f64>,
+    reported_pct: Option<f64>,
+    now_epoch_s: i64,
+) -> Option<Spend> {
     // Amounts are authoritative when both exist; the reported utilization
     // only fills the gap, so a unit drift there cannot skew real dollars.
-    let pct = match (extra.used_credits, extra.monthly_limit) {
+    let pct = match (used_cents, limit_cents) {
         (Some(used), Some(limit)) if limit > 0.0 => Some(used / limit * 100.0),
-        _ => extra.utilization,
+        _ => reported_pct,
     };
-    if pct.is_none() && (extra.used_credits.is_none() || extra.monthly_limit.is_none()) {
+    if pct.is_none() && (used_cents.is_none() || limit_cents.is_none()) {
         return None;
     }
     Some(Spend {
-        used_cents: extra.used_credits,
-        limit_cents: extra.monthly_limit,
+        used_cents,
+        limit_cents,
         pct,
         resets_at: next_month_start(now_epoch_s),
     })
@@ -388,11 +418,17 @@ fn read_access_token(credentials_path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The budget of every detached fetch: long enough for a slow network hop, short enough that
+/// a stuck child cannot pile up behind the next tick's spawn.
+pub(crate) fn fetch_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(5)
+}
+
 /// The only network touchpoint, kept separate so no test can reach it.
 fn fetch_body(token: &str) -> Option<String> {
     let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout_connect(fetch_timeout())
+        .timeout(fetch_timeout())
         .build();
     agent
         .get("https://api.anthropic.com/api/oauth/usage")
@@ -799,5 +835,42 @@ mod tests {
         // Even next to an explicitly official base URL: a custom bearer
         // token means gateway auth regardless of the URL.
         assert!(endpoint_env(Some("t"), Some("https://api.anthropic.com"), None, None).is_custom());
+    }
+
+    #[test]
+    fn custom_base_url_is_the_trimmed_non_official_http_base() {
+        assert_eq!(
+            endpoint_env(None, Some(" http://127.0.0.1:8317/ "), None, None).custom_base_url(),
+            Some("http://127.0.0.1:8317".to_string())
+        );
+        assert!(
+            endpoint_env(None, None, None, None)
+                .custom_base_url()
+                .is_none()
+        );
+        assert!(
+            endpoint_env(None, Some("https://api.anthropic.com/"), None, None)
+                .custom_base_url()
+                .is_none()
+        );
+        assert!(
+            endpoint_env(Some("tok"), Some("https://api.claude.com"), None, None)
+                .custom_base_url()
+                .is_none()
+        );
+        assert!(
+            endpoint_env(None, Some("http://proxy"), Some("1"), None)
+                .custom_base_url()
+                .is_none()
+        );
+        assert!(
+            endpoint_env(None, Some("http://proxy"), None, Some("true"))
+                .custom_base_url()
+                .is_none()
+        );
+        assert_eq!(
+            endpoint_env(None, Some("http://proxy"), Some("0"), Some("false")).custom_base_url(),
+            Some("http://proxy".to_string())
+        );
     }
 }
