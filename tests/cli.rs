@@ -1082,18 +1082,41 @@ fn cache_age_keeps_the_wide_warning_when_the_ttl_is_unknown() {
     }
 }
 
-/// Answers one HTTP request on a loopback port with the given JSON body and reports the request
-/// line if one arrived, so a caller can assert on the exact route the statusline called instead
-/// of merely that some request came in. The accept loop polls with a deadline so a negative test
-/// never hangs.
-fn serve_once(body: &'static str) -> (String, std::thread::JoinHandle<Option<String>>) {
+/// Answers up to `max_requests` HTTP requests on a loopback port, each with the given status
+/// line and JSON body, and reports the request lines that arrived, so a caller can assert on
+/// the exact route the statusline called and on how often it called.
+fn serve(
+    status: &'static str,
+    body: &'static str,
+    max_requests: usize,
+) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    serve_answers(max_requests, move |_| (status, body))
+}
+
+/// One answer per entry, in order, and no more requests than entries: a base URL that answers
+/// once and then fails needs both answers on the same port.
+fn serve_sequence(
+    responses: &'static [(&'static str, &'static str)],
+) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    serve_answers(responses.len(), move |i| responses[i])
+}
+
+/// The responder behind both helpers; `answer` picks the status line and body for the request
+/// index. The accept loop polls with a deadline that restarts after each answered request, so a
+/// negative test never hangs and a second run gets the same grace as the first.
+fn serve_answers(
+    max_requests: usize,
+    answer: impl Fn(usize) -> (&'static str, &'static str) + Send + 'static,
+) -> (String, std::thread::JoinHandle<Vec<String>>) {
     use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
-        loop {
+        let grace = std::time::Duration::from_millis(1500);
+        let mut deadline = std::time::Instant::now() + grace;
+        let mut requests = Vec::new();
+        while requests.len() < max_requests {
             match listener.accept() {
                 Ok((stream, _)) => {
                     stream.set_nonblocking(false).unwrap();
@@ -1111,25 +1134,34 @@ fn serve_once(body: &'static str) -> (String, std::thread::JoinHandle<Option<Str
                             _ => break,
                         }
                     }
+                    let (status, body) = answer(requests.len());
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
                     );
                     let _ = reader.get_mut().write_all(response.as_bytes());
-                    return Some(request_line.trim_end().to_string());
+                    requests.push(request_line.trim_end().to_string());
+                    deadline = std::time::Instant::now() + grace;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     if std::time::Instant::now() > deadline {
-                        return None;
+                        break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                Err(_) => return None,
+                Err(_) => break,
             }
         }
+        requests
     });
     (format!("http://{addr}"), handle)
+}
+
+/// One 200 answer, reported as the request line if it arrived.
+fn serve_once(body: &'static str) -> (String, std::thread::JoinHandle<Option<String>>) {
+    let (base, handle) = serve("200 OK", body, 1);
+    let first = std::thread::spawn(move || handle.join().unwrap().into_iter().next());
+    (base, first)
 }
 
 const PROXY_BODY: &str = r#"{"schema":1,"accounts":[
@@ -1246,7 +1278,7 @@ fn render_spawns_the_child_when_the_poll_is_due_and_not_before() {
             "cli_proxy_usage_refresh_seconds": 60, "usage_fetch_interval_seconds": 0}"#,
     )
     .unwrap();
-    let (base, served) = serve_once(PROXY_BODY);
+    let (base, served) = serve("200 OK", PROXY_BODY, 2);
     let env = [("ANTHROPIC_BASE_URL", base.as_str())];
     // No session file: the tick spawns the child, which asks the route once.
     let out = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
@@ -1254,24 +1286,18 @@ fn render_spawns_the_child_when_the_poll_is_due_and_not_before() {
         !String::from_utf8_lossy(&out.stdout).contains("5h:"),
         "the first tick has no answer yet"
     );
-    assert!(
-        served.join().unwrap().is_some(),
-        "the spawned child must ask the route"
-    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     while !session_cache(home.path()).exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    let landed = std::fs::read_to_string(session_cache(home.path()))
-        .expect("the spawned child must land the file");
+    assert!(
+        session_cache(home.path()).exists(),
+        "the spawned child must land the file"
+    );
     // A fresh attempt stamp: the next tick reads the file and spawns nothing.
     let out = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
     assert!(String::from_utf8_lossy(&out.stdout).contains("biz@example.com"));
-    assert_eq!(
-        std::fs::read_to_string(session_cache(home.path())).unwrap(),
-        landed,
-        "an untouched file proves the second tick polled nothing"
-    );
+    assert_eq!(served.join().unwrap().len(), 1, "one request for two ticks");
 }
 
 #[test]
@@ -1372,47 +1398,6 @@ fn disabled_proxy_flag_removes_the_session_files() {
     );
 }
 
-/// A blip must not blank the line: the failing poll carries the stored answer forward, so the
-/// rows stay up until the freshness window runs out instead of going the moment one poll fails.
-#[test]
-fn failed_poll_keeps_the_last_answer_for_a_minute() {
-    let home = proxy_home(true);
-    // The responder answers once and then its port is dead, so the second poll fails against the
-    // base URL of the stored answer: the carry-forward only applies to that one.
-    let (base, served) = serve_once(PROXY_BODY);
-    let env = [("ANTHROPIC_BASE_URL", base.as_str())];
-    fetch_proxy(home.path(), &base);
-    assert!(served.join().unwrap().is_some());
-    let path = session_cache(home.path());
-    // The stamp is aged past the fixture's hour-long interval rather than the file removed: the
-    // file holds the answer the failing poll has to carry.
-    let mut cache: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    let attempted = cache["attempted_at_ms"].as_u64().unwrap();
-    cache["attempted_at_ms"] = serde_json::json!(attempted - 3_601_000);
-    std::fs::write(&path, cache.to_string()).unwrap();
-    fetch_proxy(home.path(), &base);
-
-    let out = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        stdout.lines().filter(|l| l.contains("5h:")).count(),
-        2,
-        "both rows survive the failed poll: {stdout}"
-    );
-
-    // Once the carried answer ages out the line hides. The attempt stamp stays fresh, so the
-    // tick reads the file instead of spawning a child that would rewrite it.
-    let mut cache: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    let fetched = cache["fetched_at_ms"].as_u64().unwrap();
-    cache["fetched_at_ms"] = serde_json::json!(fetched - 61_000);
-    std::fs::write(&path, cache.to_string()).unwrap();
-    let out = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.contains("5h:"), "stdout: {stdout}");
-}
-
 #[test]
 fn proxy_route_is_off_without_the_config_key() {
     let home = proxy_home(false);
@@ -1451,6 +1436,240 @@ fn proxy_route_is_off_on_the_official_endpoint() {
         "the official endpoint must not call the responder"
     );
     assert!(!stdout.contains("biz@example.com"), "stdout: {stdout}");
+}
+
+fn negative_cache(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".claude").join("claude-statusline-proxy.json")
+}
+
+#[test]
+fn gateway_failure_is_remembered_for_five_minutes() {
+    let home = proxy_home(true);
+    let (base, served) = serve("404 Not Found", "404 page not found", 2);
+    let env = [("ANTHROPIC_BASE_URL", base.as_str())];
+    fetch_proxy(home.path(), &base);
+    let entry: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(negative_cache(home.path())).unwrap())
+            .unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let retry_at_ms = entry[&base]["retry_at_ms"].as_u64().unwrap();
+    assert!(
+        retry_at_ms > now_ms && retry_at_ms <= now_ms + 300_000,
+        "retry_at_ms {retry_at_ms} must sit within five minutes of now {now_ms}"
+    );
+    // The attempt stamp alone would already hold the second poll back, so it goes: only the
+    // negative cache may keep the request from going out.
+    std::fs::remove_file(session_cache(home.path())).unwrap();
+    fetch_proxy(home.path(), &base);
+    assert_eq!(
+        served.join().unwrap().len(),
+        1,
+        "the second poll must not ask a base URL that just failed"
+    );
+    let first = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
+    let second = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
+    for out in [first, second] {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+    }
+}
+
+/// A blip must not blank the line: the failing poll carries the stored answer forward, so the
+/// rows stay up until the freshness window runs out instead of going the moment one poll fails
+/// and then staying gone for the negative cache's five minutes.
+#[test]
+fn failed_poll_keeps_the_last_answer_for_a_minute() {
+    let home = proxy_home(true);
+    // The same port answers twice: the carry-forward only applies to the base URL of the stored
+    // answer, so a second responder on another port would prove nothing.
+    let (base, served) = serve_sequence(&[
+        ("200 OK", PROXY_BODY),
+        ("404 Not Found", "404 page not found"),
+    ]);
+    let env = [("ANTHROPIC_BASE_URL", base.as_str())];
+    fetch_proxy(home.path(), &base);
+    let path = session_cache(home.path());
+    // The stamp is aged past the fixture's hour-long interval rather than the file removed: the
+    // file holds the answer the failing poll has to carry.
+    let mut cache: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let attempted = cache["attempted_at_ms"].as_u64().unwrap();
+    cache["attempted_at_ms"] = serde_json::json!(attempted - 3_601_000);
+    std::fs::write(&path, cache.to_string()).unwrap();
+    fetch_proxy(home.path(), &base);
+    assert_eq!(
+        served.join().unwrap().len(),
+        2,
+        "the second poll has to reach the gateway that rejects it"
+    );
+
+    let out = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().filter(|l| l.contains("5h:")).count(),
+        2,
+        "both rows survive the failed poll: {stdout}"
+    );
+    let entry: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(negative_cache(home.path())).unwrap())
+            .unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let retry_at_ms = entry[&base]["retry_at_ms"].as_u64().unwrap();
+    assert!(
+        retry_at_ms > now_ms && retry_at_ms <= now_ms + 300_000,
+        "retry_at_ms {retry_at_ms} must sit within five minutes of now {now_ms}"
+    );
+
+    // Once the carried answer ages out the line hides. The attempt stamp stays fresh, so the
+    // tick reads the file instead of spawning a child that would rewrite it.
+    let mut cache: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let fetched = cache["fetched_at_ms"].as_u64().unwrap();
+    cache["fetched_at_ms"] = serde_json::json!(fetched - 61_000);
+    std::fs::write(&path, cache.to_string()).unwrap();
+    let out = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+}
+
+#[test]
+fn unreachable_gateway_is_remembered_for_five_minutes() {
+    let home = proxy_home(true);
+    // A closed loopback port refuses the connection immediately, the same shape of failure as
+    // a black-holing hostname without the multi-second wait one would cost this test.
+    let base = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{addr}")
+    };
+    fetch_proxy(home.path(), &base);
+    let out = run_statusline_with_env(
+        PROXY_PAYLOAD,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_BASE_URL", base.as_str())],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+    let entry: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(negative_cache(home.path())).unwrap())
+            .unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let retry_at_ms = entry[&base]["retry_at_ms"].as_u64().unwrap();
+    assert!(
+        retry_at_ms > now_ms + 240_000 && retry_at_ms <= now_ms + 300_000,
+        "retry_at_ms {retry_at_ms} must sit within five minutes of now {now_ms}, beyond four"
+    );
+}
+
+#[test]
+fn gateway_success_clears_the_negative_entry() {
+    let home = proxy_home(true);
+    let (base, served) = serve_once(PROXY_BODY);
+    std::fs::write(
+        negative_cache(home.path()),
+        format!(r#"{{{base:?}: {{"retry_at_ms": 1}}}}"#),
+    )
+    .unwrap();
+    fetch_proxy(home.path(), &base);
+    assert!(
+        served.join().unwrap().is_some(),
+        "an expired entry allows the request"
+    );
+    let out = run_statusline_with_env(
+        PROXY_PAYLOAD,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_BASE_URL", &base)],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("biz@example.com"), "stdout: {stdout}");
+    assert!(
+        !negative_cache(home.path()).exists(),
+        "the only entry is gone, so the file is too"
+    );
+}
+
+#[test]
+fn unknown_session_is_polled_on_the_interval() {
+    let home = proxy_home(true);
+    let (base, served) = serve("404 Not Found", r#"{"error":"unknown_session"}"#, 2);
+    let env = [("ANTHROPIC_BASE_URL", base.as_str())];
+    fetch_proxy(home.path(), &base);
+    // Only the interval holds the next poll back, so the stamp goes and the route is asked
+    // again: an unknown session books no wait of its own.
+    std::fs::remove_file(session_cache(home.path())).unwrap();
+    fetch_proxy(home.path(), &base);
+    assert_eq!(
+        served.join().unwrap().len(),
+        2,
+        "the poll asks again once the interval is up"
+    );
+    let out = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+    assert!(
+        !negative_cache(home.path()).exists(),
+        "an unknown session is not a gateway failure"
+    );
+}
+
+/// A proxied session whose route gave no status must not fall back to the local login: the
+/// local token belongs to whichever account is logged in locally, not to the credential the
+/// proxy picked, so neither the local snapshot nor its account may backfill anything here.
+#[test]
+fn proxy_route_failure_never_falls_back_to_the_local_login() {
+    let home = proxy_home(true);
+    // A live fetch interval, so the surviving cache proves the proxied path left it alone
+    // rather than that a disabled fetch had already removed it.
+    std::fs::write(
+        home.path().join(".claude").join("claude-statusline.json"),
+        r#"{"advanced_usage_limits_enabled": true, "cli_proxy_usage_enabled": true,
+            "cli_proxy_usage_refresh_seconds": 3600, "usage_fetch_interval_seconds": 60}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join(".claude.json"),
+        r#"{"oauthAccount": {"organizationType": "claude_max", "accountUuid": "acct-1",
+            "emailAddress": "local@example.com"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.path()
+            .join(".claude")
+            .join("claude-statusline-usage.json"),
+        parked_snapshot("acct-1", "fetched@example.com"),
+    )
+    .unwrap();
+    let (base, served) = serve("404 Not Found", "404 page not found", 1);
+    let payload = r#"{"session_id": "11111111-2222-4333-8444-555555555555",
+        "rate_limits": {"five_hour": {"used_percentage": 42, "resets_at": 4102444800}}}"#;
+    fetch_proxy(home.path(), &base);
+    let out = run_statusline_with_env(
+        payload,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_BASE_URL", base.as_str())],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(served.join().unwrap().len(), 1, "the route is asked once");
+    assert!(stdout.contains("5h:42%"), "stdout: {stdout}");
+    assert!(!stdout.contains("local@example.com"), "stdout: {stdout}");
+    assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
+    assert!(
+        usage_cache(home.path()).exists(),
+        "a proxied session must not touch the local login's cache"
+    );
 }
 
 /// The usage line is the one that carries the session window. Its index is not fixed: the
@@ -1597,13 +1816,15 @@ fn line3_drop_order_keeps_the_session_window() {
     );
 }
 
-fn native_home(snapshot: Option<&str>) -> tempfile::TempDir {
+fn native_home(interval_s: u64, snapshot: Option<&str>) -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let dir = home.path().join(".claude");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("claude-statusline.json"),
-        r#"{"advanced_usage_limits_enabled": true, "usage_fetch_interval_seconds": 0}"#,
+        format!(
+            r#"{{"advanced_usage_limits_enabled": true, "usage_fetch_interval_seconds": {interval_s}}}"#
+        ),
     )
     .unwrap();
     std::fs::write(
@@ -1621,9 +1842,30 @@ fn native_home(snapshot: Option<&str>) -> tempfile::TempDir {
 const NATIVE_PAYLOAD: &str =
     r#"{"rate_limits": {"five_hour": {"used_percentage": 42, "resets_at": 4102444800}}}"#;
 
+fn usage_cache(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".claude").join("claude-statusline-usage.json")
+}
+
+/// A snapshot whose next-at stamps sit thirty minutes ahead, so the render tick under test
+/// never spawns a fetch child and the file stays exactly as seeded. The stamps must stay under
+/// the due() ceiling (the larger of the configured interval and one hour) or they read as due
+/// again and the tick spawns a real child into this test's HOME.
+fn parked_snapshot(account_uuid: &str, email: &str) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let parked = now + 1_800_000;
+    format!(
+        r#"{{"fetched_at_ms": {now}, "account_uuid": {account_uuid:?}, "utilization": {{}},
+            "profile": {{"email": {email:?}, "plan": "team"}}, "profile_fetched_at_ms": {now},
+            "usage_next_at_ms": {parked}, "profile_next_at_ms": {parked}}}"#
+    )
+}
+
 #[test]
 fn native_usage_line_shows_the_local_email_without_a_snapshot() {
-    let home = native_home(None);
+    let home = native_home(0, None);
     let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("local@example.com"), "stdout: {stdout}");
@@ -1633,20 +1875,57 @@ fn native_usage_line_shows_the_local_email_without_a_snapshot() {
 
 #[test]
 fn native_usage_line_prefers_the_snapshot_profile() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let snapshot = format!(
-        r#"{{"fetched_at_ms": {now}, "account_uuid": "acct-1", "utilization": {{}},
-            "profile": {{"email": "fetched@example.com", "plan": "team"}}, "profile_fetched_at_ms": {now}}}"#
-    );
-    let home = native_home(Some(&snapshot));
+    let home = native_home(60, Some(&parked_snapshot("acct-1", "fetched@example.com")));
     let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("fetched@example.com"), "stdout: {stdout}");
     assert!(stdout.contains("Team"), "stdout: {stdout}");
     assert!(!stdout.contains("local@example.com"), "stdout: {stdout}");
+    assert!(
+        usage_cache(home.path()).exists(),
+        "a matching snapshot stays on disk"
+    );
+}
+
+#[test]
+fn account_switch_removes_the_usage_cache() {
+    let home = native_home(60, Some(&parked_snapshot("acct-2", "other@example.com")));
+    let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !usage_cache(home.path()).exists(),
+        "another account's snapshot must go"
+    );
+    assert!(stdout.contains("local@example.com"), "stdout: {stdout}");
+    assert!(!stdout.contains("other@example.com"), "stdout: {stdout}");
+}
+
+#[test]
+fn disabled_fetch_removes_the_usage_cache() {
+    let home = native_home(0, Some(&parked_snapshot("acct-1", "fetched@example.com")));
+    let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !usage_cache(home.path()).exists(),
+        "interval 0 drops the cache"
+    );
+    assert!(stdout.contains("local@example.com"), "stdout: {stdout}");
+    assert!(stdout.contains("5h:42%"), "stdout: {stdout}");
+    assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
+}
+
+#[test]
+fn disabled_line_removes_the_usage_cache() {
+    let home = native_home(60, Some(&parked_snapshot("acct-1", "fetched@example.com")));
+    std::fs::write(
+        home.path().join(".claude").join("claude-statusline.json"),
+        r#"{"advanced_usage_limits_enabled": false}"#,
+    )
+    .unwrap();
+    let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!usage_cache(home.path()).exists(), "the line is off");
+    assert!(!stdout.contains("5h:"), "stdout: {stdout}");
 }
 
 #[test]

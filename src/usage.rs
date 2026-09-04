@@ -1,8 +1,10 @@
+use crate::backoff;
 use crate::schema::{self, Config, lenient};
 use chrono::{Datelike, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// Response shape of the private api/oauth/usage endpoint. The endpoint is
 /// unofficial, so every field parses leniently: shape drift costs a chip,
@@ -70,7 +72,9 @@ pub struct ScopeModel {
     pub display_name: Option<String>,
 }
 
-/// On-disk cache written by the fetch child and read by the render path.
+/// On-disk cache written by the fetch child and read by the render path. The next-at stamps
+/// carry the retry schedule of each kind, so a failed fetch waits out its backoff instead of
+/// being retried on every render tick; a snapshot without them reads as due for both kinds.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Snapshot {
     #[serde(default)]
@@ -83,6 +87,16 @@ pub struct Snapshot {
     pub profile: Option<Profile>,
     #[serde(default, deserialize_with = "lenient")]
     pub profile_fetched_at_ms: Option<u64>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub usage_next_at_ms: Option<u64>,
+    /// Absent after a success, so the ladder restarts at its first rung.
+    #[serde(default, deserialize_with = "lenient")]
+    pub usage_backoff_ms: Option<u64>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub profile_next_at_ms: Option<u64>,
+    /// Absent after a success, so the ladder restarts at its first rung.
+    #[serde(default, deserialize_with = "lenient")]
+    pub profile_backoff_ms: Option<u64>,
 }
 
 /// Account identity from the private api/oauth/profile endpoint, reduced to what the line shows.
@@ -120,8 +134,9 @@ struct ProfileOrganization {
     subscription_status: Option<String>,
 }
 
-/// The profile changes on a plan switch and little else, so a day between fetches is plenty.
-pub(crate) const PROFILE_INTERVAL_S: u64 = 24 * 60 * 60;
+/// The profile changes on a plan switch and little else, so an hour between fetches is
+/// plenty, and short enough that a switch shows up within the same session.
+pub(crate) const PROFILE_INTERVAL_S: u64 = 60 * 60;
 
 pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
     let response: ProfileResponse = serde_json::from_str(body).ok()?;
@@ -141,16 +156,32 @@ pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
     };
     // A 200 whose shape no longer matches (an endpoint change) parses to an
     // empty profile. Reading that as success would overwrite a good cached
-    // profile and stamp it fresh for a day; None instead lets refresh_profile
-    // keep the previous profile and retry on the next child run.
+    // profile and clear its ladder; None instead makes the profile kind a
+    // failure, so the child keeps the previous profile and books the ladder.
     if profile.email.is_none() && profile.plan.is_none() {
         return None;
     }
     Some(profile)
 }
 
+/// A 2xx body that parses but carries no window at all (an error envelope, or a shape the
+/// endpoint no longer sends) mirrors the profile's emptiness guard: reading it as success
+/// would overwrite a good cached utilization and clear its ladder, so it counts as a failure
+/// of the usage kind instead, and the child keeps the previous data and books the ladder.
+fn utilization_from_body(body: &str) -> Option<EndpointUtilization> {
+    let utilization: EndpointUtilization = serde_json::from_str(body).ok()?;
+    let has_window = utilization.five_hour.is_some()
+        || utilization.seven_day.is_some()
+        || utilization.limits.as_ref().is_some_and(|l| !l.is_empty());
+    has_window.then_some(utilization)
+}
+
 pub fn cache_path() -> Option<PathBuf> {
-    schema::home_dir().map(|h| h.join(".claude").join("claude-statusline-usage.json"))
+    schema::home_dir().map(|h| cache_path_in(&h))
+}
+
+fn cache_path_in(home: &Path) -> PathBuf {
+    home.join(".claude").join("claude-statusline-usage.json")
 }
 
 /// Environment overrides that point Claude Code away from the official
@@ -225,15 +256,29 @@ fn is_official_url(url: &str) -> bool {
     normalized == "https://api.anthropic.com" || normalized == "https://api.claude.com"
 }
 
-/// A snapshot taken under a different account must read as absent so a
-/// /login switch never shows another account's numbers.
+/// A snapshot taken under a different known account must read as absent so a /login switch
+/// never shows another account's numbers; the file goes with it, so those numbers do not sit
+/// on disk until the next child run either. When the local account is not known, a mismatch
+/// still reads as absent but the file stays: a torn read of `~/.claude.json` mid-write by
+/// Claude Code must not destroy a good cache over a transient read failure.
 pub fn load_snapshot(path: &Path, current_uuid: Option<&str>) -> Option<Snapshot> {
     let text = std::fs::read_to_string(path).ok()?;
     let snapshot: Snapshot = serde_json::from_str(&text).ok()?;
     if snapshot.account_uuid.as_deref() != current_uuid {
+        if current_uuid.is_some() {
+            let _ = std::fs::remove_file(path);
+        }
         return None;
     }
     Some(snapshot)
+}
+
+/// Every error is ignored: a missing file is the common case, and a render
+/// tick can do nothing about a file it cannot unlink.
+pub fn remove_cache() {
+    if let Some(path) = cache_path() {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[derive(Debug)]
@@ -401,6 +446,25 @@ pub(crate) fn read_fetched_at_ms(path: &Path) -> Option<u64> {
     value.get("fetched_at_ms")?.as_u64()
 }
 
+/// A kind is due when its next-at stamp is absent, not in the future, or further ahead than
+/// `max_ahead_ms`: the largest wait the code books for that kind, so a stamp beyond it could
+/// only come from a clock that jumped forward and back, and must not park the poll for days.
+/// Shared by the render tick's spawn gate and the fetch child's stampede re-check, so both read
+/// one schedule.
+pub(crate) fn due(next_at_ms: Option<u64>, now_ms: u64, max_ahead_ms: u64) -> bool {
+    next_at_ms.is_none_or(|at| at <= now_ms || at.saturating_sub(now_ms) > max_ahead_ms)
+}
+
+/// The spawn gate needs only the two next-at stamps; a corrupt cache then reads as due
+/// instead of dragging the full schema into the render path.
+pub(crate) fn read_next_at_ms(path: &Path) -> (Option<u64>, Option<u64>) {
+    let value: Option<serde_json::Value> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok());
+    let stamp = |key: &str| value.as_ref()?.get(key)?.as_u64();
+    (stamp("usage_next_at_ms"), stamp("profile_next_at_ms"))
+}
+
 pub fn spawn_fetch_if_stale(config: &Config) {
     // Checked before any filesystem access: interval 0 disables fetching.
     if config.usage_fetch_interval_seconds == 0 {
@@ -409,11 +473,18 @@ pub fn spawn_fetch_if_stale(config: &Config) {
     let Some(path) = cache_path() else {
         return;
     };
-    if !fetch_due(
-        config.usage_fetch_interval_seconds,
-        read_fetched_at_ms(&path),
-        crate::clock::now_ms(),
-    ) {
+    let (usage_next_at_ms, profile_next_at_ms) = read_next_at_ms(&path);
+    let now = crate::clock::now_ms();
+    // The ceiling is the larger of the kind's own interval and one hour, so a configured
+    // interval under an hour still allows a stamp to sit that far out without reading as due.
+    let usage_ceiling_ms = config
+        .usage_fetch_interval_seconds
+        .max(PROFILE_INTERVAL_S)
+        .saturating_mul(1_000);
+    let profile_ceiling_ms = PROFILE_INTERVAL_S * 1_000;
+    if !due(usage_next_at_ms, now, usage_ceiling_ms)
+        && !due(profile_next_at_ms, now, profile_ceiling_ms)
+    {
         return;
     }
     spawn_fetch_child();
@@ -451,59 +522,145 @@ pub fn run_fetch() -> i32 {
 const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
-fn try_fetch() -> Option<()> {
-    let home = schema::home_dir()?;
-    let claude_dir = home.join(".claude");
-    let config = schema::load_config(&claude_dir.join("claude-statusline.json"));
-    let path = cache_path()?;
-    // Re-checking staleness doubles as stampede protection when several
-    // render ticks spawn children before the first snapshot lands.
-    if !fetch_due(
-        config.usage_fetch_interval_seconds,
-        read_fetched_at_ms(&path),
-        crate::clock::now_ms(),
-    ) {
-        return None;
-    }
-    let token = read_access_token(&claude_dir.join(".credentials.json"))?;
-    let body = fetch_json(USAGE_URL, &token)?;
-    let utilization: EndpointUtilization = serde_json::from_str(&body).ok()?;
-    let account_uuid = schema::load_account_info(&home.join(".claude.json")).account_uuid;
-    // The previous snapshot carries the profile forward. A snapshot of another
-    // account reads as absent here, which forces a fresh profile after a
-    // /login switch.
-    let previous = load_snapshot(&path, account_uuid.as_deref()).unwrap_or_default();
-    let (profile, profile_fetched_at_ms) = refresh_profile(
-        &token,
-        previous.profile,
-        previous.profile_fetched_at_ms,
-        crate::clock::now_ms(),
-    );
-    let snapshot = Snapshot {
-        fetched_at_ms: crate::clock::now_ms(),
-        account_uuid,
-        utilization,
-        profile,
-        profile_fetched_at_ms,
-    };
-    write_json_atomic(&path, &snapshot)
+/// What one network call produced. A failure keeps the Retry-After the server sent, if any,
+/// so the schedule can honor it.
+pub(crate) enum Fetched {
+    Body(String),
+    Failed { retry_after: Option<Duration> },
 }
 
-/// A failed profile fetch keeps the previous profile and its stamp, so the
-/// next child run retries instead of waiting out a day on nothing.
-fn refresh_profile(
+/// (url, token) -> outcome. The child takes its network call as a parameter so the control
+/// flow can be tested without a network.
+type Fetch<'a> = &'a dyn Fn(&str, &str) -> Fetched;
+
+/// One attempt at a kind, once its body was parsed.
+enum Outcome {
+    Success,
+    Failure { retry_after: Option<Duration> },
+}
+
+/// The retry state of one fetch kind, written to the snapshot fields of that kind.
+#[derive(Debug, PartialEq, Eq)]
+struct Schedule {
+    next_at_ms: u64,
+    backoff_ms: Option<u64>,
+}
+
+/// The outcome table. A success clears the ladder and books the next fetch one interval
+/// ahead. A Retry-After books the wait the server asked for and leaves the ladder alone, so
+/// the failures before the window still count after it. Any other failure climbs one rung.
+fn schedule(
+    previous_backoff_ms: Option<u64>,
+    outcome: &Outcome,
+    interval: Duration,
+    now_ms: u64,
+) -> Schedule {
+    let (wait, backoff_ms) = match outcome {
+        Outcome::Success => (interval, None),
+        Outcome::Failure {
+            retry_after: Some(wait),
+        } => (*wait, previous_backoff_ms),
+        Outcome::Failure { retry_after: None } => {
+            let rung = backoff::next_backoff(previous_backoff_ms.map(Duration::from_millis));
+            (rung, Some(rung.as_millis() as u64))
+        }
+    };
+    Schedule {
+        next_at_ms: now_ms.saturating_add(wait.as_millis() as u64),
+        backoff_ms,
+    }
+}
+
+/// Runs one due kind. The parser decides success, because a 2xx body that does not parse is
+/// as useless as a 5xx and must not stamp the kind fresh.
+fn attempt<T>(
+    fetch: Fetch<'_>,
+    url: &str,
     token: &str,
-    previous: Option<Profile>,
-    previous_at_ms: Option<u64>,
-    now: u64,
-) -> (Option<Profile>, Option<u64>) {
-    if !fetch_due(PROFILE_INTERVAL_S, previous_at_ms, now) {
-        return (previous, previous_at_ms);
+    parse: impl FnOnce(&str) -> Option<T>,
+) -> (Option<T>, Outcome) {
+    match fetch(url, token) {
+        Fetched::Body(body) => match parse(&body) {
+            Some(data) => (Some(data), Outcome::Success),
+            None => (None, Outcome::Failure { retry_after: None }),
+        },
+        Fetched::Failed { retry_after } => (None, Outcome::Failure { retry_after }),
     }
-    match fetch_json(PROFILE_URL, token).and_then(|body| profile_from_body(&body)) {
-        Some(profile) => (Some(profile), Some(now)),
-        None => (previous, previous_at_ms),
+}
+
+fn try_fetch() -> Option<()> {
+    let home = schema::home_dir()?;
+    try_fetch_with(&home, &fetch_json, crate::clock::now_ms())
+}
+
+/// The control flow of the child. Each kind runs on its own schedule, usage first, and the
+/// profile runs whether or not the usage fetch succeeded: a rate-limited usage endpoint must
+/// not starve the account chip. A failure keeps the previous data and stamp of its kind.
+fn try_fetch_with(home: &Path, fetch: Fetch<'_>, now_ms: u64) -> Option<()> {
+    let claude_dir = home.join(".claude");
+    let config = schema::load_config(&claude_dir.join("claude-statusline.json"));
+    if config.usage_fetch_interval_seconds == 0 {
+        return None;
     }
+    let path = cache_path_in(home);
+    let account_uuid = schema::load_account_info(&home.join(".claude.json")).account_uuid;
+    // A snapshot of another account reads as absent, which forces a fresh profile after a
+    // /login switch.
+    let mut snapshot = load_snapshot(&path, account_uuid.as_deref()).unwrap_or_default();
+    snapshot.account_uuid = account_uuid;
+    // Re-checking the schedule doubles as stampede protection when several render ticks
+    // spawn children before the first snapshot lands.
+    let usage_ceiling_ms = config
+        .usage_fetch_interval_seconds
+        .max(PROFILE_INTERVAL_S)
+        .saturating_mul(1_000);
+    let profile_ceiling_ms = PROFILE_INTERVAL_S * 1_000;
+    let usage_due = due(snapshot.usage_next_at_ms, now_ms, usage_ceiling_ms);
+    let profile_due = due(snapshot.profile_next_at_ms, now_ms, profile_ceiling_ms);
+    if !usage_due && !profile_due {
+        return None;
+    }
+    // A missing or unreadable token is not an early return: every due kind fails without a
+    // network call and books its ladder below, so a session with no OAuth login backs off
+    // one rung per render tick instead of spawning a fresh child on every one.
+    let token = read_access_token(&claude_dir.join(".credentials.json"));
+    if usage_due {
+        let (utilization, outcome) = match token.as_deref() {
+            Some(token) => attempt(fetch, USAGE_URL, token, utilization_from_body),
+            None => (None, Outcome::Failure { retry_after: None }),
+        };
+        if let Some(utilization) = utilization {
+            snapshot.utilization = utilization;
+            snapshot.fetched_at_ms = now_ms;
+        }
+        let next = schedule(
+            snapshot.usage_backoff_ms,
+            &outcome,
+            Duration::from_secs(config.usage_fetch_interval_seconds),
+            now_ms,
+        );
+        snapshot.usage_next_at_ms = Some(next.next_at_ms);
+        snapshot.usage_backoff_ms = next.backoff_ms;
+    }
+    if profile_due {
+        let (profile, outcome) = match token.as_deref() {
+            Some(token) => attempt(fetch, PROFILE_URL, token, profile_from_body),
+            None => (None, Outcome::Failure { retry_after: None }),
+        };
+        if let Some(profile) = profile {
+            snapshot.profile = Some(profile);
+            snapshot.profile_fetched_at_ms = Some(now_ms);
+        }
+        let next = schedule(
+            snapshot.profile_backoff_ms,
+            &outcome,
+            Duration::from_secs(PROFILE_INTERVAL_S),
+            now_ms,
+        );
+        snapshot.profile_next_at_ms = Some(next.next_at_ms);
+        snapshot.profile_backoff_ms = next.backoff_ms;
+    }
+    write_json_atomic(&path, &snapshot)
 }
 
 /// The token feeds the Authorization header and nothing else; it is never
@@ -520,24 +677,35 @@ fn read_access_token(credentials_path: &Path) -> Option<String> {
 
 /// The budget of every detached fetch: long enough for a slow network hop, short enough that
 /// a stuck child cannot pile up behind the next tick's spawn.
-pub(crate) fn fetch_timeout() -> std::time::Duration {
-    std::time::Duration::from_secs(5)
+pub(crate) fn fetch_timeout() -> Duration {
+    Duration::from_secs(5)
 }
 
-/// The only network touchpoint, kept separate so no test can reach it.
-fn fetch_json(url: &str, token: &str) -> Option<String> {
+/// The only network touchpoint, kept separate so no test can reach it. A status error keeps
+/// the Retry-After of its response, so a 429 window is waited out rather than hammered.
+fn fetch_json(url: &str, token: &str) -> Fetched {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(fetch_timeout())
         .timeout(fetch_timeout())
         .build();
-    agent
+    let response = agent
         .get(url)
         .set("Authorization", &format!("Bearer {token}"))
         .set("anthropic-beta", "oauth-2025-04-20")
-        .call()
-        .ok()?
-        .into_string()
-        .ok()
+        .call();
+    match response {
+        Ok(response) => match response.into_string() {
+            Ok(body) => Fetched::Body(body),
+            Err(_) => Fetched::Failed { retry_after: None },
+        },
+        Err(ureq::Error::Status(_, response)) => Fetched::Failed {
+            retry_after: backoff::retry_after(
+                response.header("Retry-After"),
+                (crate::clock::now_ms() / 1_000) as i64,
+            ),
+        },
+        Err(ureq::Error::Transport(_)) => Fetched::Failed { retry_after: None },
+    }
 }
 
 /// Temp file plus rename so a render tick can never observe a half-written
@@ -789,8 +957,7 @@ mod tests {
             fetched_at_ms: 1_784_829_600_000,
             account_uuid: Some("u-1".to_string()),
             utilization: full_endpoint(),
-            profile: None,
-            profile_fetched_at_ms: None,
+            ..Snapshot::default()
         };
         write_json_atomic(&path, &snapshot).unwrap();
 
@@ -802,9 +969,18 @@ mod tests {
             Some(42.0)
         );
 
-        assert!(load_snapshot(&path, Some("u-2")).is_none());
-        assert!(load_snapshot(&path, None).is_none());
         assert!(load_snapshot(&dir.path().join("missing.json"), Some("u-1")).is_none());
+        assert!(load_snapshot(&path, Some("u-2")).is_none());
+        assert!(
+            !path.exists(),
+            "another known account's snapshot is removed"
+        );
+        write_json_atomic(&path, &snapshot).unwrap();
+        assert!(load_snapshot(&path, None).is_none());
+        assert!(
+            path.exists(),
+            "an unknown local account must not destroy the cache"
+        );
     }
 
     #[test]
@@ -813,10 +989,7 @@ mod tests {
         let path = dir.path().join("claude-statusline-usage.json");
         let snapshot = Snapshot {
             fetched_at_ms: 1,
-            account_uuid: None,
-            utilization: EndpointUtilization::default(),
-            profile: None,
-            profile_fetched_at_ms: None,
+            ..Snapshot::default()
         };
         write_json_atomic(&path, &snapshot).unwrap();
         assert!(load_snapshot(&path, None).is_some());
@@ -831,12 +1004,12 @@ mod tests {
             fetched_at_ms: 1,
             account_uuid: Some("u-1".to_string()),
             utilization: full_endpoint(),
-            profile: None,
-            profile_fetched_at_ms: None,
+            ..Snapshot::default()
         };
         write_json_atomic(&path, &snapshot).unwrap();
         let updated = Snapshot {
             fetched_at_ms: 2,
+            usage_next_at_ms: Some(3),
             ..snapshot
         };
         write_json_atomic(&path, &updated).unwrap();
@@ -847,6 +1020,7 @@ mod tests {
         let parsed: Snapshot = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed.fetched_at_ms, 2);
         assert_eq!(read_fetched_at_ms(&path), Some(2));
+        assert_eq!(read_next_at_ms(&path), (Some(3), None));
     }
 
     #[test]
@@ -872,12 +1046,12 @@ mod tests {
         let snapshot = Snapshot {
             fetched_at_ms: 5,
             account_uuid: Some("u".to_string()),
-            utilization: EndpointUtilization::default(),
             profile: Some(Profile {
                 email: Some("a@b.c".to_string()),
                 plan: Some("pro".to_string()),
             }),
             profile_fetched_at_ms: Some(4),
+            ..Snapshot::default()
         };
         write_json_atomic(&path, &snapshot).unwrap();
         let loaded = load_snapshot(&path, Some("u")).unwrap();
@@ -893,18 +1067,68 @@ mod tests {
     }
 
     #[test]
-    fn profile_interval_is_a_day() {
-        assert!(fetch_due(PROFILE_INTERVAL_S, None, 0));
-        assert!(!fetch_due(
-            PROFILE_INTERVAL_S,
-            Some(1_000),
-            1_000 + 86_399_999
-        ));
-        assert!(fetch_due(
-            PROFILE_INTERVAL_S,
-            Some(1_000),
-            1_000 + 86_400_000
-        ));
+    fn snapshot_round_trips_the_schedule_and_tolerates_its_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let snapshot = Snapshot {
+            account_uuid: Some("u".to_string()),
+            usage_next_at_ms: Some(10),
+            usage_backoff_ms: Some(120_000),
+            profile_next_at_ms: Some(20),
+            profile_backoff_ms: Some(240_000),
+            ..Snapshot::default()
+        };
+        write_json_atomic(&path, &snapshot).unwrap();
+        let loaded = load_snapshot(&path, Some("u")).unwrap();
+        assert_eq!(
+            (loaded.usage_next_at_ms, loaded.usage_backoff_ms),
+            (Some(10), Some(120_000))
+        );
+        assert_eq!(
+            (loaded.profile_next_at_ms, loaded.profile_backoff_ms),
+            (Some(20), Some(240_000))
+        );
+        assert_eq!(read_next_at_ms(&path), (Some(10), Some(20)));
+
+        std::fs::write(
+            &path,
+            r#"{"fetched_at_ms": 5, "account_uuid": "u", "utilization": {}}"#,
+        )
+        .unwrap();
+        let loaded = load_snapshot(&path, Some("u")).unwrap();
+        assert!(loaded.usage_next_at_ms.is_none() && loaded.usage_backoff_ms.is_none());
+        assert!(loaded.profile_next_at_ms.is_none() && loaded.profile_backoff_ms.is_none());
+        assert_eq!(read_next_at_ms(&path), (None, None));
+
+        std::fs::write(&path, "{broken").unwrap();
+        assert_eq!(read_next_at_ms(&path), (None, None));
+        assert_eq!(
+            read_next_at_ms(&dir.path().join("missing.json")),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn due_when_the_stamp_is_absent_or_passed() {
+        assert!(due(None, 0, 10_000), "a missing stamp is always due");
+        assert!(due(Some(1_000), 1_000, 10_000));
+        assert!(due(Some(1_000), 1_001, 10_000));
+        // A stamp in the future (a booked retry, or clock skew) is not due.
+        assert!(!due(Some(1_001), 1_000, 10_000));
+    }
+
+    #[test]
+    fn due_treats_a_stamp_beyond_the_ceiling_as_due() {
+        // A clock that jumped forward and back must not park the poll for days: a stamp
+        // beyond the ceiling reads as due, the same as a missing one.
+        assert!(
+            !due(Some(11_000), 1_000, 10_000),
+            "within the ceiling stays not due"
+        );
+        assert!(
+            due(Some(11_001), 1_000, 10_000),
+            "beyond the ceiling reads as due"
+        );
     }
 
     #[test]
@@ -925,6 +1149,330 @@ mod tests {
         };
         // Must return without touching the cache file or spawning.
         spawn_fetch_if_stale(&config);
+    }
+
+    const PROFILE_BODY: &str = r#"{"account":{"email":"biz@example.com","has_claude_max":true},
+        "organization":{"organization_type":"claude_max"}}"#;
+
+    /// A scratch HOME with the fetch enabled, a token, and a local account, so the child
+    /// reaches its network call. The snapshot, when given, is the previous cache.
+    fn child_home(interval_s: u64, snapshot: Option<&Snapshot>) -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("claude-statusline.json"),
+            format!(r#"{{"usage_fetch_interval_seconds": {interval_s}}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".credentials.json"),
+            r#"{"claudeAiOauth": {"accessToken": "tok"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            r#"{"oauthAccount": {"accountUuid": "u-1"}}"#,
+        )
+        .unwrap();
+        if let Some(snapshot) = snapshot {
+            write_json_atomic(&cache_path_in(home.path()), snapshot).unwrap();
+        }
+        home
+    }
+
+    /// Runs the child against a table of answers per URL and reports the URLs it called and
+    /// the snapshot it left behind.
+    fn run_child(
+        home: &Path,
+        now_ms: u64,
+        answer: impl Fn(&str) -> Fetched,
+    ) -> (Option<Snapshot>, Vec<String>) {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let fetch = |url: &str, token: &str| {
+            assert_eq!(token, "tok");
+            calls.borrow_mut().push(url.to_string());
+            answer(url)
+        };
+        try_fetch_with(home, &fetch, now_ms);
+        let snapshot = std::fs::read_to_string(cache_path_in(home))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok());
+        (snapshot, calls.into_inner())
+    }
+
+    fn body(text: &str) -> Fetched {
+        Fetched::Body(text.to_string())
+    }
+
+    fn failed(retry_after: Option<Duration>) -> Fetched {
+        Fetched::Failed { retry_after }
+    }
+
+    #[test]
+    fn schedule_follows_the_outcome_table() {
+        let now = 1_000_000;
+        let interval = Duration::from_secs(60);
+        assert_eq!(
+            schedule(Some(240_000), &Outcome::Success, interval, now),
+            Schedule {
+                next_at_ms: now + 60_000,
+                backoff_ms: None
+            }
+        );
+        let held = Outcome::Failure {
+            retry_after: Some(Duration::from_secs(30)),
+        };
+        assert_eq!(
+            schedule(Some(240_000), &held, interval, now),
+            Schedule {
+                next_at_ms: now + 30_000,
+                backoff_ms: Some(240_000)
+            }
+        );
+        let failed = Outcome::Failure { retry_after: None };
+        assert_eq!(
+            schedule(None, &failed, interval, now),
+            Schedule {
+                next_at_ms: now + 120_000,
+                backoff_ms: Some(120_000)
+            }
+        );
+        assert_eq!(
+            schedule(Some(480_000), &failed, interval, now),
+            Schedule {
+                next_at_ms: now + 600_000,
+                backoff_ms: Some(600_000)
+            }
+        );
+    }
+
+    #[test]
+    fn child_honors_retry_after_and_keeps_the_previous_usage() {
+        let now = 1_000_000;
+        let previous = Snapshot {
+            fetched_at_ms: 5,
+            account_uuid: Some("u-1".to_string()),
+            utilization: full_endpoint(),
+            ..Snapshot::default()
+        };
+        let home = child_home(60, Some(&previous));
+        let (snapshot, calls) = run_child(home.path(), now, |url| {
+            if url == USAGE_URL {
+                failed(Some(Duration::from_secs(120)))
+            } else {
+                body(PROFILE_BODY)
+            }
+        });
+        let snapshot = snapshot.unwrap();
+        assert_eq!(calls, [USAGE_URL, PROFILE_URL]);
+        assert_eq!(
+            snapshot.utilization.five_hour.unwrap().utilization,
+            Some(42.0)
+        );
+        assert_eq!(snapshot.fetched_at_ms, 5);
+        assert_eq!(snapshot.usage_next_at_ms, Some(now + 120_000));
+        assert!(
+            snapshot.usage_backoff_ms.is_none(),
+            "a Retry-After leaves the ladder alone"
+        );
+        assert_eq!(
+            snapshot.profile.unwrap().email.as_deref(),
+            Some("biz@example.com")
+        );
+        assert_eq!(snapshot.profile_fetched_at_ms, Some(now));
+        assert_eq!(snapshot.profile_next_at_ms, Some(now + 3_600_000));
+    }
+
+    #[test]
+    fn child_climbs_the_ladder_on_failures_without_retry_after() {
+        let now = 1_000_000;
+        let home = child_home(60, None);
+        let (snapshot, calls) = run_child(home.path(), now, |_| failed(None));
+        let snapshot = snapshot.unwrap();
+        assert_eq!(calls, [USAGE_URL, PROFILE_URL]);
+        assert_eq!(snapshot.account_uuid.as_deref(), Some("u-1"));
+        assert_eq!(
+            (snapshot.usage_next_at_ms, snapshot.usage_backoff_ms),
+            (Some(now + 120_000), Some(120_000))
+        );
+        assert_eq!(
+            (snapshot.profile_next_at_ms, snapshot.profile_backoff_ms),
+            (Some(now + 120_000), Some(120_000))
+        );
+
+        // A 2xx body that does not parse is a failure of its kind too, one rung up.
+        let later = now + 120_000;
+        let (snapshot, calls) = run_child(home.path(), later, |_| body("nope"));
+        let snapshot = snapshot.unwrap();
+        assert_eq!(calls, [USAGE_URL, PROFILE_URL]);
+        assert_eq!(
+            (snapshot.usage_next_at_ms, snapshot.usage_backoff_ms),
+            (Some(later + 240_000), Some(240_000))
+        );
+        assert_eq!(snapshot.fetched_at_ms, 0);
+        assert!(snapshot.profile.is_none());
+    }
+
+    #[test]
+    fn child_treats_an_empty_usage_body_as_a_failure() {
+        let now = 1_000_000;
+        let previous = Snapshot {
+            account_uuid: Some("u-1".to_string()),
+            utilization: full_endpoint(),
+            profile_next_at_ms: Some(now + 1),
+            ..Snapshot::default()
+        };
+        let home = child_home(60, Some(&previous));
+        let (snapshot, calls) = run_child(home.path(), now, |_| body("{}"));
+        let snapshot = snapshot.unwrap();
+        assert_eq!(calls, [USAGE_URL]);
+        assert_eq!(
+            snapshot.utilization.five_hour.unwrap().utilization,
+            Some(42.0),
+            "an error envelope on a 2xx must not empty the cache"
+        );
+        assert_eq!(
+            (snapshot.usage_next_at_ms, snapshot.usage_backoff_ms),
+            (Some(now + 120_000), Some(120_000)),
+            "an error envelope on a 2xx must not clear the ladder"
+        );
+    }
+
+    #[test]
+    fn child_success_clears_the_backoff_and_books_the_interval() {
+        let now = 1_000_000;
+        let previous = Snapshot {
+            account_uuid: Some("u-1".to_string()),
+            usage_next_at_ms: Some(now),
+            usage_backoff_ms: Some(240_000),
+            profile_next_at_ms: Some(now - 1),
+            profile_backoff_ms: Some(120_000),
+            ..Snapshot::default()
+        };
+        let home = child_home(300, Some(&previous));
+        let (snapshot, calls) = run_child(home.path(), now, |url| {
+            body(if url == USAGE_URL {
+                FULL_BODY
+            } else {
+                PROFILE_BODY
+            })
+        });
+        let snapshot = snapshot.unwrap();
+        assert_eq!(calls, [USAGE_URL, PROFILE_URL]);
+        assert_eq!(snapshot.fetched_at_ms, now);
+        assert_eq!(
+            snapshot.utilization.five_hour.unwrap().utilization,
+            Some(42.0)
+        );
+        assert_eq!(
+            (snapshot.usage_next_at_ms, snapshot.usage_backoff_ms),
+            (Some(now + 300_000), None)
+        );
+        assert_eq!(snapshot.profile.unwrap().plan.as_deref(), Some("max"));
+        assert_eq!(
+            (snapshot.profile_next_at_ms, snapshot.profile_backoff_ms),
+            (Some(now + 3_600_000), None)
+        );
+    }
+
+    #[test]
+    fn child_fetches_only_the_due_kind_and_writes_nothing_when_none_is() {
+        let now = 1_000_000;
+        let previous = Snapshot {
+            account_uuid: Some("u-1".to_string()),
+            profile: Some(Profile {
+                email: Some("kept@example.com".to_string()),
+                plan: None,
+            }),
+            profile_fetched_at_ms: Some(7),
+            profile_next_at_ms: Some(now + 1),
+            ..Snapshot::default()
+        };
+        let home = child_home(60, Some(&previous));
+        let (snapshot, calls) = run_child(home.path(), now, |_| body(FULL_BODY));
+        let snapshot = snapshot.unwrap();
+        assert_eq!(calls, [USAGE_URL]);
+        assert_eq!(
+            snapshot.profile.unwrap().email.as_deref(),
+            Some("kept@example.com")
+        );
+        assert_eq!(
+            (snapshot.profile_fetched_at_ms, snapshot.profile_next_at_ms),
+            (Some(7), Some(now + 1))
+        );
+
+        // Nothing due: no call and no write, which is the stampede guard.
+        let before = std::fs::read_to_string(cache_path_in(home.path())).unwrap();
+        let (_, calls) = run_child(home.path(), now, |_| body(FULL_BODY));
+        assert!(calls.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(cache_path_in(home.path())).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn child_discards_a_snapshot_of_another_account() {
+        let now = 1_000_000;
+        let previous = Snapshot {
+            account_uuid: Some("u-2".to_string()),
+            profile: Some(Profile {
+                email: Some("other@example.com".to_string()),
+                plan: None,
+            }),
+            usage_next_at_ms: Some(now + 1),
+            profile_next_at_ms: Some(now + 1),
+            ..Snapshot::default()
+        };
+        let home = child_home(60, Some(&previous));
+        let (snapshot, calls) = run_child(home.path(), now, |_| failed(None));
+        let snapshot = snapshot.unwrap();
+        assert_eq!(
+            calls,
+            [USAGE_URL, PROFILE_URL],
+            "a mismatch reads as due for both kinds"
+        );
+        assert_eq!(snapshot.account_uuid.as_deref(), Some("u-1"));
+        assert!(
+            snapshot.profile.is_none(),
+            "another account's profile never carries over"
+        );
+    }
+
+    #[test]
+    fn child_survives_an_extreme_configured_interval() {
+        // usage_ceiling_ms multiplies the configured interval by 1_000; an absurd config must
+        // saturate rather than panic a debug build's overflow check.
+        let home = child_home(u64::MAX, None);
+        let (snapshot, calls) = run_child(home.path(), 1_000, |_| body(FULL_BODY));
+        assert_eq!(calls, [USAGE_URL, PROFILE_URL]);
+        assert!(snapshot.is_some());
+    }
+
+    #[test]
+    fn child_makes_no_request_without_an_interval_or_a_token() {
+        let home = child_home(0, None);
+        let (snapshot, calls) = run_child(home.path(), 1_000, |_| body(FULL_BODY));
+        assert!(calls.is_empty() && snapshot.is_none());
+
+        let home = child_home(60, None);
+        std::fs::remove_file(home.path().join(".claude").join(".credentials.json")).unwrap();
+        let now = 1_000;
+        let (snapshot, calls) = run_child(home.path(), now, |_| body(FULL_BODY));
+        let snapshot = snapshot.unwrap();
+        assert!(calls.is_empty(), "a missing token makes no request");
+        assert_eq!(snapshot.account_uuid.as_deref(), Some("u-1"));
+        assert_eq!(
+            (snapshot.usage_next_at_ms, snapshot.usage_backoff_ms),
+            (Some(now + 120_000), Some(120_000)),
+            "a missing token books the ladder for the due usage kind"
+        );
+        assert_eq!(
+            (snapshot.profile_next_at_ms, snapshot.profile_backoff_ms),
+            (Some(now + 120_000), Some(120_000)),
+            "a missing token books the ladder for the due profile kind"
+        );
     }
 
     fn endpoint_env(

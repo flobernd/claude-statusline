@@ -1,14 +1,22 @@
 //! The session route of the cpa-claude-statusline CLIProxyAPI plugin: the one source that names
-//! the account serving a proxied session. Pure apart from `fetch_status` and the session
-//! cache files the child writes.
+//! the account serving a proxied session. Pure apart from `fetch_status`, the session cache
+//! files the child writes, and the negative cache file.
 
 use crate::schema::{self, lenient, lenient_vec};
 use crate::usage::{Limits, Window};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const ROUTE_PATH: &str = "/v0/resource/plugins/cpa-claude-statusline/session";
+
+/// A base URL whose route failed is left alone for this long, whether the failure was a
+/// conclusive answer without the plugin or no answer at all: long enough that a gateway
+/// without the plugin costs one request per five minutes instead of one per tick, short enough
+/// that a restarted proxy shows up within a coffee break. Also the ceiling `retry_pending`
+/// enforces, since it is the only wait this module books.
+pub const NEGATIVE_CACHE_S: u64 = 5 * 60;
 
 /// The route body. Every field below `schema` parses leniently: a wrong-typed field costs
 /// that field, never the line, and unknown keys are ignored so the plugin can grow the schema.
@@ -133,6 +141,42 @@ pub fn parse_status(body: &str) -> Option<ProxyStatus> {
     Some(status)
 }
 
+/// What the route answered. `UnknownSession` is the plugin's own 404 for a session it has not
+/// seen a request from yet. `Rejected` is a conclusive answer without the plugin: every other
+/// status, or a 2xx body without the schema. `Unreachable` is no answer at all: a transport
+/// error, a body the connection dropped before it finished, or the budget. `try_fetch` books
+/// the same wait for both.
+pub enum RouteResult {
+    /// `Status` carries the response body, which the child stores as parsed JSON for the
+    /// render tick to re-check on read.
+    Status(String),
+    UnknownSession,
+    Rejected,
+    Unreachable,
+}
+
+/// The plugin's 404 body, as opposed to the host's own 404 for a route that does not exist.
+fn is_unknown_session(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error")?.as_str().map(|e| e == "unknown_session"))
+        .unwrap_or(false)
+}
+
+/// The classification of a conclusive response, apart from the network so a test can drive it
+/// with a status and a body. Never returns `Unreachable`: that variant belongs to the caller,
+/// which is the one that knows whether an answer arrived at all.
+pub(crate) fn classify(status: u16, body: &str) -> RouteResult {
+    match status {
+        200..=299 => match parse_status(body) {
+            Some(_) => RouteResult::Status(body.to_string()),
+            None => RouteResult::Rejected,
+        },
+        404 if is_unknown_session(body) => RouteResult::UnknownSession,
+        _ => RouteResult::Rejected,
+    }
+}
+
 /// A window whose reset has passed is dropped, as Claude Code drops stale payload windows;
 /// spend is built by `usage::spend_from_parts`, the same amounts-first rule the native endpoint
 /// uses.
@@ -162,6 +206,92 @@ pub fn limits(account: &ProxyAccount, now_epoch_s: i64) -> Limits {
             )
         }),
     }
+}
+
+/// One remembered failure per base URL. The key is the trimmed base URL as
+/// `EndpointEnv::custom_base_url` returns it; a BTreeMap keeps the file stable across
+/// rewrites.
+pub type NegativeCache = BTreeMap<String, NegativeEntry>;
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct NegativeEntry {
+    #[serde(default, deserialize_with = "lenient")]
+    pub retry_at_ms: Option<u64>,
+}
+
+pub fn negative_cache_path() -> Option<PathBuf> {
+    schema::home_dir().map(|h| h.join(".claude").join("claude-statusline-proxy.json"))
+}
+
+/// A corrupt file, or an entry that is not an object, reads as empty: the cache only saves
+/// requests, so losing it costs one GET and never the line.
+pub fn load_negative_cache(path: &Path) -> NegativeCache {
+    let Some(serde_json::Value::Object(entries)) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+    else {
+        return NegativeCache::new();
+    };
+    entries
+        .into_iter()
+        .filter_map(|(base, entry)| Some((base, serde_json::from_value(entry).ok()?)))
+        .collect()
+}
+
+/// Deletes the file when nothing is left in it, so a healthy setup leaves no trace. Errors
+/// are ignored on purpose: the render path can do nothing about them.
+pub fn store_negative_cache(path: &Path, cache: &NegativeCache) {
+    if cache.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let _ = crate::usage::write_json_atomic(path, cache);
+}
+
+/// A base URL can carry embedded credentials as userinfo (`user:pass@host`); stripped before
+/// it becomes a file key so a saved credential never lands in
+/// `~/.claude/claude-statusline-proxy.json`.
+pub(crate) fn cache_key(base_url: &str) -> String {
+    let Some((scheme, rest)) = base_url.split_once("://") else {
+        return base_url.to_string();
+    };
+    // The authority ends at the first path, query, or fragment delimiter; an '@' past that
+    // point belongs to the request, not to userinfo, and must not be cut out.
+    let (authority, tail) = rest
+        .find(['/', '?', '#'])
+        .map_or((rest, ""), |i| rest.split_at(i));
+    match authority.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://{host}{tail}"),
+        None => base_url.to_string(),
+    }
+}
+
+/// A stamp further ahead than `NEGATIVE_CACHE_S`, the wait this module books, reads as
+/// expired: a clock that jumped forward and back must not park the poll.
+pub fn retry_pending(cache: &NegativeCache, base_url: &str, now_ms: u64) -> bool {
+    cache
+        .get(&cache_key(base_url))
+        .and_then(|entry| entry.retry_at_ms)
+        .is_some_and(|at| {
+            at > now_ms && at.saturating_sub(now_ms) <= NEGATIVE_CACHE_S.saturating_mul(1_000)
+        })
+}
+
+pub fn note_failure(cache: &mut NegativeCache, base_url: &str, now_ms: u64, wait_s: u64) {
+    let retry_at_ms = now_ms.saturating_add(wait_s.saturating_mul(1_000));
+    cache.insert(
+        cache_key(base_url),
+        NegativeEntry {
+            retry_at_ms: Some(retry_at_ms),
+        },
+    );
+}
+
+/// Clears a base URL's remembered failure, keyed the same way `note_failure` writes it. True
+/// when an entry was actually there, so the caller only rewrites the file when the cache
+/// changed.
+pub fn forget_failure(cache: &mut NegativeCache, base_url: &str) -> bool {
+    cache.remove(&cache_key(base_url)).is_some()
 }
 
 /// A stored route answer older than this is not shown: the plugin refreshes on every poll, so
@@ -217,7 +347,10 @@ pub fn load_session_cache(path: &Path) -> Option<SessionCache> {
 }
 
 fn same_base(cache: &SessionCache, base_url: &str) -> bool {
-    cache.base_url.as_deref() == Some(base_url)
+    cache
+        .base_url
+        .as_deref()
+        .is_some_and(|b| cache_key(b) == cache_key(base_url))
 }
 
 /// The stored answer, when it is this base URL's, fresh, and still the plugin's shape. A stamp
@@ -259,23 +392,24 @@ pub fn fetch_due(
     now_ms - attempted >= interval_ms
 }
 
-/// The stamped attempt the child records before it asks. The base URL rides along so the next
-/// tick can tell an answer for this proxy from one left by another.
+/// The stamped attempt the child records before it asks. The base URL is keyed the way the
+/// negative cache keys it, so a credential carried as userinfo never reaches the file.
 fn new_attempt(base_url: &str, now_ms: u64) -> SessionCache {
     SessionCache {
-        base_url: Some(base_url.to_string()),
+        base_url: Some(cache_key(base_url)),
         attempted_at_ms: Some(now_ms),
         ..Default::default()
     }
 }
 
 /// The same stamped attempt with the previous answer riding along, so one failed poll shows the
-/// last numbers until `cached_status`'s freshness window runs out instead of blanking the line
-/// at once. An answer stored for another base URL is dropped: it belongs to another proxy.
+/// last numbers until `cached_status`'s freshness window runs out instead of blanking the line at
+/// once and then holding it blank for the negative cache's wait. An answer stored for another
+/// base URL is dropped: it belongs to another proxy.
 fn carried_attempt(previous: Option<&SessionCache>, base_url: &str, now_ms: u64) -> SessionCache {
     let kept = previous.filter(|c| same_base(c, base_url));
     SessionCache {
-        base_url: Some(base_url.to_string()),
+        base_url: Some(cache_key(base_url)),
         attempted_at_ms: Some(now_ms),
         fetched_at_ms: kept.and_then(|c| c.fetched_at_ms),
         status: kept.and_then(|c| c.status.clone()),
@@ -339,19 +473,33 @@ fn try_fetch(session_id: &str) -> Option<()> {
         let _ = std::fs::create_dir_all(dir);
         sweep_sessions(dir);
     }
+    let mut next = new_attempt(&base, now);
+    let negative_path = negative_cache_path()?;
+    let mut negative = load_negative_cache(&negative_path);
+    if retry_pending(&negative, &base, now) {
+        let waiting = carried_attempt(previous.as_ref(), &base, now);
+        return crate::usage::write_json_atomic(&path, &waiting);
+    }
     let url = status_url(&base, session_id)?;
     match fetch_status(&url) {
-        Some(body) => {
-            let mut next = new_attempt(&base, now);
+        RouteResult::Status(body) => {
+            if forget_failure(&mut negative, &base) {
+                store_negative_cache(&negative_path, &negative);
+            }
             next.fetched_at_ms = Some(crate::clock::now_ms());
             next.status = serde_json::from_str(&body).ok();
             crate::usage::write_json_atomic(&path, &next)?;
             Some(())
         }
-        // No usable answer, whether the gateway rejected the request or never answered: the
-        // attempt is stamped anyway so the next tick waits out the interval instead of asking
-        // again at once.
-        None => {
+        // The plugin answered and knows nothing of the session, so nothing about it is worth
+        // keeping: no status is stored and the next tick hides the line.
+        RouteResult::UnknownSession => crate::usage::write_json_atomic(&path, &next),
+        // Rejected names a gateway that answered without the plugin; Unreachable names one
+        // that gave no answer at all. Both book the same wait by decision, so a slow or
+        // restarting gateway costs the poll the same as an absent plugin.
+        RouteResult::Rejected | RouteResult::Unreachable => {
+            note_failure(&mut negative, &base, now, NEGATIVE_CACHE_S);
+            store_negative_cache(&negative_path, &negative);
             let failed = carried_attempt(previous.as_ref(), &base, now);
             crate::usage::write_json_atomic(&path, &failed)
         }
@@ -401,9 +549,8 @@ pub fn remove_session_caches() {
 /// The only network touchpoint, kept separate so no test can reach it. It runs in the detached
 /// child on the usage fetch's budget; nothing renders on it. ureq's timeouts do not cover DNS
 /// resolution, so the request runs on its own thread and the total budget is enforced by
-/// `recv_timeout`, which bounds a stuck resolver too. The answer is returned as the response
-/// body, which the child stores as parsed JSON for the render tick to re-check on read.
-pub fn fetch_status(url: &str) -> Option<String> {
+/// `recv_timeout`, which bounds a stuck resolver too.
+pub fn fetch_status(url: &str) -> RouteResult {
     let total = crate::usage::fetch_timeout();
     let url = url.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -412,15 +559,20 @@ pub fn fetch_status(url: &str) -> Option<String> {
             .timeout_connect(total)
             .timeout(total)
             .build();
-        let body = agent
-            .get(&url)
-            .call()
-            .ok()
-            .and_then(|resp| resp.into_string().ok())
-            .filter(|body| parse_status(body).is_some());
-        let _ = tx.send(body);
+        let result = match agent.get(&url).call() {
+            Ok(response) | Err(ureq::Error::Status(_, response)) => {
+                let status = response.status();
+                // A body the connection dropped before it finished is no answer, the same as
+                // a transport error: there is nothing conclusive to classify.
+                response
+                    .into_string()
+                    .map_or(RouteResult::Unreachable, |body| classify(status, &body))
+            }
+            Err(ureq::Error::Transport(_)) => RouteResult::Unreachable,
+        };
+        let _ = tx.send(result);
     });
-    rx.recv_timeout(total).ok().flatten()
+    rx.recv_timeout(total).unwrap_or(RouteResult::Unreachable)
 }
 
 #[cfg(test)]
@@ -501,6 +653,16 @@ mod tests {
             Some(TWO_ACCOUNTS),
         );
         assert!(cached_status(&other, BASE, NOW_MS).is_none());
+        let userinfo = cache(
+            "http://u:p@127.0.0.1:8317",
+            Some(NOW_MS),
+            Some(NOW_MS),
+            Some(TWO_ACCOUNTS),
+        );
+        assert!(
+            cached_status(&userinfo, BASE, NOW_MS).is_some(),
+            "keyed like the negative cache"
+        );
         let empty = cache(
             BASE,
             Some(NOW_MS),
@@ -513,12 +675,18 @@ mod tests {
     }
 
     #[test]
-    fn a_new_attempt_stamps_the_base_url_and_carries_no_answer() {
-        let attempt = new_attempt(BASE, NOW_MS);
-        assert_eq!(attempt.base_url.as_deref(), Some(BASE));
+    fn a_new_attempt_keeps_userinfo_out_of_the_session_file() {
+        let raw = "http://u:p@127.0.0.1:8317";
+        let attempt = new_attempt(raw, NOW_MS);
+        assert_eq!(
+            attempt.base_url.as_deref(),
+            Some(BASE),
+            "the credential must not reach the file: {attempt:?}"
+        );
         assert_eq!(attempt.attempted_at_ms, Some(NOW_MS));
         assert!(attempt.fetched_at_ms.is_none() && attempt.status.is_none());
-        // The stamped base URL is the one the poll gate compares against.
+        // The stripped key still names the base URL both gates compare against.
+        assert!(!fetch_due(Some(&attempt), raw, 5, NOW_MS));
         assert!(!fetch_due(Some(&attempt), BASE, 5, NOW_MS));
     }
 
@@ -541,9 +709,13 @@ mod tests {
             switched.status.is_none() && switched.fetched_at_ms.is_none(),
             "another proxy's answer is dropped on a switch: {switched:?}"
         );
-        let first = carried_attempt(None, BASE, NOW_MS);
-        assert_eq!(first.base_url.as_deref(), Some(BASE));
-        assert!(first.status.is_none() && first.fetched_at_ms.is_none());
+        let first = carried_attempt(None, "http://u:p@127.0.0.1:8317", NOW_MS);
+        assert_eq!(
+            first.base_url.as_deref(),
+            Some(BASE),
+            "the credential must not reach the file: {first:?}"
+        );
+        assert!(first.status.is_none());
     }
 
     #[test]
@@ -691,6 +863,133 @@ mod tests {
         // A model without a usable id, absent or blank, is skipped, so the last model is the
         // first usable one.
         assert_eq!(account.last_model(), Some("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn classify_separates_the_plugin_404_from_every_rejection() {
+        let good = r#"{"schema":1,"accounts":[{"email":"biz@example.com"}]}"#;
+        assert!(matches!(classify(200, good), RouteResult::Status(body) if body == good));
+        assert!(matches!(
+            classify(404, r#"{"error":"unknown_session"}"#),
+            RouteResult::UnknownSession
+        ));
+        assert!(matches!(
+            classify(404, r#" {"error": "unknown_session", "id": "x"} "#),
+            RouteResult::UnknownSession
+        ));
+        for (status, body) in [
+            (200, r#"{"account":{}}"#),
+            (200, r#"{"schema":1,"accounts":[]}"#),
+            (200, "nope"),
+            (404, "404 page not found"),
+            (404, r#"{"error":"not_found"}"#),
+            (500, r#"{"error":"unknown_session"}"#),
+            (503, ""),
+        ] {
+            assert!(
+                matches!(classify(status, body), RouteResult::Rejected),
+                "{status} {body:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn negative_cache_round_trips_and_reads_corruption_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude-statusline-proxy.json");
+        assert!(load_negative_cache(&path).is_empty());
+
+        let mut cache = NegativeCache::new();
+        note_failure(&mut cache, "http://127.0.0.1:8317", 1_000, NEGATIVE_CACHE_S);
+        store_negative_cache(&path, &cache);
+        let loaded = load_negative_cache(&path);
+        assert_eq!(loaded["http://127.0.0.1:8317"].retry_at_ms, Some(301_000));
+        assert!(retry_pending(&loaded, "http://127.0.0.1:8317", 300_999));
+        assert!(!retry_pending(&loaded, "http://127.0.0.1:8317", 301_000));
+        assert!(!retry_pending(&loaded, "http://other", 0));
+
+        std::fs::write(
+            &path,
+            r#"{"http://a": {"retry_at_ms": "soon"}, "http://b": 5, "http://c": {"retry_at_ms": 9}}"#,
+        )
+        .unwrap();
+        let loaded = load_negative_cache(&path);
+        assert!(loaded["http://a"].retry_at_ms.is_none());
+        assert!(!loaded.contains_key("http://b"));
+        assert_eq!(loaded["http://c"].retry_at_ms, Some(9));
+        for corrupt in ["{broken", "[1]", "null"] {
+            std::fs::write(&path, corrupt).unwrap();
+            assert!(load_negative_cache(&path).is_empty(), "{corrupt:?}");
+        }
+    }
+
+    #[test]
+    fn storing_an_empty_negative_cache_removes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude-statusline-proxy.json");
+        let mut cache = NegativeCache::new();
+        note_failure(&mut cache, "http://proxy", 0, NEGATIVE_CACHE_S);
+        store_negative_cache(&path, &cache);
+        assert!(path.exists());
+        assert!(cache.remove("http://proxy").is_some());
+        store_negative_cache(&path, &cache);
+        assert!(!path.exists());
+        // Storing an empty cache without a file is not an error either.
+        store_negative_cache(&path, &cache);
+    }
+
+    #[test]
+    fn negative_cache_key_strips_userinfo_from_the_base_url() {
+        let raw = "http://user:pass@127.0.0.1:8317";
+        let mut cache = NegativeCache::new();
+        note_failure(&mut cache, raw, 0, NEGATIVE_CACHE_S);
+        assert!(
+            cache.contains_key("http://127.0.0.1:8317"),
+            "the key must not carry the credential: {cache:?}"
+        );
+        assert!(retry_pending(&cache, raw, 0), "the check must strip it too");
+        assert!(
+            forget_failure(&mut cache, raw),
+            "the removal must strip it too"
+        );
+        assert!(cache.is_empty());
+
+        // An '@' past the authority belongs to the request, not to userinfo: cutting the
+        // authority at the first '/', '?', or '#' keeps it out of the strip.
+        let query = "http://host?t=a@b";
+        note_failure(&mut cache, query, 0, NEGATIVE_CACHE_S);
+        assert!(
+            cache.contains_key(query),
+            "a query-string '@' must not be read as userinfo: {cache:?}"
+        );
+
+        // A plain URL with no userinfo at all is used as its own key, unchanged.
+        let plain = "http://proxy.example.com";
+        note_failure(&mut cache, plain, 0, NEGATIVE_CACHE_S);
+        assert!(cache.contains_key(plain), "{cache:?}");
+    }
+
+    #[test]
+    fn note_failure_books_the_wait_it_is_given() {
+        // note_failure stays generic over the wait even though every caller in this codebase
+        // now passes NEGATIVE_CACHE_S for both failure kinds.
+        let mut cache = NegativeCache::new();
+        note_failure(&mut cache, "http://proxy", 0, 45);
+        assert_eq!(cache["http://proxy"].retry_at_ms, Some(45_000));
+    }
+
+    #[test]
+    fn retry_pending_treats_a_stamp_beyond_the_ceiling_as_expired() {
+        let mut cache = NegativeCache::new();
+        // A clock that jumped forward and back must not park the poll for days: only a stamp
+        // within NEGATIVE_CACHE_S of now, the wait this module books, is honored.
+        cache.insert(
+            "http://proxy".to_string(),
+            NegativeEntry {
+                retry_at_ms: Some(NEGATIVE_CACHE_S * 1_000 + 1),
+            },
+        );
+        assert!(!retry_pending(&cache, "http://proxy", 0));
     }
 
     #[test]
