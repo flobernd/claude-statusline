@@ -87,7 +87,8 @@ window, and the extra-usage spend meter (which also covers Team/Enterprise spend
 wizard asks about it, or set `advanced_usage_limits_enabled` yourself. The line renders only
 for native Anthropic subscriptions: Bedrock, Vertex, and custom-gateway sessions (a
 non-Anthropic `ANTHROPIC_BASE_URL` or an `ANTHROPIC_AUTH_TOKEN`) hide it unless the Claude
-Code payload still reports Anthropic rate limits.
+Code payload still reports Anthropic rate limits, or a status from the CLIProxyAPI plugin
+route makes the same case (see "Behind CLIProxyAPI" below).
 
 Session and weekly values come live from the Claude Code payload. The per-model and spend
 data comes from an unofficial claude.ai endpoint, fetched in the background at most every
@@ -158,8 +159,8 @@ Optional file `~/.claude/claude-statusline.json`:
 `name`, `cwd`, `branch`, `activity`, `context_tokens`, `elapsed`, `model`, `effort`.
 
 Every `git` call gets a 500 ms budget so a hung repository can never stall a render.
-`CLAUDE_STATUSLINE_GIT_TIMEOUT_MS` raises it for machines where process spawning alone can approach
-that, such as a busy CI runner; an unusable value keeps the default.
+`CLAUDE_STATUSLINE_GIT_TIMEOUT_MS` raises it for machines where process spawning alone can
+approach that, such as a busy CI runner; an unusable value keeps the default.
 
 ## Colors
 

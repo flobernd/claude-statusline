@@ -35,8 +35,12 @@ fn run_statusline(stdin_data: &str, width: &str, home: &std::path::Path) -> std:
     run_statusline_with_env(stdin_data, width, home, &[])
 }
 
-/// The endpoint variables are cleared first so a developer shell that points at a proxy can
-/// never leak into a test; `env` then sets what one test needs.
+/// Run the binary with controlled env: NO_COLOR output, fixed width, HOME pointed at a temp dir
+/// so no real config or transcript leaks in. The working directory is also pinned to that temp
+/// dir: without it the child inherits cargo's cwd, this crate's own checkout, and a payload with
+/// no explicit workspace would grow a false line2 branch chip. The endpoint variables are
+/// cleared first so a developer shell that points at a proxy can never leak into a test; `env`
+/// then sets what one test needs.
 fn run_statusline_with_env(
     stdin_data: &str,
     width: &str,
@@ -1042,10 +1046,12 @@ fn cache_age_keeps_the_wide_warning_when_the_ttl_is_unknown() {
     }
 }
 
-/// Answers one HTTP request on a loopback port with the given JSON body and reports whether a
-/// request arrived at all. The accept loop polls with a deadline so a negative test never hangs.
-fn serve_once(body: &'static str) -> (String, std::thread::JoinHandle<bool>) {
-    use std::io::{Read, Write};
+/// Answers one HTTP request on a loopback port with the given JSON body and reports the request
+/// line if one arrived, so a caller can assert on the exact route the statusline called instead
+/// of merely that some request came in. The accept loop polls with a deadline so a negative test
+/// never hangs.
+fn serve_once(body: &'static str) -> (String, std::thread::JoinHandle<Option<String>>) {
+    use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1053,20 +1059,20 @@ fn serve_once(body: &'static str) -> (String, std::thread::JoinHandle<bool>) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
         loop {
             match listener.accept() {
-                Ok((mut stream, _)) => {
+                Ok((stream, _)) => {
                     stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(std::time::Duration::from_secs(1)))
                         .unwrap();
-                    let mut request = Vec::new();
-                    let mut buf = [0u8; 4096];
-                    while let Ok(n) = stream.read(&mut buf) {
-                        if n == 0 {
-                            break;
-                        }
-                        request.extend_from_slice(&buf[..n]);
-                        if request.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
+                    let mut reader = BufReader::new(stream);
+                    let mut request_line = String::new();
+                    let _ = reader.read_line(&mut request_line);
+                    let mut header_line = String::new();
+                    loop {
+                        header_line.clear();
+                        match reader.read_line(&mut header_line) {
+                            Ok(n) if n > 0 && header_line != "\r\n" => continue,
+                            _ => break,
                         }
                     }
                     let response = format!(
@@ -1074,16 +1080,16 @@ fn serve_once(body: &'static str) -> (String, std::thread::JoinHandle<bool>) {
                         body.len(),
                         body
                     );
-                    let _ = stream.write_all(response.as_bytes());
-                    return true;
+                    let _ = reader.get_mut().write_all(response.as_bytes());
+                    return Some(request_line.trim_end().to_string());
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     if std::time::Instant::now() > deadline {
-                        return false;
+                        return None;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                Err(_) => return false,
+                Err(_) => return None,
             }
         }
     });
@@ -1151,7 +1157,13 @@ fn proxy_route_feeds_one_row_per_account() {
     let home = proxy_home(true);
     let (base, served) = serve_once(PROXY_BODY);
     fetch_proxy(home.path(), &base);
-    assert!(served.join().unwrap(), "the child must call the route");
+    let request = served.join().unwrap();
+    assert!(
+        request.as_deref().is_some_and(|line| line.contains(
+            "GET /v0/resource/plugins/cpa-claude-statusline/session?id=11111111-2222-4333-8444-555555555555"
+        )),
+        "request line: {request:?}"
+    );
     assert!(
         session_cache(home.path()).exists(),
         "the child writes the session file"
@@ -1204,7 +1216,10 @@ fn render_spawns_the_child_when_the_poll_is_due_and_not_before() {
         !String::from_utf8_lossy(&out.stdout).contains("5h:"),
         "the first tick has no answer yet"
     );
-    assert!(served.join().unwrap(), "the spawned child must ask the route");
+    assert!(
+        served.join().unwrap().is_some(),
+        "the spawned child must ask the route"
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     while !session_cache(home.path()).exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1233,7 +1248,7 @@ fn max_accounts_caps_the_rows_in_route_order() {
     .unwrap();
     let (base, served) = serve_once(PROXY_BODY);
     fetch_proxy(home.path(), &base);
-    assert!(served.join().unwrap());
+    assert!(served.join().unwrap().is_some());
     let out = run_statusline_with_env(
         PROXY_PAYLOAD,
         "200",
@@ -1262,7 +1277,7 @@ fn disabled_model_chip_hides_it_on_every_row() {
     .unwrap();
     let (base, served) = serve_once(PROXY_BODY);
     fetch_proxy(home.path(), &base);
-    assert!(served.join().unwrap());
+    assert!(served.join().unwrap().is_some());
     let out = run_statusline_with_env(
         PROXY_PAYLOAD,
         "200",
@@ -1280,7 +1295,7 @@ fn stale_session_file_hides_the_line() {
     let home = proxy_home(true);
     let (base, served) = serve_once(PROXY_BODY);
     fetch_proxy(home.path(), &base);
-    assert!(served.join().unwrap());
+    assert!(served.join().unwrap().is_some());
     let path = session_cache(home.path());
     let mut cache: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -1302,7 +1317,7 @@ fn disabled_proxy_flag_removes_the_session_files() {
     let home = proxy_home(true);
     let (base, served) = serve_once(PROXY_BODY);
     fetch_proxy(home.path(), &base);
-    assert!(served.join().unwrap());
+    assert!(served.join().unwrap().is_some());
     assert!(session_cache(home.path()).exists());
     let home_off = proxy_home(false);
     std::fs::create_dir_all(session_cache(home_off.path()).parent().unwrap()).unwrap();
@@ -1329,7 +1344,7 @@ fn failed_poll_keeps_the_last_answer_for_a_minute() {
     let (base, served) = serve_once(PROXY_BODY);
     let env = [("ANTHROPIC_BASE_URL", base.as_str())];
     fetch_proxy(home.path(), &base);
-    assert!(served.join().unwrap());
+    assert!(served.join().unwrap().is_some());
     let path = session_cache(home.path());
     // The stamp is aged past the fixture's hour-long interval rather than the file removed: the
     // file holds the answer the failing poll has to carry.
@@ -1372,7 +1387,7 @@ fn proxy_route_is_off_without_the_config_key() {
     );
     fetch_proxy(home.path(), &base);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!served.join().unwrap(), "no request without the key");
+    assert_eq!(served.join().unwrap(), None, "no request without the key");
     assert!(
         !stdout.contains("biz@example.com") && !stdout.contains("5h:"),
         "stdout: {stdout}"
@@ -1392,8 +1407,9 @@ fn proxy_route_is_off_on_the_official_endpoint() {
         &[("ANTHROPIC_BASE_URL", "https://api.anthropic.com")],
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        !served.join().unwrap(),
+    assert_eq!(
+        served.join().unwrap(),
+        None,
         "the official endpoint must not call the responder"
     );
     assert!(!stdout.contains("biz@example.com"), "stdout: {stdout}");

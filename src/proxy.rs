@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub const ROUTE_PATH: &str = "/v0/resource/plugins/cpa-claude-statusline/session";
+const ROUTE_PATH: &str = "/v0/resource/plugins/cpa-claude-statusline/session";
 
 /// Milliseconds since the epoch. A clock set before it reads as 0, which makes every stamp
 /// look due rather than parking the poll.

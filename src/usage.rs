@@ -299,7 +299,7 @@ fn parse_reset_iso(s: &str) -> Option<i64> {
 
 /// Extra usage renews monthly, so the meter resets on the first of the
 /// next month in the user's local time.
-pub(crate) fn next_month_start(now_epoch_s: i64) -> Option<i64> {
+fn next_month_start(now_epoch_s: i64) -> Option<i64> {
     let now = chrono::DateTime::from_timestamp(now_epoch_s, 0)?.with_timezone(&Local);
     let (year, month) = if now.month() == 12 {
         (now.year() + 1, 1)
