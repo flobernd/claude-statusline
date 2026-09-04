@@ -21,6 +21,15 @@ pub struct EndpointUtilization {
     pub limits: Option<Vec<ScopedLimit>>,
 }
 
+impl EndpointUtilization {
+    /// One definition of fetched content for the child's emptiness guard and the line's gate.
+    fn has_window(&self) -> bool {
+        self.five_hour.is_some()
+            || self.seven_day.is_some()
+            || self.limits.as_ref().is_some_and(|l| !l.is_empty())
+    }
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct EndpointWindow {
     /// 0..100, same scale as the payload percentage (verified live).
@@ -99,13 +108,25 @@ pub struct Snapshot {
     pub profile_backoff_ms: Option<u64>,
 }
 
+impl Snapshot {
+    /// The child writes the file as soon as it books its first retry, so only fetched content
+    /// proves a subscription. A stored utilization always has a window: the child treats a body
+    /// without one as a failure.
+    pub fn has_fetched_data(&self) -> bool {
+        self.profile.is_some() || self.utilization.has_window()
+    }
+}
+
 /// Account identity from the private api/oauth/profile endpoint, reduced to what the line shows.
+/// The plan and the tier stay raw so a changed label rule needs no refetch.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Profile {
     #[serde(default, deserialize_with = "lenient")]
     pub email: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     pub plan: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub tier: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -131,6 +152,8 @@ struct ProfileOrganization {
     #[serde(default, deserialize_with = "lenient")]
     organization_type: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
+    rate_limit_tier: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
     subscription_status: Option<String>,
 }
 
@@ -153,6 +176,7 @@ pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
             account.has_claude_pro,
             organization.subscription_status.as_deref(),
         ),
+        tier: organization.rate_limit_tier,
     };
     // A 200 whose shape no longer matches (an endpoint change) parses to an
     // empty profile. Reading that as success would overwrite a good cached
@@ -170,10 +194,7 @@ pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
 /// of the usage kind instead, and the child keeps the previous data and books the ladder.
 fn utilization_from_body(body: &str) -> Option<EndpointUtilization> {
     let utilization: EndpointUtilization = serde_json::from_str(body).ok()?;
-    let has_window = utilization.five_hour.is_some()
-        || utilization.seven_day.is_some()
-        || utilization.limits.as_ref().is_some_and(|l| !l.is_empty());
-    has_window.then_some(utilization)
+    utilization.has_window().then_some(utilization)
 }
 
 pub fn cache_path() -> Option<PathBuf> {
@@ -426,26 +447,6 @@ fn next_month_start(now_epoch_s: i64) -> Option<i64> {
         .map(|dt| dt.timestamp())
 }
 
-/// Pure staleness decision shared by the render-side spawn and the fetch
-/// child's stampede re-check; interval 0 always reads as "not due".
-pub(crate) fn fetch_due(interval_s: u64, fetched_at_ms: Option<u64>, now_ms: u64) -> bool {
-    if interval_s == 0 {
-        return false;
-    }
-    match fetched_at_ms {
-        Some(at) => now_ms.saturating_sub(at) >= interval_s.saturating_mul(1_000),
-        None => true,
-    }
-}
-
-/// Staleness needs only fetched_at_ms; a corrupt cache then simply reads
-/// as stale instead of dragging the full schema into the render path.
-pub(crate) fn read_fetched_at_ms(path: &Path) -> Option<u64> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    value.get("fetched_at_ms")?.as_u64()
-}
-
 /// A kind is due when its next-at stamp is absent, not in the future, or further ahead than
 /// `max_ahead_ms`: the largest wait the code books for that kind, so a stamp beyond it could
 /// only come from a clock that jumped forward and back, and must not park the poll for days.
@@ -566,7 +567,7 @@ fn schedule(
         }
     };
     Schedule {
-        next_at_ms: now_ms.saturating_add(wait.as_millis() as u64),
+        next_at_ms: now_ms.saturating_add(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX)),
         backoff_ms,
     }
 }
@@ -1019,21 +1020,23 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let parsed: Snapshot = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed.fetched_at_ms, 2);
-        assert_eq!(read_fetched_at_ms(&path), Some(2));
         assert_eq!(read_next_at_ms(&path), (Some(3), None));
     }
 
     #[test]
-    fn profile_body_maps_to_email_and_plan() {
+    fn profile_body_maps_to_email_plan_and_tier() {
         let body = r#"{"account":{"email":" biz@example.com ","has_claude_max":true,"has_claude_pro":false},
-            "organization":{"organization_type":"claude_max","subscription_status":"active"}}"#;
+            "organization":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x",
+            "subscription_status":"active"}}"#;
         let p = profile_from_body(body).unwrap();
         assert_eq!(p.email.as_deref(), Some("biz@example.com"));
         assert_eq!(p.plan.as_deref(), Some("max"));
+        assert_eq!(p.tier.as_deref(), Some("default_claude_max_20x"));
         let body = r#"{"account":{"email":"a@b.c","has_claude_max":"yes"},
-            "organization":{"organization_type":"claude_enterprise"}}"#;
+            "organization":{"organization_type":"claude_enterprise","rate_limit_tier":7}}"#;
         let p = profile_from_body(body).unwrap();
         assert_eq!(p.plan.as_deref(), Some("enterprise"));
+        assert!(p.tier.is_none());
         assert!(profile_from_body("nope").is_none());
         assert!(profile_from_body("{}").is_none());
         assert!(profile_from_body(r#"{"account":{"uuid":"u"}}"#).is_none());
@@ -1049,14 +1052,25 @@ mod tests {
             profile: Some(Profile {
                 email: Some("a@b.c".to_string()),
                 plan: Some("pro".to_string()),
+                tier: Some("default_claude_pro".to_string()),
             }),
             profile_fetched_at_ms: Some(4),
             ..Snapshot::default()
         };
         write_json_atomic(&path, &snapshot).unwrap();
         let loaded = load_snapshot(&path, Some("u")).unwrap();
-        assert_eq!(loaded.profile.unwrap().email.as_deref(), Some("a@b.c"));
+        let profile = loaded.profile.unwrap();
+        assert_eq!(profile.email.as_deref(), Some("a@b.c"));
+        assert_eq!(profile.tier.as_deref(), Some("default_claude_pro"));
         assert_eq!(loaded.profile_fetched_at_ms, Some(4));
+        std::fs::write(
+            &path,
+            r#"{"fetched_at_ms": 5, "account_uuid": "u", "utilization": {},
+                "profile": {"email": "a@b.c", "plan": "pro"}}"#,
+        )
+        .unwrap();
+        let loaded = load_snapshot(&path, Some("u")).unwrap();
+        assert!(loaded.profile.unwrap().tier.is_none());
         std::fs::write(
             &path,
             r#"{"fetched_at_ms": 5, "account_uuid": "u", "utilization": {}}"#,
@@ -1132,17 +1146,7 @@ mod tests {
     }
 
     #[test]
-    fn staleness_decision_at_the_interval_boundary() {
-        assert!(fetch_due(60, None, 0), "missing cache is always stale");
-        assert!(!fetch_due(60, Some(1_000), 60_999));
-        assert!(fetch_due(60, Some(1_000), 61_000));
-        // A cache stamped in the future (clock skew) reads as fresh.
-        assert!(!fetch_due(60, Some(10_000), 5_000));
-    }
-
-    #[test]
     fn interval_zero_short_circuits_fetching() {
-        assert!(!fetch_due(0, None, 1_000_000));
         let config = Config {
             usage_fetch_interval_seconds: 0,
             ..Config::default()
@@ -1245,6 +1249,23 @@ mod tests {
                 backoff_ms: Some(600_000)
             }
         );
+    }
+
+    #[test]
+    fn schedule_saturates_an_absurd_retry_after() {
+        let interval = Duration::from_secs(60);
+        // Both waits exceed u64 milliseconds; the low 64 bits of the largest duration are all
+        // ones, so the second wait is the one a truncating conversion would wrap.
+        for wait in [Duration::MAX, Duration::from_secs(1 << 60)] {
+            let held = Outcome::Failure {
+                retry_after: Some(wait),
+            };
+            assert_eq!(
+                schedule(None, &held, interval, 1_000_000).next_at_ms,
+                u64::MAX,
+                "{wait:?}"
+            );
+        }
     }
 
     #[test]
@@ -1383,7 +1404,7 @@ mod tests {
             account_uuid: Some("u-1".to_string()),
             profile: Some(Profile {
                 email: Some("kept@example.com".to_string()),
-                plan: None,
+                ..Profile::default()
             }),
             profile_fetched_at_ms: Some(7),
             profile_next_at_ms: Some(now + 1),
@@ -1419,7 +1440,7 @@ mod tests {
             account_uuid: Some("u-2".to_string()),
             profile: Some(Profile {
                 email: Some("other@example.com".to_string()),
-                plan: None,
+                ..Profile::default()
             }),
             usage_next_at_ms: Some(now + 1),
             profile_next_at_ms: Some(now + 1),
