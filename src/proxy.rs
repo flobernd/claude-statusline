@@ -261,11 +261,25 @@ pub fn store_negative_cache(path: &Path, cache: &NegativeCache) {
     let _ = crate::usage::write_json_atomic(path, cache);
 }
 
+/// A base URL can carry embedded credentials as userinfo (`user:pass@host`); stripped before
+/// it becomes a file key so a saved credential never lands in
+/// `~/.claude/claude-statusline-proxy.json`.
+fn cache_key(base_url: &str) -> String {
+    let Some((scheme, rest)) = base_url.split_once("://") else {
+        return base_url.to_string();
+    };
+    let (authority, tail) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+    match authority.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://{host}{tail}"),
+        None => base_url.to_string(),
+    }
+}
+
 /// A stamp further ahead than `NEGATIVE_CACHE_S`, the longer of the two waits this module
 /// books, reads as expired: a clock that jumped forward and back must not park the poll.
 pub fn retry_pending(cache: &NegativeCache, base_url: &str, now_ms: u64) -> bool {
     cache
-        .get(base_url)
+        .get(&cache_key(base_url))
         .and_then(|entry| entry.retry_at_ms)
         .is_some_and(|at| {
             at > now_ms && at.saturating_sub(now_ms) <= NEGATIVE_CACHE_S.saturating_mul(1_000)
@@ -275,11 +289,18 @@ pub fn retry_pending(cache: &NegativeCache, base_url: &str, now_ms: u64) -> bool
 pub fn note_failure(cache: &mut NegativeCache, base_url: &str, now_ms: u64, wait_s: u64) {
     let retry_at_ms = now_ms.saturating_add(wait_s.saturating_mul(1_000));
     cache.insert(
-        base_url.to_string(),
+        cache_key(base_url),
         NegativeEntry {
             retry_at_ms: Some(retry_at_ms),
         },
     );
+}
+
+/// Clears a base URL's remembered failure, keyed the same way `note_failure` writes it. True
+/// when an entry was actually there, so the caller only rewrites the file when the cache
+/// changed.
+pub fn forget_failure(cache: &mut NegativeCache, base_url: &str) -> bool {
+    cache.remove(&cache_key(base_url)).is_some()
 }
 
 /// A stored route answer older than this is not shown: the plugin refreshes on every poll, so
@@ -335,7 +356,10 @@ pub fn load_session_cache(path: &Path) -> Option<SessionCache> {
 }
 
 fn same_base(cache: &SessionCache, base_url: &str) -> bool {
-    cache.base_url.as_deref() == Some(base_url)
+    cache
+        .base_url
+        .as_deref()
+        .is_some_and(|b| cache_key(b) == cache_key(base_url))
 }
 
 /// The stored answer, when it is this base URL's, fresh, and still the plugin's shape. A stamp
@@ -377,11 +401,11 @@ pub fn fetch_due(
     now_ms - attempted >= interval_ms
 }
 
-/// The stamped attempt the child records before it asks. The base URL rides along so the next
-/// tick can tell an answer for this proxy from one left by another.
+/// The stamped attempt the child records before it asks. The base URL is keyed the way the
+/// negative cache keys it, so a credential carried as userinfo never reaches the file.
 fn new_attempt(base_url: &str, now_ms: u64) -> SessionCache {
     SessionCache {
-        base_url: Some(base_url.to_string()),
+        base_url: Some(cache_key(base_url)),
         attempted_at_ms: Some(now_ms),
         ..Default::default()
     }
@@ -394,7 +418,7 @@ fn new_attempt(base_url: &str, now_ms: u64) -> SessionCache {
 fn carried_attempt(previous: Option<&SessionCache>, base_url: &str, now_ms: u64) -> SessionCache {
     let kept = previous.filter(|c| same_base(c, base_url));
     SessionCache {
-        base_url: Some(base_url.to_string()),
+        base_url: Some(cache_key(base_url)),
         attempted_at_ms: Some(now_ms),
         fetched_at_ms: kept.and_then(|c| c.fetched_at_ms),
         status: kept.and_then(|c| c.status.clone()),
@@ -468,7 +492,7 @@ fn try_fetch(session_id: &str) -> Option<()> {
     let url = status_url(&base, session_id)?;
     match fetch_status(&url) {
         RouteResult::Status(body) => {
-            if negative.remove(&base).is_some() {
+            if forget_failure(&mut negative, &base) {
                 store_negative_cache(&negative_path, &negative);
             }
             next.fetched_at_ms = Some(now_ms());
@@ -645,6 +669,16 @@ mod tests {
             Some(TWO_ACCOUNTS),
         );
         assert!(cached_status(&other, BASE, NOW_MS).is_none());
+        let userinfo = cache(
+            "http://u:p@127.0.0.1:8317",
+            Some(NOW_MS),
+            Some(NOW_MS),
+            Some(TWO_ACCOUNTS),
+        );
+        assert!(
+            cached_status(&userinfo, BASE, NOW_MS).is_some(),
+            "keyed like the negative cache"
+        );
         let empty = cache(
             BASE,
             Some(NOW_MS),
@@ -657,12 +691,18 @@ mod tests {
     }
 
     #[test]
-    fn a_new_attempt_stamps_the_base_url_and_carries_no_answer() {
-        let attempt = new_attempt(BASE, NOW_MS);
-        assert_eq!(attempt.base_url.as_deref(), Some(BASE));
+    fn a_new_attempt_keeps_userinfo_out_of_the_session_file() {
+        let raw = "http://u:p@127.0.0.1:8317";
+        let attempt = new_attempt(raw, NOW_MS);
+        assert_eq!(
+            attempt.base_url.as_deref(),
+            Some(BASE),
+            "the credential must not reach the file: {attempt:?}"
+        );
         assert_eq!(attempt.attempted_at_ms, Some(NOW_MS));
         assert!(attempt.fetched_at_ms.is_none() && attempt.status.is_none());
-        // The stamped base URL is the one the poll gate compares against.
+        // The stripped key still names the base URL both gates compare against.
+        assert!(!fetch_due(Some(&attempt), raw, 5, NOW_MS));
         assert!(!fetch_due(Some(&attempt), BASE, 5, NOW_MS));
     }
 
@@ -685,9 +725,13 @@ mod tests {
             switched.status.is_none() && switched.fetched_at_ms.is_none(),
             "another proxy's answer is dropped on a switch: {switched:?}"
         );
-        let first = carried_attempt(None, BASE, NOW_MS);
-        assert_eq!(first.base_url.as_deref(), Some(BASE));
-        assert!(first.status.is_none() && first.fetched_at_ms.is_none());
+        let first = carried_attempt(None, "http://u:p@127.0.0.1:8317", NOW_MS);
+        assert_eq!(
+            first.base_url.as_deref(),
+            Some(BASE),
+            "the credential must not reach the file: {first:?}"
+        );
+        assert!(first.status.is_none());
     }
 
     #[test]
@@ -908,6 +952,23 @@ mod tests {
         assert!(!path.exists());
         // Storing an empty cache without a file is not an error either.
         store_negative_cache(&path, &cache);
+    }
+
+    #[test]
+    fn negative_cache_key_strips_userinfo_from_the_base_url() {
+        let raw = "http://user:pass@127.0.0.1:8317";
+        let mut cache = NegativeCache::new();
+        note_failure(&mut cache, raw, 0, NEGATIVE_CACHE_S);
+        assert!(
+            cache.contains_key("http://127.0.0.1:8317"),
+            "the key must not carry the credential: {cache:?}"
+        );
+        assert!(retry_pending(&cache, raw, 0), "the check must strip it too");
+        assert!(
+            forget_failure(&mut cache, raw),
+            "the removal must strip it too"
+        );
+        assert!(cache.is_empty());
     }
 
     #[test]
