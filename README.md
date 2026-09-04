@@ -35,10 +35,10 @@ third.
   important chips first
 - Optional subagent status line: while agent tasks run, one row per task with
   name, live activity, context usage, elapsed time, and model
-- Optional usage limits line (off by default): plan type, session and weekly window
-  utilization with reset countdowns, the Fable-only weekly window, and the extra-usage
-  spend meter; behind CLIProxyAPI one row per account that serves the session, each with
-  the model it served last
+- Optional usage limits line (off by default): the account email, plan type, session
+  and weekly window utilization with reset countdowns, the Fable-only weekly window,
+  and the extra-usage spend meter; behind CLIProxyAPI one row per account that serves
+  the session, each with the model it served last
 - Opt-in update notification (off by default): a chip on the first line when a newer
   release is published, linking to its release notes
 - Single native binary; renders in a few milliseconds. Only the opt-in usage limits line
@@ -81,20 +81,25 @@ non-interactive install use `--install --with-subagent-statusline`.
 
 ## Usage limits line
 
-An opt-in third line shows the subscription limits otherwise hidden behind `/usage`: the plan
-type, the five-hour session and weekly windows with reset countdowns, the Fable-only weekly
-window, and the extra-usage spend meter (which also covers Team/Enterprise spend limits). The
-wizard asks about it, or set `advanced_usage_limits_enabled` yourself. The line renders only
-for native Anthropic subscriptions: Bedrock, Vertex, and custom-gateway sessions (a
-non-Anthropic `ANTHROPIC_BASE_URL` or an `ANTHROPIC_AUTH_TOKEN`) hide it unless the Claude
-Code payload still reports Anthropic rate limits, or a status from the CLIProxyAPI plugin
-route makes the same case (see "Behind CLIProxyAPI" below).
+An opt-in third line shows the subscription limits otherwise hidden behind `/usage`: the
+account email, the plan type, the five-hour session and weekly windows with reset countdowns,
+the Fable-only weekly window, and the extra-usage spend meter (which also covers
+Team/Enterprise spend limits). The wizard asks about it, or set `advanced_usage_limits_enabled`
+yourself. The line renders only for native Anthropic subscriptions: Bedrock, Vertex, and
+custom-gateway sessions (a non-Anthropic `ANTHROPIC_BASE_URL` or an `ANTHROPIC_AUTH_TOKEN`)
+hide it unless the Claude Code payload still reports Anthropic rate limits, or a status from
+the CLIProxyAPI plugin route makes the same case (see "Behind CLIProxyAPI" below).
 
 Session and weekly values come live from the Claude Code payload. The per-model and spend
 data comes from an unofficial claude.ai endpoint, fetched in the background at most every
 `usage_fetch_interval_seconds` (default 60, `0` disables the fetch) into
 `~/.claude/claude-statusline-usage.json`. That endpoint may change without notice; when it
 does, the affected chips disappear silently while the payload-backed chips keep working.
+
+The account email and the plan come from the claude.ai profile endpoint, fetched by the same
+background process at most once a day; until the first fetch lands, and with the fetch
+disabled, they come from `~/.claude.json`. The account chip puts your email on screen;
+`disabled_sections: ["usage_account"]` hides it.
 
 ### Behind CLIProxyAPI
 

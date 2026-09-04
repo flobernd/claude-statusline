@@ -51,13 +51,15 @@ cat > "$UHOME/.claude/claude-statusline.json" <<'JSON'
 {"advanced_usage_limits_enabled": true, "usage_fetch_interval_seconds": 0}
 JSON
 cat > "$UHOME/.claude.json" <<'JSON'
-{"oauthAccount": {"organizationType": "claude_max", "accountUuid": "acct-preview"}}
+{"oauthAccount": {"organizationType": "claude_max", "accountUuid": "acct-preview", "emailAddress": "user@example.com"}}
 JSON
 FABLE_RESET=$(date -u -d "@$((NOW_S + 432000))" +%Y-%m-%dT%H:%M:%SZ)
 cat > "$UHOME/.claude/claude-statusline-usage.json" <<JSON
 {
   "fetched_at_ms": $NOW_MS,
   "account_uuid": "acct-preview",
+  "profile": {"email": "user@example.com", "plan": "max"},
+  "profile_fetched_at_ms": $NOW_MS,
   "utilization": {
     "extra_usage": {"is_enabled": true, "monthly_limit": 100000, "used_credits": 100200, "utilization": 100.2},
     "limits": [

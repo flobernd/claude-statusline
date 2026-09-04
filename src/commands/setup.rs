@@ -50,7 +50,9 @@ pub fn run() -> Result<()> {
         }
     }
 
-    print!("Show the subscription usage limits line (session/weekly/model/spend)? [y/N]: ");
+    print!(
+        "Show the subscription usage limits line (account/plan/session/weekly/model/spend)? [y/N]: "
+    );
     std::io::stdout().flush()?;
     let mut usage_answer = String::new();
     // EOF counts as the default "no": the install must still happen.

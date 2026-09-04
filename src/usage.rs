@@ -79,6 +79,74 @@ pub struct Snapshot {
     pub account_uuid: Option<String>,
     #[serde(default)]
     pub utilization: EndpointUtilization,
+    #[serde(default, deserialize_with = "lenient")]
+    pub profile: Option<Profile>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub profile_fetched_at_ms: Option<u64>,
+}
+
+/// Account identity from the private api/oauth/profile endpoint, reduced to what the line shows.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Profile {
+    #[serde(default, deserialize_with = "lenient")]
+    pub email: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub plan: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProfileResponse {
+    #[serde(default, deserialize_with = "lenient")]
+    account: Option<ProfileAccount>,
+    #[serde(default, deserialize_with = "lenient")]
+    organization: Option<ProfileOrganization>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProfileAccount {
+    #[serde(default, deserialize_with = "lenient")]
+    email: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    has_claude_max: Option<bool>,
+    #[serde(default, deserialize_with = "lenient")]
+    has_claude_pro: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProfileOrganization {
+    #[serde(default, deserialize_with = "lenient")]
+    organization_type: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    subscription_status: Option<String>,
+}
+
+/// The profile changes on a plan switch and little else, so a day between fetches is plenty.
+pub(crate) const PROFILE_INTERVAL_S: u64 = 24 * 60 * 60;
+
+pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
+    let response: ProfileResponse = serde_json::from_str(body).ok()?;
+    let account = response.account.unwrap_or_default();
+    let organization = response.organization.unwrap_or_default();
+    let profile = Profile {
+        email: account
+            .email
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty()),
+        plan: crate::plan::derive(
+            organization.organization_type.as_deref(),
+            account.has_claude_max,
+            account.has_claude_pro,
+            organization.subscription_status.as_deref(),
+        ),
+    };
+    // A 200 whose shape no longer matches (an endpoint change) parses to an
+    // empty profile. Reading that as success would overwrite a good cached
+    // profile and stamp it fresh for a day; None instead lets refresh_profile
+    // keep the previous profile and retry on the next child run.
+    if profile.email.is_none() && profile.plan.is_none() {
+        return None;
+    }
+    Some(profile)
 }
 
 pub fn cache_path() -> Option<PathBuf> {
@@ -380,6 +448,9 @@ pub fn run_fetch() -> i32 {
     0
 }
 
+const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
+const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+
 fn try_fetch() -> Option<()> {
     let home = schema::home_dir()?;
     let claude_dir = home.join(".claude");
@@ -395,15 +466,44 @@ fn try_fetch() -> Option<()> {
         return None;
     }
     let token = read_access_token(&claude_dir.join(".credentials.json"))?;
-    let body = fetch_body(&token)?;
+    let body = fetch_json(USAGE_URL, &token)?;
     let utilization: EndpointUtilization = serde_json::from_str(&body).ok()?;
     let account_uuid = schema::load_account_info(&home.join(".claude.json")).account_uuid;
+    // The previous snapshot carries the profile forward. A snapshot of another
+    // account reads as absent here, which forces a fresh profile after a
+    // /login switch.
+    let previous = load_snapshot(&path, account_uuid.as_deref()).unwrap_or_default();
+    let (profile, profile_fetched_at_ms) = refresh_profile(
+        &token,
+        previous.profile,
+        previous.profile_fetched_at_ms,
+        crate::clock::now_ms(),
+    );
     let snapshot = Snapshot {
         fetched_at_ms: crate::clock::now_ms(),
         account_uuid,
         utilization,
+        profile,
+        profile_fetched_at_ms,
     };
     write_json_atomic(&path, &snapshot)
+}
+
+/// A failed profile fetch keeps the previous profile and its stamp, so the
+/// next child run retries instead of waiting out a day on nothing.
+fn refresh_profile(
+    token: &str,
+    previous: Option<Profile>,
+    previous_at_ms: Option<u64>,
+    now: u64,
+) -> (Option<Profile>, Option<u64>) {
+    if !fetch_due(PROFILE_INTERVAL_S, previous_at_ms, now) {
+        return (previous, previous_at_ms);
+    }
+    match fetch_json(PROFILE_URL, token).and_then(|body| profile_from_body(&body)) {
+        Some(profile) => (Some(profile), Some(now)),
+        None => (previous, previous_at_ms),
+    }
 }
 
 /// The token feeds the Authorization header and nothing else; it is never
@@ -425,13 +525,13 @@ pub(crate) fn fetch_timeout() -> std::time::Duration {
 }
 
 /// The only network touchpoint, kept separate so no test can reach it.
-fn fetch_body(token: &str) -> Option<String> {
+fn fetch_json(url: &str, token: &str) -> Option<String> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(fetch_timeout())
         .timeout(fetch_timeout())
         .build();
     agent
-        .get("https://api.anthropic.com/api/oauth/usage")
+        .get(url)
         .set("Authorization", &format!("Bearer {token}"))
         .set("anthropic-beta", "oauth-2025-04-20")
         .call()
@@ -689,6 +789,8 @@ mod tests {
             fetched_at_ms: 1_784_829_600_000,
             account_uuid: Some("u-1".to_string()),
             utilization: full_endpoint(),
+            profile: None,
+            profile_fetched_at_ms: None,
         };
         write_json_atomic(&path, &snapshot).unwrap();
 
@@ -713,6 +815,8 @@ mod tests {
             fetched_at_ms: 1,
             account_uuid: None,
             utilization: EndpointUtilization::default(),
+            profile: None,
+            profile_fetched_at_ms: None,
         };
         write_json_atomic(&path, &snapshot).unwrap();
         assert!(load_snapshot(&path, None).is_some());
@@ -727,6 +831,8 @@ mod tests {
             fetched_at_ms: 1,
             account_uuid: Some("u-1".to_string()),
             utilization: full_endpoint(),
+            profile: None,
+            profile_fetched_at_ms: None,
         };
         write_json_atomic(&path, &snapshot).unwrap();
         let updated = Snapshot {
@@ -741,6 +847,64 @@ mod tests {
         let parsed: Snapshot = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed.fetched_at_ms, 2);
         assert_eq!(read_fetched_at_ms(&path), Some(2));
+    }
+
+    #[test]
+    fn profile_body_maps_to_email_and_plan() {
+        let body = r#"{"account":{"email":" biz@example.com ","has_claude_max":true,"has_claude_pro":false},
+            "organization":{"organization_type":"claude_max","subscription_status":"active"}}"#;
+        let p = profile_from_body(body).unwrap();
+        assert_eq!(p.email.as_deref(), Some("biz@example.com"));
+        assert_eq!(p.plan.as_deref(), Some("max"));
+        let body = r#"{"account":{"email":"a@b.c","has_claude_max":"yes"},
+            "organization":{"organization_type":"claude_enterprise"}}"#;
+        let p = profile_from_body(body).unwrap();
+        assert_eq!(p.plan.as_deref(), Some("enterprise"));
+        assert!(profile_from_body("nope").is_none());
+        assert!(profile_from_body("{}").is_none());
+        assert!(profile_from_body(r#"{"account":{"uuid":"u"}}"#).is_none());
+    }
+
+    #[test]
+    fn snapshot_round_trips_the_profile_and_tolerates_its_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let snapshot = Snapshot {
+            fetched_at_ms: 5,
+            account_uuid: Some("u".to_string()),
+            utilization: EndpointUtilization::default(),
+            profile: Some(Profile {
+                email: Some("a@b.c".to_string()),
+                plan: Some("pro".to_string()),
+            }),
+            profile_fetched_at_ms: Some(4),
+        };
+        write_json_atomic(&path, &snapshot).unwrap();
+        let loaded = load_snapshot(&path, Some("u")).unwrap();
+        assert_eq!(loaded.profile.unwrap().email.as_deref(), Some("a@b.c"));
+        assert_eq!(loaded.profile_fetched_at_ms, Some(4));
+        std::fs::write(
+            &path,
+            r#"{"fetched_at_ms": 5, "account_uuid": "u", "utilization": {}}"#,
+        )
+        .unwrap();
+        let loaded = load_snapshot(&path, Some("u")).unwrap();
+        assert!(loaded.profile.is_none() && loaded.profile_fetched_at_ms.is_none());
+    }
+
+    #[test]
+    fn profile_interval_is_a_day() {
+        assert!(fetch_due(PROFILE_INTERVAL_S, None, 0));
+        assert!(!fetch_due(
+            PROFILE_INTERVAL_S,
+            Some(1_000),
+            1_000 + 86_399_999
+        ));
+        assert!(fetch_due(
+            PROFILE_INTERVAL_S,
+            Some(1_000),
+            1_000 + 86_400_000
+        ));
     }
 
     #[test]
