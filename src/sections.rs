@@ -1287,7 +1287,7 @@ mod tests {
             ]
         );
         assert_eq!(text_of(&chips, "usage_model"), "claude-fable-5-1[1m]");
-        let named = line3(
+        let spaced = line3(
             &full_limits(),
             None,
             None,
@@ -1295,7 +1295,7 @@ mod tests {
             &PLAIN,
             USAGE_NOW_S,
         );
-        assert_eq!(text_of(&named, "usage_model"), "Claude Fable 5.1 (1M)");
+        assert_eq!(text_of(&spaced, "usage_model"), "Claude Fable 5.1 (1M)");
         let codex = line3(
             &full_limits(),
             None,
