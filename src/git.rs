@@ -196,11 +196,14 @@ fn index_has_unmerged(dir: &Path) -> bool {
 /// Porcelain v2 with `--branch --untracked-files=all`: the branch header
 /// resolves on an unborn HEAD, every untracked file has its own `?` line,
 /// and every unmerged path has a `u` line whether or not an operation
-/// marker exists, which `git stash pop` never writes.
+/// marker exists, which `git stash pop` never writes. The upstream
+/// comparison is left off: the sync worker already makes it, and a large
+/// divergence must not push this call past its budget.
 const STATUS_ARGS: &[&str] = &[
     "status",
     "--porcelain=v2",
     "--branch",
+    "--no-ahead-behind",
     "--untracked-files=all",
 ];
 
