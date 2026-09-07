@@ -44,22 +44,27 @@ for h in "$PHOME" "$UHOME"; do
   printf '{"type":"assistant","timestamp":"%s","message":{"role":"assistant"}}\n' "$TS" > "$h/.claude/t.jsonl"
 done
 
-# --- usage HOME: opt-in config, account identity, seeded usage snapshot ----
-# Interval 0 keeps the capture from spawning a real fetch child; the line
-# renders purely from this snapshot plus the payload rate_limits.
+# --- usage HOME: opt-in config, login identity, seeded usage snapshot ------
+# The line renders from this snapshot plus the payload rate_limits. The
+# next-at stamps sit half an hour ahead, so the capture spawns no real fetch
+# child, and under the hour past which a stamp reads as due again. Interval 0
+# would drop the cache instead of reading it.
 cat > "$UHOME/.claude/claude-statusline.json" <<'JSON'
-{"advanced_usage_limits_enabled": true, "usage_fetch_interval_seconds": 0}
+{"advanced_usage_limits_enabled": true, "usage_fetch_interval_seconds": 60}
 JSON
 cat > "$UHOME/.claude.json" <<'JSON'
-{"oauthAccount": {"organizationType": "claude_max", "accountUuid": "acct-preview", "emailAddress": "user@example.com"}}
+{"oauthAccount": {"accountUuid": "acct-preview"}}
 JSON
+PARKED_MS=$((NOW_MS + 1800000))
 FABLE_RESET=$(date -u -d "@$((NOW_S + 432000))" +%Y-%m-%dT%H:%M:%SZ)
 cat > "$UHOME/.claude/claude-statusline-usage.json" <<JSON
 {
   "fetched_at_ms": $NOW_MS,
   "account_uuid": "acct-preview",
-  "profile": {"email": "user@example.com", "plan": "max"},
+  "profile": {"email": "user@example.com", "plan": "max", "tier": "default_claude_max_20x"},
   "profile_fetched_at_ms": $NOW_MS,
+  "usage_next_at_ms": $PARKED_MS,
+  "profile_next_at_ms": $PARKED_MS,
   "utilization": {
     "extra_usage": {"is_enabled": true, "monthly_limit": 100000, "used_credits": 100200, "utilization": 100.2},
     "limits": [

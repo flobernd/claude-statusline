@@ -302,11 +302,10 @@ pub fn line3(
         let text: String = account.chars().take(32).collect();
         push_visible(&mut out, "usage_account", s.paint(&text, MAGENTA));
     }
-    if let Some(plan) = plan
-        && let Some(first) = plan.chars().next()
-    {
-        // Plan names arrive lowercase (max, pro); render them title-cased.
-        let text: String = first.to_uppercase().chain(plan.chars().skip(1)).collect();
+    if let Some(plan) = plan {
+        // A plugin route may publish the bare family (max, pro), so the same rule that labels
+        // a fetched plan also title-cases one that arrives labelled already.
+        let text = crate::plan::label(plan, None);
         push_visible(&mut out, "usage_plan", s.paint(&text, MAGENTA));
     }
     if let Some(w) = &limits.session {
@@ -338,6 +337,13 @@ fn push_visible(out: &mut Vec<(&'static str, String)>, name: &'static str, paint
     }
 }
 
+const USAGE_LINE_GLYPH: &str = "\u{2301} ";
+
+/// Columns the fit must leave free for `with_line_glyph`, which is attached after the fit.
+pub fn line_glyph_width() -> usize {
+    crate::fit::visible_width(USAGE_LINE_GLYPH)
+}
+
 /// Prefix the line glyph to the first chip. The glyph marks the line, not a chip, so it must ride
 /// on whichever chip survives the filter and the fit.
 pub fn with_line_glyph(
@@ -345,7 +351,7 @@ pub fn with_line_glyph(
     s: &Style,
 ) -> Vec<(&'static str, String)> {
     if let Some(first) = chips.first_mut() {
-        first.1 = format!("{}{}", s.paint("\u{2301} ", COMMENT), first.1);
+        first.1 = format!("{}{}", s.paint(USAGE_LINE_GLYPH, COMMENT), first.1);
     }
     chips
 }
@@ -527,7 +533,7 @@ pub fn usage_preview(style: &Style) -> String {
     let sep = style.paint(" \u{2502} ", COMMENT);
     let chips = line3(
         &sample_limits(),
-        Some("max"),
+        Some("Max 20x"),
         Some("user@example.com"),
         None,
         style,
@@ -1042,6 +1048,18 @@ mod tests {
     }
 
     #[test]
+    fn glyph_width_matches_the_painted_glyph() {
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
+        let chips = with_line_glyph(vec![("usage_session", String::new())], &colored);
+        assert_eq!(crate::fit::visible_width(&chips[0].1), line_glyph_width());
+        // The drop-order arithmetic in tests/cli.rs counts on two columns.
+        assert_eq!(line_glyph_width(), 2);
+    }
+
+    #[test]
     fn plan_chip_renders_first_and_title_cased() {
         let limits = crate::usage::Limits {
             session: Some(window(42.0, None)),
@@ -1188,7 +1206,7 @@ mod tests {
     #[test]
     fn usage_preview_renders_the_sample_line() {
         let text = usage_preview(&PLAIN);
-        assert!(text.starts_with("\u{2301} user@example.com \u{2502} Max \u{2502} 5h:42%"));
+        assert!(text.starts_with("\u{2301} user@example.com \u{2502} Max 20x \u{2502} 5h:42%"));
         assert!(text.contains(" \u{2502} "));
         assert!(text.contains("spend:$1002/$1000 (100%)"));
     }
@@ -1269,7 +1287,7 @@ mod tests {
             ]
         );
         assert_eq!(text_of(&chips, "usage_model"), "claude-fable-5-1[1m]");
-        let named = line3(
+        let spaced = line3(
             &full_limits(),
             None,
             None,
@@ -1277,7 +1295,7 @@ mod tests {
             &PLAIN,
             USAGE_NOW_S,
         );
-        assert_eq!(text_of(&named, "usage_model"), "Claude Fable 5.1 (1M)");
+        assert_eq!(text_of(&spaced, "usage_model"), "Claude Fable 5.1 (1M)");
         let codex = line3(
             &full_limits(),
             None,

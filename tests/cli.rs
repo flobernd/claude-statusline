@@ -1604,6 +1604,19 @@ fn gateway_success_clears_the_negative_entry() {
 fn unknown_session_is_polled_on_the_interval() {
     let home = proxy_home(true);
     let (base, served) = serve("404 Not Found", r#"{"error":"unknown_session"}"#, 2);
+    // Another gateway's booked wait sits in the cache, so the polls prove they leave entries
+    // they did not write alone.
+    let other = "http://127.0.0.1:1";
+    let retry_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    std::fs::write(
+        negative_cache(home.path()),
+        format!(r#"{{{other:?}: {{"retry_at_ms": {retry_at_ms}}}}}"#),
+    )
+    .unwrap();
     let env = [("ANTHROPIC_BASE_URL", base.as_str())];
     fetch_proxy(home.path(), &base);
     // Only the interval holds the next poll back, so the stamp goes and the route is asked
@@ -1618,8 +1631,16 @@ fn unknown_session_is_polled_on_the_interval() {
     let out = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+    let cache: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(negative_cache(home.path())).unwrap())
+            .unwrap();
+    assert_eq!(
+        cache[other],
+        serde_json::json!({"retry_at_ms": retry_at_ms}),
+        "another gateway's entry survives untouched"
+    );
     assert!(
-        !negative_cache(home.path()).exists(),
+        cache.get(&base).is_none(),
         "an unknown session is not a gateway failure"
     );
 }
@@ -1681,6 +1702,19 @@ fn usage_line(stdout: &str) -> &str {
         .unwrap_or_else(|| panic!("no usage line in stdout: {stdout}"))
 }
 
+/// The usage line of a proxied session at `width`, fed by a loopback responder that answers
+/// the route once with `body` and must have seen that request.
+fn render_proxied(home: &std::path::Path, body: &'static str, width: &str) -> String {
+    let (base, served) = serve_once(body);
+    fetch_proxy(home, &base);
+    assert!(
+        served.join().unwrap().is_some(),
+        "the responder saw no request"
+    );
+    let out = run_statusline_with_env(PROXY_PAYLOAD, width, home, &[("ANTHROPIC_BASE_URL", &base)]);
+    usage_line(&String::from_utf8_lossy(&out.stdout)).to_string()
+}
+
 #[test]
 fn disabled_account_chip_keeps_the_line_glyph() {
     let home = proxy_home(true);
@@ -1691,19 +1725,7 @@ fn disabled_account_chip_keeps_the_line_glyph() {
             "usage_fetch_interval_seconds": 0}"#,
     )
     .unwrap();
-    let (base, served) = serve_once(PROXY_BODY);
-    fetch_proxy(home.path(), &base);
-    assert!(
-        served.join().unwrap().is_some(),
-        "the responder saw no request"
-    );
-    let out = run_statusline_with_env(
-        PROXY_PAYLOAD,
-        "200",
-        home.path(),
-        &[("ANTHROPIC_BASE_URL", &base)],
-    );
-    let line = usage_line(&String::from_utf8_lossy(&out.stdout)).to_string();
+    let line = render_proxied(home.path(), PROXY_BODY, "200");
     assert!(
         line.starts_with("\u{2301} Max \u{2502} 5h:6%"),
         "usage line: {line}"
@@ -1727,19 +1749,7 @@ const CONTROL_ACCOUNT_BODY: &str = concat!(
 #[test]
 fn control_character_account_renders_no_chip() {
     let home = proxy_home(true);
-    let (base, served) = serve_once(CONTROL_ACCOUNT_BODY);
-    fetch_proxy(home.path(), &base);
-    assert!(
-        served.join().unwrap().is_some(),
-        "the responder saw no request"
-    );
-    let out = run_statusline_with_env(
-        PROXY_PAYLOAD,
-        "200",
-        home.path(),
-        &[("ANTHROPIC_BASE_URL", &base)],
-    );
-    let line = usage_line(&String::from_utf8_lossy(&out.stdout)).to_string();
+    let line = render_proxied(home.path(), CONTROL_ACCOUNT_BODY, "200");
     assert!(
         line.starts_with("\u{2301} Max \u{2502} 5h:6%"),
         "usage line: {line}"
@@ -1756,25 +1766,13 @@ fn control_character_account_renders_no_chip() {
 /// to 81, the spend to 53, and the Fable window to the 14 + 3 + 15 = 32 of the two windows
 /// that stay. 20 columns, the narrowest width the binary accepts, leave 18, below that 32, so
 /// the week drops too. 200 columns hold everything.
-
 #[test]
 fn line3_drop_order_keeps_the_session_window() {
     let render = |width: &str| -> String {
         let home = proxy_home(true);
-        let (base, served) = serve_once(PROXY_BODY);
-        fetch_proxy(home.path(), &base);
-        assert!(
-            served.join().unwrap().is_some(),
-            "the responder saw no request"
-        );
-        let out = run_statusline_with_env(
-            PROXY_PAYLOAD,
-            width,
-            home.path(),
-            &[("ANTHROPIC_BASE_URL", &base)],
-        );
-        usage_line(&String::from_utf8_lossy(&out.stdout)).to_string()
+        render_proxied(home.path(), PROXY_BODY, width)
     };
+
     let wide = render("200");
     assert!(
         wide.starts_with("\u{2301} biz@example.com \u{2502} Max \u{2502} 5h:6%"),
@@ -1846,35 +1844,53 @@ fn usage_cache(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".claude").join("claude-statusline-usage.json")
 }
 
-/// A snapshot whose next-at stamps sit thirty minutes ahead, so the render tick under test
-/// never spawns a fetch child and the file stays exactly as seeded. The stamps must stay under
-/// the due() ceiling (the larger of the configured interval and one hour) or they read as due
-/// again and the tick spawns a real child into this test's HOME.
+/// The snapshot most tests want: a team plan and an email, no fetched windows.
 fn parked_snapshot(account_uuid: &str, email: &str) -> String {
+    parked_snapshot_with(
+        account_uuid,
+        &format!(r#"{{"email": {email:?}, "plan": "team"}}"#),
+        "{}",
+    )
+}
+
+/// `profile` and `utilization` are JSON objects, so a test seeds exactly the fetched content
+/// its case needs. The next-at stamps sit thirty minutes ahead, so the render tick under test
+/// never spawns a fetch child and the file stays exactly as seeded. They must stay under the
+/// due() ceiling (the larger of the configured interval and one hour) or they read as due
+/// again and the tick spawns a real child into this test's HOME.
+fn parked_snapshot_with(account_uuid: &str, profile: &str, utilization: &str) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
     let parked = now + 1_800_000;
     format!(
-        r#"{{"fetched_at_ms": {now}, "account_uuid": {account_uuid:?}, "utilization": {{}},
-            "profile": {{"email": {email:?}, "plan": "team"}}, "profile_fetched_at_ms": {now},
+        r#"{{"fetched_at_ms": {now}, "account_uuid": {account_uuid:?}, "utilization": {utilization},
+            "profile": {profile}, "profile_fetched_at_ms": {now},
             "usage_next_at_ms": {parked}, "profile_next_at_ms": {parked}}}"#
     )
 }
 
+/// Windows the payload under test never carries, so a merged snapshot and the payload windows
+/// alone read differently.
+const FETCHED_UTILIZATION: &str = r#"{"five_hour": {"utilization": 12, "resets_at": "2100-01-01T00:00:00Z"},
+        "seven_day": {"utilization": 33, "resets_at": "2100-01-01T00:00:00Z"}}"#;
+
+/// The local login file names an organization type and an email, and neither reaches the
+/// line: only fetched data may describe the account behind the numbers.
 #[test]
-fn native_usage_line_shows_the_local_email_without_a_snapshot() {
+fn native_usage_line_without_a_snapshot_shows_the_payload_windows_only() {
     let home = native_home(0, None);
     let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("local@example.com"), "stdout: {stdout}");
-    assert!(stdout.contains("Max"), "stdout: {stdout}");
-    assert!(stdout.contains("5h:42%"), "stdout: {stdout}");
+    let line = usage_line(&stdout);
+    assert!(line.starts_with("\u{2301} 5h:42%"), "usage line: {line}");
+    assert!(!stdout.contains("local@example.com"), "stdout: {stdout}");
+    assert!(!stdout.contains("Max"), "stdout: {stdout}");
 }
 
 #[test]
-fn native_usage_line_prefers_the_snapshot_profile() {
+fn native_usage_line_shows_the_snapshot_profile() {
     let home = native_home(60, Some(&parked_snapshot("acct-1", "fetched@example.com")));
     let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1896,7 +1912,7 @@ fn account_switch_removes_the_usage_cache() {
         !usage_cache(home.path()).exists(),
         "another account's snapshot must go"
     );
-    assert!(stdout.contains("local@example.com"), "stdout: {stdout}");
+    assert!(stdout.contains("5h:42%"), "stdout: {stdout}");
     assert!(!stdout.contains("other@example.com"), "stdout: {stdout}");
 }
 
@@ -1909,7 +1925,6 @@ fn disabled_fetch_removes_the_usage_cache() {
         !usage_cache(home.path()).exists(),
         "interval 0 drops the cache"
     );
-    assert!(stdout.contains("local@example.com"), "stdout: {stdout}");
     assert!(stdout.contains("5h:42%"), "stdout: {stdout}");
     assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
 }
@@ -1926,6 +1941,198 @@ fn disabled_line_removes_the_usage_cache() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!usage_cache(home.path()).exists(), "the line is off");
     assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+}
+
+#[test]
+fn native_usage_line_labels_the_plan_with_the_snapshot_tier() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "fetched@example.com", "plan": "max", "tier": "default_claude_max_20x"}"#,
+            "{}",
+        )),
+    );
+    let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = usage_line(&stdout);
+    assert!(
+        line.starts_with("\u{2301} fetched@example.com \u{2502} Max 20x \u{2502} 5h:42%"),
+        "usage line: {line}"
+    );
+}
+
+/// A seat whose payload carries no rate limits gets its line from the snapshot alone.
+#[test]
+fn native_usage_line_renders_from_a_snapshot_alone() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "fetched@example.com", "plan": "max"}"#,
+            FETCHED_UTILIZATION,
+        )),
+    );
+    let out = run_statusline("{}", "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = usage_line(&stdout);
+    assert!(
+        line.starts_with("\u{2301} fetched@example.com \u{2502} Max \u{2502} 5h:12%"),
+        "usage line: {line}"
+    );
+    assert!(line.contains("7d:33%"), "usage line: {line}");
+}
+
+/// A fetched profile opens the line on its own: the account and plan chips render, and no
+/// window chip follows them, because neither the payload nor the snapshot carries one.
+#[test]
+fn profile_only_snapshot_renders_the_account_chips() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "fetched@example.com", "plan": "max", "tier": "default_claude_max_20x"}"#,
+            "{}",
+        )),
+    );
+    let out = run_statusline("{}", "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.contains('\u{2301}'))
+        .unwrap_or_else(|| panic!("no usage line in stdout: {stdout}"));
+    assert_eq!(line, "\u{2301} fetched@example.com \u{2502} Max 20x");
+}
+
+#[test]
+fn native_usage_line_without_rate_limits_or_a_snapshot_stays_hidden() {
+    let home = native_home(0, None);
+    let out = run_statusline("{}", "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+    assert!(!stdout.contains("local@example.com"), "stdout: {stdout}");
+}
+
+/// The child spawns before the gate decides, so a seat whose payload carries no rate limits
+/// gets the first fetch that later opens its line. Without a token the child books its ladder
+/// and writes the schedule without a network call, which is what the poll waits for.
+#[test]
+fn a_seat_without_rate_limits_still_spawns_the_first_fetch() {
+    let home = native_home(60, None);
+    let out = run_statusline("{}", "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+    let cache = usage_cache(home.path());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !cache.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let text = std::fs::read_to_string(&cache).expect("the child wrote its schedule");
+    assert!(text.contains("usage_next_at_ms"), "cache: {text}");
+}
+
+/// A bearer token names some other account than the local login, so even with the proxy flag
+/// on and no proxy host to ask, the local cache stays unread and untouched.
+#[test]
+fn auth_token_session_renders_the_payload_windows_only() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "fetched@example.com", "plan": "max"}"#,
+            FETCHED_UTILIZATION,
+        )),
+    );
+    std::fs::write(
+        home.path().join(".claude").join("claude-statusline.json"),
+        r#"{"advanced_usage_limits_enabled": true, "cli_proxy_usage_enabled": true,
+            "usage_fetch_interval_seconds": 60}"#,
+    )
+    .unwrap();
+    let out = run_statusline_with_env(
+        NATIVE_PAYLOAD,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_AUTH_TOKEN", "sk-ant-gateway")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = usage_line(&stdout);
+    assert!(line.starts_with("\u{2301} 5h:42%"), "usage line: {line}");
+    assert!(!line.contains("7d:"), "usage line: {line}");
+    assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
+    assert!(
+        usage_cache(home.path()).exists(),
+        "a token session must not touch the local login's cache"
+    );
+}
+
+/// The cache outlives the base URL that was set after it was written, so a disabled fetch has
+/// to remove it on a custom endpoint too.
+#[test]
+fn disabled_fetch_removes_the_usage_cache_behind_a_custom_endpoint() {
+    let home = native_home(
+        0,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "fetched@example.com", "plan": "max"}"#,
+            FETCHED_UTILIZATION,
+        )),
+    );
+    let out = run_statusline_with_env(
+        NATIVE_PAYLOAD,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_BASE_URL", "https://gateway.example.com")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = usage_line(&stdout);
+    assert!(
+        !usage_cache(home.path()).exists(),
+        "interval 0 drops the cache on every endpoint"
+    );
+    assert!(line.starts_with("\u{2301} 5h:42%"), "usage line: {line}");
+    assert!(!line.contains("7d:"), "usage line: {line}");
+    assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
+}
+
+/// Without the proxy flag a custom endpoint has no route to ask, and the local login's cache
+/// still describes some other account than the one that endpoint serves, so the tick neither
+/// reads the cache nor rewrites it.
+#[test]
+fn custom_base_url_without_the_proxy_flag_leaves_the_cache_alone() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "fetched@example.com", "plan": "max"}"#,
+            FETCHED_UTILIZATION,
+        )),
+    );
+    // A closed loopback port: no request may go out, and one that did would fail at once
+    // instead of reaching a service on this machine.
+    let base = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{addr}")
+    };
+    let before = std::fs::read(usage_cache(home.path())).unwrap();
+    let out = run_statusline_with_env(
+        NATIVE_PAYLOAD,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_BASE_URL", base.as_str())],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = usage_line(&stdout);
+    assert!(line.starts_with("\u{2301} 5h:42%"), "usage line: {line}");
+    assert!(!line.contains("7d:"), "usage line: {line}");
+    assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
+    assert_eq!(
+        std::fs::read(usage_cache(home.path())).unwrap(),
+        before,
+        "a custom endpoint must not touch the local login's cache"
+    );
 }
 
 #[test]

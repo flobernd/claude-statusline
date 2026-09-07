@@ -88,7 +88,10 @@ Team/Enterprise spend limits). The wizard asks about it, or set `advanced_usage_
 yourself. The line renders only for native Anthropic subscriptions: Bedrock, Vertex, and
 custom-gateway sessions (a non-Anthropic `ANTHROPIC_BASE_URL` or an `ANTHROPIC_AUTH_TOKEN`)
 hide it unless the Claude Code payload still reports Anthropic rate limits, or a status from
-the CLIProxyAPI plugin route makes the same case (see "Behind CLIProxyAPI" below).
+the CLIProxyAPI plugin route makes the same case (see "Behind CLIProxyAPI" below). A
+custom-gateway session that opens the line through its payload rate limits alone renders the
+payload windows and no account or plan chips: the claude.ai data and the cache behind them
+describe the login on this machine, not the account that serves the session.
 
 Session and weekly values come live from the Claude Code payload. The per-model and spend
 data comes from an unofficial claude.ai endpoint, fetched in the background at most every
@@ -98,12 +101,13 @@ data comes from an unofficial claude.ai endpoint, fetched in the background at m
 That endpoint may change without notice; when it does, the affected chips disappear silently
 while the payload-backed chips keep working.
 
-The account email and the plan come from the claude.ai profile endpoint, fetched by the same
-background process at most once an hour; a failed fetch backs off the same way. Until the
-first fetch lands, and with the fetch disabled, they come from `~/.claude.json`. The account
-chip puts your email on screen; `disabled_sections: ["usage_account"]` hides it. The usage
-cache file is removed when the line or the fetch is disabled, and after a login switch, so
-another account's numbers never linger.
+The account email and the plan, shown with its rate-limit multiplier (`Max 20x`), come from
+the claude.ai profile endpoint, fetched by the same background process at most once an hour;
+a failed fetch backs off the same way. Both chips appear after the first profile fetch and
+stay absent while the fetch is disabled. The account chip puts your email on screen;
+`disabled_sections: ["usage_account"]` hides it. The usage cache file is removed when the
+line or the fetch is disabled, and after a login switch, so another account's numbers never
+linger.
 
 ### Behind CLIProxyAPI
 
@@ -237,13 +241,14 @@ A negative age, meaning the transcript timestamp sits ahead of the clock, hides 
 
 ### Usage limits line
 
-Every chip here pairs a comment label with a value on the fill scale, so the line reads as a row of
-meters: the further into a budget, the warmer the number.
+The window and spend chips pair a comment label with a value on the fill scale, so the line reads as
+a row of meters: the further into a budget, the warmer the number. The account, plan, and model chips
+are plain magenta text.
 
 | Chip            | Coloring                                                                      |
 | --------------- | ------------------------------------------------------------------------------ |
 | `usage_account` | Magenta; the email of the account behind the line                              |
-| `usage_plan`    | Magenta, matching the model chip above it                                       |
+| `usage_plan`    | Magenta; the plan family with its rate-limit multiplier, for example `Max 20x`; behind CLIProxyAPI the label the plugin publishes |
 | `usage_session` | Label `5h:` comment, percentage on the fill scale                               |
 | `usage_week`    | Label `7d:` comment, percentage on the fill scale                               |
 | `usage_fable`   | Label `fable:` comment, percentage on the fill scale                            |
