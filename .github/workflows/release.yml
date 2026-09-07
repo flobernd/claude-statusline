@@ -85,10 +85,10 @@ jobs:
             -F "input[branch][branchName]=master" \
             -F "input[expectedHeadOid]=$GITHUB_SHA" \
             -F "input[message][headline]=Release $NEXT" \
-            -F "input[fileChanges][additions][0][path]=Cargo.toml" \
-            -F "input[fileChanges][additions][0][contents]=$(base64 -w0 Cargo.toml)" \
-            -F "input[fileChanges][additions][1][path]=Cargo.lock" \
-            -F "input[fileChanges][additions][1][contents]=$(base64 -w0 Cargo.lock)" \
+            -F "input[fileChanges][additions][][path]=Cargo.toml" \
+            -F "input[fileChanges][additions][][contents]=$(base64 -w0 Cargo.toml)" \
+            -F "input[fileChanges][additions][][path]=Cargo.lock" \
+            -F "input[fileChanges][additions][][contents]=$(base64 -w0 Cargo.lock)" \
             --jq '.data.createCommitOnBranch.commit.oid')"
           echo "oid=$oid" >> "$GITHUB_OUTPUT"
 
