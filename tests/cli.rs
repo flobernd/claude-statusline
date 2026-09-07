@@ -839,6 +839,23 @@ fn reinstall_leaves_a_raw_backup_of_unparseable_settings_alone() {
 }
 
 #[test]
+fn reinstall_leaves_a_backup_that_is_not_utf8_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let raw = b"{\"statusLine\": \"\xff\xfe\"}";
+    std::fs::write(&path, raw).unwrap();
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    let bak = format!("{}.bak", path.display());
+    assert_eq!(std::fs::read(&bak).unwrap(), raw);
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    assert_eq!(
+        std::fs::read(&bak).unwrap(),
+        raw,
+        "bytes that are not UTF-8 are still the only recovery copy"
+    );
+}
+
+#[test]
 fn uninstall_with_only_foreign_entries_reports_not_installed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");

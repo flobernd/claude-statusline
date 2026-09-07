@@ -144,15 +144,24 @@ fn bak_path(path: &Path) -> PathBuf {
 /// it back. Without a backup yet, the whole file is the starting point so
 /// a first install still snapshots everything. A backup that does not
 /// parse is the raw copy of settings that did not parse either: the only
-/// recovery path the user has, and not ours to rewrite.
+/// recovery path the user has, and not ours to rewrite. Only a backup
+/// that does not exist starts from the current settings; a backup that
+/// cannot be read is an error, never a blank slate.
 fn refresh_backup(path: &Path, current: &Map<String, Value>, keys: &[&str]) -> Result<()> {
     let bak = bak_path(path);
-    let mut backup = match std::fs::read_to_string(&bak) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
+    let mut backup = match std::fs::read(&bak) {
+        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
             Ok(Value::Object(map)) => map,
-            _ => return Ok(()),
+            _ => {
+                eprintln!(
+                    "Warning: {} is not a JSON object and is left as it is; this install saves no backup.",
+                    bak.display()
+                );
+                return Ok(());
+            }
         },
-        Err(_) => current.clone(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => current.clone(),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", bak.display())),
     };
     for key in keys {
         let ours = current
