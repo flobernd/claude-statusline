@@ -219,6 +219,10 @@ fn cache_path_in(home: &Path) -> PathBuf {
     home.join(".claude").join("claude-statusline-usage.json")
 }
 
+fn lock_path_in(home: &Path) -> PathBuf {
+    home.join(".claude").join("claude-statusline-usage.lock")
+}
+
 /// Environment overrides that point Claude Code away from the official
 /// Claude API. Snapshotted once so the hide/show decision stays pure and
 /// testable. The statusline inherits Claude Code's environment, including
@@ -697,6 +701,10 @@ fn try_fetch_with(home: &Path, fetch: Fetch<'_>, now_ms: u64) -> Option<()> {
         return None;
     }
     let path = cache_path_in(home);
+    // Taken before the cache is read, so what this child reads, checks and
+    // writes is one transaction; a sibling that finds it held exits and
+    // leaves the work to the holder.
+    let _lock = crate::lock::try_acquire(&lock_path_in(home))?;
     let account_uuid = schema::load_account_info(&home.join(".claude.json")).account_uuid;
     // A snapshot of another account reads as absent, which forces a fresh profile after a
     // /login switch.
@@ -1798,6 +1806,20 @@ mod tests {
             std::fs::read_to_string(cache_path_in(home.path())).unwrap(),
             before
         );
+    }
+
+    #[test]
+    fn child_exits_without_fetching_while_a_sibling_holds_the_lock() {
+        let now = 1_000_000;
+        let home = child_home(60, None);
+        let lock = crate::lock::try_acquire(&lock_path_in(home.path())).unwrap();
+        let (snapshot, calls) = run_child(home.path(), now, |_| body(FULL_BODY));
+        assert!(calls.is_empty(), "a held lock means a sibling is fetching");
+        assert!(snapshot.is_none(), "and nothing is written over its result");
+        drop(lock);
+        let (snapshot, calls) = run_child(home.path(), now, |_| body(FULL_BODY));
+        assert_eq!(calls, [USAGE_URL, PROFILE_URL]);
+        assert!(snapshot.is_some());
     }
 
     #[test]

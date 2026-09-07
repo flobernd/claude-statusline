@@ -171,6 +171,7 @@ fn try_fetch() -> Option<()> {
     let home = schema::home_dir()?;
     let config = schema::load_config(&home.join(".claude").join("claude-statusline.json"));
     let path = cache_path()?;
+    let _lock = crate::lock::try_acquire(&path.with_extension("lock"))?;
     // Re-checking staleness doubles as stampede protection when several
     // render ticks spawn children before the first snapshot lands.
     if !fetch_due(

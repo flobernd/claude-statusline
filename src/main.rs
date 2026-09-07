@@ -5,6 +5,7 @@ mod commands;
 mod fit;
 mod format;
 mod git;
+mod lock;
 mod plan;
 mod proxy;
 mod schema;

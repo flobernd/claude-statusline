@@ -493,6 +493,7 @@ fn try_fetch(session_id: &str) -> Option<()> {
     let base = endpoint.custom_base_url()?;
     let path = session_cache_path(session_id)?;
     let now = crate::clock::now_ms();
+    let _lock = crate::lock::try_acquire(&path.with_extension("lock"))?;
     let previous = load_session_cache(&path);
     // Re-checking the gate doubles as stampede protection when several render ticks spawn
     // children before the first answer lands.
@@ -566,7 +567,10 @@ pub(crate) fn sweep_sessions(dir: &Path) {
         let path = entry.path();
         // `write_json_atomic` writes `<id>.<pid>.tmp` before it renames, so a child killed in
         // between leaves one behind that no rename will ever claim.
-        if path.extension().is_none_or(|e| e != "json" && e != "tmp") {
+        if path
+            .extension()
+            .is_none_or(|e| e != "json" && e != "tmp" && e != "lock")
+        {
             continue;
         }
         let old = entry

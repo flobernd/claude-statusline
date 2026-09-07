@@ -98,10 +98,17 @@ them describe the login on this machine, not the account that serves the session
 Session and weekly values come live from the Claude Code payload. The per-model and spend
 data comes from an unofficial claude.ai endpoint, fetched in the background at most every
 `usage_fetch_interval_seconds` (default 60, `0` disables the fetch) into
-`~/.claude/claude-statusline-usage.json`. A fetch that fails is retried when the endpoint's
-`Retry-After` header says so, or otherwise after a backoff that doubles from 2 to 10 minutes.
-That endpoint may change without notice; when it does, the affected chips disappear silently
-while the payload-backed chips keep working.
+`~/.claude/claude-statusline-usage.json`.
+
+Several sessions that find the cache due on the same tick spawn one fetch between them: the
+child holds an exclusive lock on `claude-statusline-usage.lock` next to the cache while it
+reads, fetches and writes, and a sibling that finds it held exits. The lock lives on the open
+file, so a killed child leaves nothing behind that could block the next one.
+
+A fetch that fails is retried when the endpoint's `Retry-After` header says so, or otherwise
+after a backoff that doubles from 2 to 10 minutes. That endpoint may change without notice;
+when it does, the affected chips disappear silently while the payload-backed chips keep
+working.
 
 A cached chip is only ever as current as the snapshot behind it: a window whose reset has passed
 disappears, the spend goes when the month it was read in closes, and after two fetch intervals
