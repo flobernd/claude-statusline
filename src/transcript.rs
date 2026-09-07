@@ -3,8 +3,8 @@ use std::path::Path;
 
 /// The newest assistant message is at the end of the file by definition,
 /// so a small tail usually reaches it. A tool result larger than the tail
-/// cuts it, and then the window doubles until a complete record answers
-/// or the ceiling is hit.
+/// cuts it, and then the window doubles until a complete record answers,
+/// the window reaches the file's start, or the ceiling is hit.
 const TAIL_BYTES: u64 = 64 * 1024;
 const TAIL_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -47,6 +47,11 @@ fn tail_lines(f: &mut std::fs::File, size: u64, bytes: u64) -> Option<(String, b
     Some((text, cut))
 }
 
+/// Reads a growing tail until `find` answers or the window covers the
+/// whole file or the ceiling. Growth does not stop at a window that
+/// starts on a record boundary: the record before that boundary is still
+/// unread, and only the file's start or the ceiling says there is nothing
+/// left to read.
 fn scan_tail<T>(path: &str, allowed_root: &Path, find: impl Fn(&str) -> Option<T>) -> Option<T> {
     let mut f = open_under(path, allowed_root)?;
     let size = f.metadata().ok()?.len();
@@ -55,11 +60,11 @@ fn scan_tail<T>(path: &str, allowed_root: &Path, find: impl Fn(&str) -> Option<T
     }
     let mut bytes = TAIL_BYTES;
     loop {
-        let (text, cut) = tail_lines(&mut f, size, bytes)?;
+        let (text, _) = tail_lines(&mut f, size, bytes)?;
         if let Some(found) = find(&text) {
             return Some(found);
         }
-        if !cut || bytes >= TAIL_MAX_BYTES || bytes >= size {
+        if bytes >= TAIL_MAX_BYTES || bytes >= size {
             return None;
         }
         bytes = (bytes * 2).min(TAIL_MAX_BYTES);
@@ -445,6 +450,39 @@ mod tests {
                 r#"{"type":"assistant","timestamp":"2026-07-02T23:00:49.920Z","message":{"role":"assistant"}}"#,
                 big.as_str(),
             ],
+        );
+        assert_eq!(last_assistant_ts_under(&path, dir.path()), None);
+    }
+
+    #[test]
+    fn a_window_that_starts_on_a_record_boundary_keeps_growing() {
+        let dir = tempfile::tempdir().unwrap();
+        let assistant = r#"{"type":"assistant","timestamp":"2026-07-02T23:00:49.920Z","message":{"role":"assistant","usage":{"cache_creation":{"ephemeral_1h_input_tokens":9}}}}"#;
+        // The user record is sized so the second window (128 KiB) starts
+        // exactly on the newline that follows the assistant record.
+        let prefix = r#"{"type":"user","tool_result":""#;
+        let suffix = r#""}"#;
+        let pad = 2 * TAIL_BYTES as usize - 2 - prefix.len() - suffix.len();
+        let big = format!("{prefix}{}{suffix}", "x".repeat(pad));
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, format!("{assistant}\n{big}\n")).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        assert_eq!(
+            last_assistant_ts_under(&path, dir.path()),
+            Some(1_783_033_249_920)
+        );
+        assert_eq!(last_cache_ttl_under(&path, dir.path()), Some(TTL_1H_MS));
+    }
+
+    #[test]
+    fn the_common_case_is_one_read() {
+        // A file that fits in the first window is read once, whatever the
+        // scan finds: the window covers the whole file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[r#"{"type":"user","message":{"role":"user"}}"#],
         );
         assert_eq!(last_assistant_ts_under(&path, dir.path()), None);
     }
