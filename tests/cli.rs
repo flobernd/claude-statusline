@@ -686,7 +686,12 @@ fn install_writes_forward_slash_command_paths() {
     // backslashes, so a backslash path breaks silently.
     for key in ["statusLine", "subagentStatusLine"] {
         let cmd = v[key]["command"].as_str().unwrap();
-        assert!(!cmd.contains('\\'), "{key} command: {cmd}");
+        // The shell escape for an apostrophe is the one backslash the
+        // command may carry; a path separator never is.
+        assert!(
+            !cmd.replace("'\\''", "").contains('\\'),
+            "{key} command: {cmd}"
+        );
     }
 }
 
@@ -767,6 +772,92 @@ fn plain_reinstall_preserves_original_backup_despite_foreign_subagent() {
         serde_json::from_str(&std::fs::read_to_string(format!("{}.bak", path.display())).unwrap())
             .unwrap();
     assert_eq!(bak["statusLine"]["command"], "old-tool");
+}
+
+#[test]
+fn subagent_opt_in_after_install_keeps_the_original_main_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{"statusLine": {"type": "command", "command": "other-main"},
+            "subagentStatusLine": {"type": "command", "command": "other-sub"}}"#,
+    )
+    .unwrap();
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    assert!(
+        run_with_settings(&["--install", "--with-subagent-statusline"], &path)
+            .status
+            .success()
+    );
+
+    let bak: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{}.bak", path.display())).unwrap())
+            .unwrap();
+    assert_eq!(bak["statusLine"]["command"], "other-main");
+    assert_eq!(bak["subagentStatusLine"]["command"], "other-sub");
+
+    assert!(run_with_settings(&["--uninstall"], &path).status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(v["statusLine"]["command"], "other-main");
+    assert_eq!(v["subagentStatusLine"]["command"], "other-sub");
+}
+
+#[test]
+fn an_entry_removed_by_hand_is_not_resurrected_from_the_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{"statusLine": {"type": "command", "command": "other-main"}}"#,
+    )
+    .unwrap();
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    // The user deletes the whole entry, then installs again.
+    std::fs::write(&path, r#"{"model": "opus"}"#).unwrap();
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    assert!(run_with_settings(&["--uninstall"], &path).status.success());
+
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(v.get("statusLine").is_none(), "settings: {v}");
+    assert_eq!(v["model"], "opus");
+}
+
+/// An install over settings that do not parse keeps the raw bytes as the backup. That copy
+/// is the only recovery path, so a later install must leave it exactly as it is.
+#[test]
+fn reinstall_leaves_a_raw_backup_of_unparseable_settings_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, "{not json").unwrap();
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    let bak = format!("{}.bak", path.display());
+    assert_eq!(std::fs::read_to_string(&bak).unwrap(), "{not json");
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    assert_eq!(
+        std::fs::read_to_string(&bak).unwrap(),
+        "{not json",
+        "the only recovery copy survives a reinstall"
+    );
+}
+
+#[test]
+fn reinstall_leaves_a_backup_that_is_not_utf8_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let raw = b"{\"statusLine\": \"\xff\xfe\"}";
+    std::fs::write(&path, raw).unwrap();
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    let bak = format!("{}.bak", path.display());
+    assert_eq!(std::fs::read(&bak).unwrap(), raw);
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    assert_eq!(
+        std::fs::read(&bak).unwrap(),
+        raw,
+        "bytes that are not UTF-8 are still the only recovery copy"
+    );
 }
 
 #[test]

@@ -295,7 +295,9 @@ claude-statusline --uninstall
 ```
 
 This removes the `statusLine` and `subagentStatusLine` entries installed by claude-statusline
-and restores the previous configuration when a backup exists.
+and restores the previous configuration when a backup exists. The backup in
+`~/.claude/settings.json.bak` keeps the original of each entry separately, so adding the subagent
+status line later does not lose the original main entry.
 
 ## License
 
