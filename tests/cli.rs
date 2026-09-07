@@ -2104,6 +2104,24 @@ fn native_usage_line_renders_a_spend_only_snapshot() {
     assert!(!stdout.contains("5h:"), "no window is invented: {stdout}");
 }
 
+/// A seat whose extra usage is switched off reports the object zeroed and off; the line shows
+/// the account and plan and no spend meter.
+#[test]
+fn native_usage_line_hides_a_switched_off_spend() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "seat@example.com", "plan": "enterprise"}"#,
+            r#"{"extra_usage": {"is_enabled": false, "monthly_limit": 0, "used_credits": 0, "utilization": 0}}"#,
+        )),
+    );
+    let out = run_statusline("{}", "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("seat@example.com"), "stdout: {stdout}");
+    assert!(!stdout.contains("spend:"), "stdout: {stdout}");
+}
+
 #[test]
 fn account_switch_removes_the_usage_cache() {
     let home = native_home(60, Some(&parked_snapshot("acct-2", "other@example.com")));

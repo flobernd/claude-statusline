@@ -24,13 +24,18 @@ pub struct EndpointUtilization {
 impl EndpointUtilization {
     /// One definition of fetched content for the child's emptiness guard and the line's gate.
     /// Spend amounts count on their own: an enterprise seat with a spend limit reports null
-    /// windows and an empty limits list, and its body is an answer, not an error envelope.
+    /// windows and an empty limits list, and its body is an answer, not an error envelope. An
+    /// `extra_usage` that says it is off is content too: the fetch answered, and the chip is
+    /// simply not shown.
     fn has_content(&self) -> bool {
         self.five_hour.is_some()
             || self.seven_day.is_some()
             || self.limits.as_ref().is_some_and(|l| !l.is_empty())
             || self.extra_usage.as_ref().is_some_and(|e| {
-                e.used_credits.is_some() || e.monthly_limit.is_some() || e.utilization.is_some()
+                e.is_enabled == Some(false)
+                    || e.used_credits.is_some()
+                    || e.monthly_limit.is_some()
+                    || e.utilization.is_some()
             })
     }
 }
@@ -458,7 +463,13 @@ fn fable_window(endpoint: &EndpointUtilization, freshness: Freshness) -> Option<
     })
 }
 
+/// A seat with extra usage switched off reports the object zeroed and off rather than
+/// omitting it; a meter built from that would read a real zero, so the flag hides it. An
+/// absent flag decides nothing: the amounts do, as before.
 fn spend_from(extra: &ExtraUsage, fetched_at_s: i64, freshness: Freshness) -> Option<Spend> {
+    if extra.is_enabled == Some(false) {
+        return None;
+    }
     spend_from_parts(
         extra.used_credits,
         extra.monthly_limit,
@@ -1143,6 +1154,40 @@ mod tests {
     }
 
     #[test]
+    fn spend_is_hidden_while_extra_usage_is_off_and_absent_flag_stays_permissive() {
+        // A seat with extra usage switched off: the object is there, zeroed, and off.
+        let off = r#"{"extra_usage": {"is_enabled": false, "monthly_limit": 0, "used_credits": 0, "utilization": 0}}"#;
+        let e: EndpointUtilization = serde_json::from_str(off).unwrap();
+        assert!(
+            merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+                .spend
+                .is_none()
+        );
+        assert!(
+            e.has_content(),
+            "an off spend is still an answer, not an error envelope"
+        );
+
+        let on = r#"{"extra_usage": {"is_enabled": true, "monthly_limit": 0, "used_credits": 0, "utilization": 0}}"#;
+        let e: EndpointUtilization = serde_json::from_str(on).unwrap();
+        assert_eq!(
+            merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+                .spend
+                .and_then(|s| s.pct),
+            Some(0.0),
+            "switched on with nothing spent yet is a real zero"
+        );
+
+        let unflagged = r#"{"extra_usage": {"monthly_limit": 5000, "used_credits": 1234}}"#;
+        let e: EndpointUtilization = serde_json::from_str(unflagged).unwrap();
+        assert!(
+            merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+                .spend
+                .is_some()
+        );
+    }
+
+    #[test]
     fn snapshot_round_trip_and_account_mismatch() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("claude-statusline-usage.json");
@@ -1585,7 +1630,7 @@ mod tests {
         assert_eq!(e.extra_usage.as_ref().unwrap().used_credits, Some(15_831.0));
         assert!(e.has_content());
         assert!(utilization_from_body("{}").is_none());
-        assert!(utilization_from_body(r#"{"extra_usage": {"is_enabled": false}}"#).is_none());
+        assert!(utilization_from_body(r#"{"extra_usage": {"is_enabled": false}}"#).is_some());
         assert!(utilization_from_body(r#"{"extra_usage": {"utilization": 3.0}}"#).is_some());
     }
 

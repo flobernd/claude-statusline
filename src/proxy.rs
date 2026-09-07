@@ -97,6 +97,10 @@ pub struct ProxyWindow {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ProxySpend {
+    /// Off means the seat has extra usage switched off; the plugin still publishes the
+    /// zeroed amounts, which must not read as a real zero.
+    #[serde(default, deserialize_with = "lenient")]
+    pub enabled: Option<bool>,
     #[serde(default, deserialize_with = "lenient")]
     pub limit_cents: Option<f64>,
     #[serde(default, deserialize_with = "lenient")]
@@ -212,6 +216,7 @@ pub fn limits(account: &ProxyAccount, now_epoch_s: i64, answer: Answer) -> Limit
         spend: account
             .spend
             .as_ref()
+            .filter(|s| s.enabled != Some(false))
             .and_then(|s| {
                 crate::usage::spend_from_parts(
                     s.used_cents,
@@ -1086,6 +1091,35 @@ mod tests {
         );
         let without = parse_status(r#"{"schema":1,"accounts":[{"spend":{}}]}"#).unwrap();
         assert!(limits(&without.accounts[0], NOW, live(NOW)).spend.is_none());
+    }
+
+    #[test]
+    fn limits_hide_a_spend_the_plugin_marks_off() {
+        let off = parse_status(
+            r#"{"schema":1,"accounts":[{"spend":{"enabled":false,"used_cents":0,"limit_cents":0,"used_percentage":0}}]}"#,
+        )
+        .unwrap();
+        assert!(limits(&off.accounts[0], NOW, live(NOW)).spend.is_none());
+        let on = parse_status(
+            r#"{"schema":1,"accounts":[{"spend":{"enabled":true,"used_cents":0,"limit_cents":0,"used_percentage":0}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            limits(&on.accounts[0], NOW, live(NOW))
+                .spend
+                .and_then(|s| s.pct),
+            Some(0.0)
+        );
+        // An older plugin publishes no flag; the amounts decide as before.
+        let unflagged = parse_status(
+            r#"{"schema":1,"accounts":[{"spend":{"used_cents":1234,"limit_cents":5000}}]}"#,
+        )
+        .unwrap();
+        assert!(
+            limits(&unflagged.accounts[0], NOW, live(NOW))
+                .spend
+                .is_some()
+        );
     }
 
     #[test]
