@@ -844,8 +844,9 @@ fn read_keychain_token() -> Option<String> {
 /// `security` can block on an unlock prompt, so the command is polled
 /// against the budget and killed and reaped when it runs out: a thread
 /// abandoned around `.output()` would leave the prompt and the process
-/// behind on every retry. The item is one short line, well inside the pipe
-/// buffer, so reading it after the exit cannot block.
+/// behind on every retry. Its output is drained on a thread of its own,
+/// because an item larger than the pipe buffer would otherwise block the
+/// command on its write until the budget killed it.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn keychain_token_from(program: &Path, account: &str, budget: Duration) -> Option<String> {
     use std::io::Read;
@@ -863,6 +864,11 @@ fn keychain_token_from(program: &Path, account: &str, budget: Duration) -> Optio
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        stdout.read_to_string(&mut out).ok().map(|_| out)
+    });
     let deadline = std::time::Instant::now() + budget;
     loop {
         match child.try_wait() {
@@ -870,8 +876,7 @@ fn keychain_token_from(program: &Path, account: &str, budget: Duration) -> Optio
                 if !status.success() {
                     return None;
                 }
-                let mut out = String::new();
-                child.stdout.take()?.read_to_string(&mut out).ok()?;
+                let out = reader.join().ok()??;
                 return token_from_credentials(out.trim());
             }
             Ok(None) if std::time::Instant::now() >= deadline => {
@@ -2063,6 +2068,24 @@ mod tests {
         );
         let failing = fake_command(dir.path(), "#!/bin/sh\nexit 44\n");
         assert!(keychain_token_from(&failing, "flo", Duration::from_secs(5)).is_none());
+
+        // An item larger than the pipe buffer must not block the command
+        // on its write: the token sits at the end of 256 KiB of padding.
+        let big = fake_command(
+            dir.path(),
+            "#!/bin/sh\nprintf '{\"pad\": \"'\nhead -c 262144 /dev/zero | tr '\\0' x\n\
+             printf '\", \"claudeAiOauth\": {\"accessToken\": \"tok\"}}\\n'\n",
+        );
+        let start = std::time::Instant::now();
+        assert_eq!(
+            keychain_token_from(&big, "flo", Duration::from_secs(5)).as_deref(),
+            Some("tok")
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            start.elapsed()
+        );
 
         // security blocks on an unlock prompt: the adapter must return at the
         // budget and leave no process behind.
