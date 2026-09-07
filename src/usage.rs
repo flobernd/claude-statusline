@@ -833,7 +833,7 @@ fn keychain_account(user: Option<&str>) -> String {
 #[cfg(target_os = "macos")]
 fn read_keychain_token() -> Option<String> {
     let account = keychain_account(std::env::var("USER").ok().as_deref());
-    keychain_token_from(Path::new("security"), &account, fetch_timeout())
+    keychain_token_from(Path::new("/usr/bin/security"), &account, keychain_timeout())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -893,6 +893,15 @@ fn keychain_token_from(program: &Path, account: &str, budget: Duration) -> Optio
 /// a stuck child cannot pile up behind the next tick's spawn.
 pub(crate) fn fetch_timeout() -> Duration {
     Duration::from_secs(5)
+}
+
+/// The Keychain read waits on its own budget: the first read may raise an
+/// allow prompt, and a user who answers it types a password, which the
+/// fetch budget would cut off mid-entry. A child that waits here holds the
+/// fetch lock, so a sibling exits at once rather than piling up.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn keychain_timeout() -> Duration {
+    Duration::from_secs(30)
 }
 
 /// The only network touchpoint, kept separate so no test can reach it. A status error keeps

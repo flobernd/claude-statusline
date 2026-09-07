@@ -120,8 +120,12 @@ the claude.ai profile endpoint, fetched by the same background process at most o
 a failed fetch backs off the same way.
 
 The token comes from `~/.claude/.credentials.json`, or on macOS from the `Claude Code-credentials`
-item in the login Keychain when that file is absent; `CLAUDE_STATUSLINE_KEYCHAIN=0` keeps the
-read to the file. A `CLAUDE_CONFIG_DIR` install keeps its credentials elsewhere and is not read.
+item in the login Keychain when that file is absent or holds no token. The first Keychain read may
+ask whether `security` may use the item: Always Allow ends the question, and a prompt that is
+denied or left unanswered counts as a failed fetch, so it returns after the backoff. To keep the
+read away from the Keychain, set `CLAUDE_STATUSLINE_KEYCHAIN=0` in the `env` block of
+`~/.claude/settings.json`, which the statusline inherits. A `CLAUDE_CONFIG_DIR` install keeps its
+credentials elsewhere and is not read.
 
 Both chips appear after the first profile fetch and stay absent while the fetch is disabled. The account chip puts your
 email on screen; `disabled_sections: ["usage_account"]` hides it. The usage cache file is removed when the line or the
