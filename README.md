@@ -102,6 +102,11 @@ data comes from an unofficial claude.ai endpoint, fetched in the background at m
 That endpoint may change without notice; when it does, the affected chips disappear silently
 while the payload-backed chips keep working.
 
+A cached chip is only ever as current as the snapshot behind it: a window whose reset has passed
+disappears, the spend goes when the month it was read in closes, and after two fetch intervals
+without a successful fetch the remaining cached meters dim to the comment color, while the
+payload windows on the same line stay live.
+
 The account email and the plan, shown with its rate-limit multiplier (`Max 20x`), come from
 the claude.ai profile endpoint, fetched by the same background process at most once an hour;
 a failed fetch backs off the same way. Both chips appear after the first profile fetch and
@@ -266,10 +271,11 @@ are plain magenta text.
 | `usage_spend`   | Label `spend:` comment; both dollar amounts and the percentage on the fill scale |
 | `usage_model`   | Magenta; the model id                                                          |
 
-Reset countdowns are comment throughout, as is the leading glyph that marks the line. Behind
-CLIProxyAPI a row whose answer has gone stale paints every percentage and dollar amount comment
-instead of on the fill scale; the account, plan, and model chips keep their magenta, because
-those do not go out of date.
+Reset countdowns are comment throughout, as is the leading glyph that marks the line. A meter whose
+numbers have gone stale paints its percentage and dollar amounts comment instead of on the fill
+scale: behind CLIProxyAPI the whole row ages with the route's answer, on the native line each
+cached chip ages with the snapshot while the payload windows stay live. The account, plan, and
+model chips keep their magenta, because those do not go out of date.
 
 ### Subagent rows
 

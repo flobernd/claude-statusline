@@ -201,6 +201,7 @@ pub fn limits(account: &ProxyAccount, now_epoch_s: i64, answer: Answer) -> Limit
         Some(Window {
             pct,
             resets_at: w.resets_at,
+            freshness: answer.freshness,
         })
     };
     let windows = account.windows.as_ref();
@@ -217,10 +218,10 @@ pub fn limits(account: &ProxyAccount, now_epoch_s: i64, answer: Answer) -> Limit
                     s.limit_cents,
                     s.used_percentage,
                     answer.fetched_at_s,
+                    answer.freshness,
                 )
             })
             .filter(|s| s.resets_at.is_none_or(|at| at > now_epoch_s)),
-        freshness: answer.freshness,
     }
 }
 

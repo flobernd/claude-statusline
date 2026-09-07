@@ -307,12 +307,23 @@ pub fn remove_cache() {
     }
 }
 
+/// Whether a chip's numbers still describe the session now. Stale numbers are the last ones a
+/// source gave and keep painting so an idle session does not lose its row, with the meter
+/// dimmed so it cannot be read as current.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Freshness {
+    #[default]
+    Live,
+    Stale,
+}
+
 #[derive(Debug)]
 pub struct Window {
     /// 0..100.
     pub pct: f64,
     /// Epoch seconds.
     pub resets_at: Option<i64>,
+    pub freshness: Freshness,
 }
 
 #[derive(Debug)]
@@ -323,16 +334,7 @@ pub struct Spend {
     pub pct: Option<f64>,
     /// Epoch seconds.
     pub resets_at: Option<i64>,
-}
-
-/// Whether the numbers still describe the session now. A stale set is the last answer the route
-/// gave: it keeps painting so an idle session does not lose its rows, with the meters dimmed so
-/// they cannot be read as current.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Freshness {
-    #[default]
-    Live,
-    Stale,
+    pub freshness: Freshness,
 }
 
 #[derive(Debug, Default)]
@@ -341,24 +343,55 @@ pub struct Limits {
     pub week: Option<Window>,
     pub fable: Option<Window>,
     pub spend: Option<Spend>,
-    pub freshness: Freshness,
 }
 
-/// The payload wins for session/week because it refreshes on every render
-/// tick; the cached endpoint snapshot only backfills and supplies the data
-/// the payload never carries (fable, spend).
+/// The cached endpoint snapshot as `merge` reads it: the numbers and when the child fetched
+/// them, which is what pins the spend to its billing month and decides whether the chips
+/// have aged.
+pub struct Cached<'a> {
+    pub utilization: &'a EndpointUtilization,
+    pub fetched_at_s: i64,
+}
+
+/// Two fetch intervals, at least two minutes: one missed fetch is ordinary, two in a row means
+/// the numbers stopped tracking the account.
+pub fn stale_after_s(config: &Config) -> u64 {
+    config
+        .usage_fetch_interval_seconds
+        .saturating_mul(2)
+        .max(120)
+}
+
+/// The payload wins for session/week because it refreshes on every render tick and is always
+/// live; the cached snapshot only backfills and supplies the data the payload never carries
+/// (fable, spend). A cached window whose reset has passed is dropped, as Claude Code drops its
+/// own, the spend goes when the month it was read in closes, and every cached chip dims once
+/// the snapshot is older than `stale_after_s`.
 pub fn merge(
     payload: Option<&schema::RateLimits>,
-    endpoint: Option<&EndpointUtilization>,
+    cached: Option<Cached<'_>>,
+    stale_after_s: u64,
     now_epoch_s: i64,
 ) -> Limits {
+    // abs_diff: a snapshot stamped ahead of the render clock (a clock set back since the
+    // fetch) has aged as surely as one behind it, the rule the proxy path applies to its stamp.
+    let freshness = cached.as_ref().map_or(Freshness::Live, |c| {
+        if c.fetched_at_s.abs_diff(now_epoch_s) > stale_after_s {
+            Freshness::Stale
+        } else {
+            Freshness::Live
+        }
+    });
+    let endpoint = cached.as_ref().map(|c| c.utilization);
+    let current = |w: Window| (w.resets_at.is_none_or(|at| at > now_epoch_s)).then_some(w);
     let session = payload
         .and_then(|p| p.five_hour.as_ref())
         .and_then(payload_window)
         .or_else(|| {
             endpoint
                 .and_then(|e| e.five_hour.as_ref())
-                .and_then(endpoint_window)
+                .and_then(|w| endpoint_window(w, freshness))
+                .and_then(current)
         });
     let week = payload
         .and_then(|p| p.seven_day.as_ref())
@@ -366,19 +399,25 @@ pub fn merge(
         .or_else(|| {
             endpoint
                 .and_then(|e| e.seven_day.as_ref())
-                .and_then(endpoint_window)
+                .and_then(|w| endpoint_window(w, freshness))
+                .and_then(current)
         });
     Limits {
         session,
         week,
-        fable: endpoint.and_then(fable_window),
-        spend: endpoint
-            .and_then(|e| e.extra_usage.as_ref())
-            .and_then(|extra| spend_from(extra, now_epoch_s)),
-        // The payload refreshes on every tick and the snapshot is the local login's own fetch,
-        // so the native path has nothing that outlives its source the way a carried route
-        // answer does.
-        freshness: Freshness::Live,
+        fable: endpoint
+            .and_then(|e| fable_window(e, freshness))
+            .and_then(current),
+        spend: cached
+            .as_ref()
+            .and_then(|c| {
+                c.utilization
+                    .extra_usage
+                    .as_ref()
+                    .map(|x| (x, c.fetched_at_s))
+            })
+            .and_then(|(extra, fetched_at_s)| spend_from(extra, fetched_at_s, freshness))
+            .filter(|s| s.resets_at.is_none_or(|at| at > now_epoch_s)),
     }
 }
 
@@ -386,17 +425,19 @@ fn payload_window(window: &schema::RateWindow) -> Option<Window> {
     Some(Window {
         pct: window.used_percentage?,
         resets_at: window.resets_at.map(|s| s as i64),
+        freshness: Freshness::Live,
     })
 }
 
-fn endpoint_window(window: &EndpointWindow) -> Option<Window> {
+fn endpoint_window(window: &EndpointWindow, freshness: Freshness) -> Option<Window> {
     Some(Window {
         pct: window.utilization?,
         resets_at: window.resets_at.as_deref().and_then(parse_reset_iso),
+        freshness,
     })
 }
 
-fn fable_window(endpoint: &EndpointUtilization) -> Option<Window> {
+fn fable_window(endpoint: &EndpointUtilization, freshness: Freshness) -> Option<Window> {
     let limit = endpoint.limits.as_ref()?.iter().find(|l| {
         l.kind.as_deref() == Some("weekly_scoped")
             && l.scope
@@ -408,25 +449,30 @@ fn fable_window(endpoint: &EndpointUtilization) -> Option<Window> {
     Some(Window {
         pct: limit.percent?,
         resets_at: limit.resets_at.as_deref().and_then(parse_reset_iso),
+        freshness,
     })
 }
 
-fn spend_from(extra: &ExtraUsage, now_epoch_s: i64) -> Option<Spend> {
+fn spend_from(extra: &ExtraUsage, fetched_at_s: i64, freshness: Freshness) -> Option<Spend> {
     spend_from_parts(
         extra.used_credits,
         extra.monthly_limit,
         extra.utilization,
-        now_epoch_s,
+        fetched_at_s,
+        freshness,
     )
 }
 
 /// Shared by the native endpoint and the CLIProxyAPI proxy route, which report the same shape
-/// under different field names.
+/// under different field names. `read_at_s` is when the amounts were read: the reset is the
+/// first of the month after that, never after the render clock, so a frozen amount cannot roll
+/// forward into a month it never described.
 pub(crate) fn spend_from_parts(
     used_cents: Option<f64>,
     limit_cents: Option<f64>,
     reported_pct: Option<f64>,
-    now_epoch_s: i64,
+    read_at_s: i64,
+    freshness: Freshness,
 ) -> Option<Spend> {
     // Amounts are authoritative when both exist; the reported utilization
     // only fills the gap, so a unit drift there cannot skew real dollars.
@@ -441,7 +487,8 @@ pub(crate) fn spend_from_parts(
         used_cents,
         limit_cents,
         pct,
-        resets_at: next_month_start(now_epoch_s),
+        resets_at: next_month_start(read_at_s),
+        freshness,
     })
 }
 
@@ -847,9 +894,103 @@ mod tests {
         assert_eq!(limit.percent, Some(81.0));
     }
 
+    fn cached(e: &EndpointUtilization, fetched_at_s: i64) -> Cached<'_> {
+        Cached {
+            utilization: e,
+            fetched_at_s,
+        }
+    }
+
+    #[test]
+    fn merge_drops_an_endpoint_window_whose_reset_has_passed() {
+        let e = full_endpoint();
+        // NOW_S is the five_hour reset itself, so that window is gone and the weekly stays.
+        let limits = merge(None, Some(cached(&e, NOW_S - 60)), 120, NOW_S);
+        assert!(limits.session.is_none());
+        assert_eq!(limits.week.map(|w| w.pct), Some(63.5));
+        assert_eq!(limits.fable.map(|w| w.pct), Some(81.0));
+        let limits = merge(None, Some(cached(&e, NOW_S - 60)), 120, WEEKLY_RESET_S);
+        assert!(limits.week.is_none() && limits.fable.is_none());
+    }
+
+    #[test]
+    fn merge_pins_spend_to_the_month_it_was_fetched_in() {
+        let e = full_endpoint();
+        let spend = merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+            .spend
+            .unwrap();
+        assert_eq!(spend.resets_at, next_month_start(NOW_S));
+        // Forty days later the reading's month has closed, whatever the local zone.
+        let later = NOW_S + 40 * 86_400;
+        assert!(
+            merge(None, Some(cached(&e, NOW_S)), 120, later)
+                .spend
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn merge_dims_endpoint_chips_older_than_the_stale_window() {
+        let e = full_endpoint();
+        let fresh = merge(
+            Some(&payload_limits()),
+            Some(cached(&e, NOW_S - 119)),
+            120,
+            NOW_S,
+        );
+        assert_eq!(fresh.fable.unwrap().freshness, Freshness::Live);
+        assert_eq!(fresh.spend.unwrap().freshness, Freshness::Live);
+        let old = merge(
+            Some(&payload_limits()),
+            Some(cached(&e, NOW_S - 121)),
+            120,
+            NOW_S,
+        );
+        assert_eq!(old.fable.unwrap().freshness, Freshness::Stale);
+        assert_eq!(old.spend.unwrap().freshness, Freshness::Stale);
+        assert_eq!(
+            old.session.unwrap().freshness,
+            Freshness::Live,
+            "a payload window refreshes every tick and never ages"
+        );
+        assert_eq!(old.week.unwrap().freshness, Freshness::Live);
+    }
+
+    #[test]
+    fn merge_backfilled_windows_age_with_the_snapshot() {
+        let e = full_endpoint();
+        // Rendered a second before the five_hour reset so that window is still current.
+        let old = merge(None, Some(cached(&e, NOW_S - 122)), 120, NOW_S - 1);
+        assert_eq!(old.session.unwrap().freshness, Freshness::Stale);
+        assert_eq!(old.week.unwrap().freshness, Freshness::Stale);
+    }
+
+    #[test]
+    fn merge_reads_a_snapshot_ahead_of_the_clock_as_stale_too() {
+        let e = full_endpoint();
+        // Stamped 121 s after the render clock: a clock set back since the fetch.
+        let ahead = merge(None, Some(cached(&e, NOW_S + 61)), 120, NOW_S - 60);
+        assert_eq!(ahead.fable.unwrap().freshness, Freshness::Stale);
+        let within = merge(None, Some(cached(&e, NOW_S + 59)), 120, NOW_S - 60);
+        assert_eq!(within.fable.unwrap().freshness, Freshness::Live);
+    }
+
+    #[test]
+    fn stale_window_is_two_intervals_with_a_floor() {
+        let config = |s: u64| Config {
+            usage_fetch_interval_seconds: s,
+            ..Config::default()
+        };
+        assert_eq!(stale_after_s(&config(60)), 120);
+        assert_eq!(stale_after_s(&config(5)), 120);
+        assert_eq!(stale_after_s(&config(300)), 600);
+        assert_eq!(stale_after_s(&config(u64::MAX)), u64::MAX);
+    }
+
     #[test]
     fn merge_prefers_payload_windows() {
-        let limits = merge(Some(&payload_limits()), Some(&full_endpoint()), NOW_S);
+        let e = full_endpoint();
+        let limits = merge(Some(&payload_limits()), Some(cached(&e, NOW_S)), 120, NOW_S);
         let session = limits.session.unwrap();
         assert_eq!(session.pct, 42.0);
         assert_eq!(session.resets_at, Some(1_784_836_800));
@@ -860,7 +1001,8 @@ mod tests {
 
     #[test]
     fn merge_backfills_windows_from_endpoint() {
-        let limits = merge(None, Some(&full_endpoint()), NOW_S);
+        let e = full_endpoint();
+        let limits = merge(None, Some(cached(&e, NOW_S)), 120, NOW_S - 60);
         let session = limits.session.unwrap();
         assert!((session.pct - 42.0).abs() < 1e-9);
         assert_eq!(session.resets_at, Some(NOW_S));
@@ -877,26 +1019,38 @@ mod tests {
             }),
             seven_day: None,
         };
-        let limits = merge(Some(&payload), Some(&full_endpoint()), NOW_S);
+        let e = full_endpoint();
+        let limits = merge(Some(&payload), Some(cached(&e, NOW_S)), 120, NOW_S - 60);
         assert!((limits.session.unwrap().pct - 42.0).abs() < 1e-9);
         assert!((limits.week.unwrap().pct - 63.5).abs() < 1e-9);
     }
 
     #[test]
     fn merge_fable_picks_only_the_fable_scoped_limit() {
-        let fable = merge(None, Some(&full_endpoint()), NOW_S).fable.unwrap();
+        let e = full_endpoint();
+        let fable = merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+            .fable
+            .unwrap();
         assert_eq!(fable.pct, 81.0);
         assert_eq!(fable.resets_at, Some(WEEKLY_RESET_S));
 
         let raw = r#"{"limits": [{"kind": "weekly_scoped", "percent": 12,
             "scope": {"model": {"display_name": "Sonnet 5"}}}]}"#;
         let e: EndpointUtilization = serde_json::from_str(raw).unwrap();
-        assert!(merge(None, Some(&e), NOW_S).fable.is_none());
+        assert!(
+            merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+                .fable
+                .is_none()
+        );
 
         let raw = r#"{"limits": [{"kind": "session_scoped", "percent": 12,
             "scope": {"model": {"display_name": "Fable 5"}}}]}"#;
         let e: EndpointUtilization = serde_json::from_str(raw).unwrap();
-        assert!(merge(None, Some(&e), NOW_S).fable.is_none());
+        assert!(
+            merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+                .fable
+                .is_none()
+        );
     }
 
     #[test]
@@ -904,14 +1058,19 @@ mod tests {
         let raw = r#"{"limits": [{"kind": "weekly_scoped", "percent": 81,
             "resets_at": "soon", "scope": {"model": {"display_name": "Fable 5"}}}]}"#;
         let e: EndpointUtilization = serde_json::from_str(raw).unwrap();
-        let fable = merge(None, Some(&e), NOW_S).fable.unwrap();
+        let fable = merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+            .fable
+            .unwrap();
         assert_eq!(fable.pct, 81.0);
         assert_eq!(fable.resets_at, None);
     }
 
     #[test]
     fn merge_spend_uses_amounts_and_computes_percent() {
-        let spend = merge(None, Some(&full_endpoint()), NOW_S).spend.unwrap();
+        let e = full_endpoint();
+        let spend = merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+            .spend
+            .unwrap();
         assert_eq!(spend.used_cents, Some(100_200.0));
         assert_eq!(spend.limit_cents, Some(100_000.0));
         assert!((spend.pct.unwrap() - 100.2).abs() < 1e-9);
@@ -935,7 +1094,9 @@ mod tests {
         const DEC_NOW_S: i64 = 1_797_336_000;
         let raw = r#"{"extra_usage": {"monthly_limit": 50000, "used_credits": 12500}}"#;
         let e: EndpointUtilization = serde_json::from_str(raw).unwrap();
-        let spend = merge(None, Some(&e), DEC_NOW_S).spend.unwrap();
+        let spend = merge(None, Some(cached(&e, DEC_NOW_S)), 120, DEC_NOW_S)
+            .spend
+            .unwrap();
         assert!((spend.pct.unwrap() - 25.0).abs() < 1e-9);
         let reset = chrono::DateTime::from_timestamp(spend.resets_at.unwrap(), 0)
             .unwrap()
@@ -953,7 +1114,9 @@ mod tests {
     fn merge_spend_falls_back_to_utilization_percent() {
         let raw = r#"{"extra_usage": {"is_enabled": true, "utilization": 37.0}}"#;
         let e: EndpointUtilization = serde_json::from_str(raw).unwrap();
-        let spend = merge(None, Some(&e), NOW_S).spend.unwrap();
+        let spend = merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+            .spend
+            .unwrap();
         assert_eq!(spend.used_cents, None);
         assert_eq!(spend.limit_cents, None);
         assert!((spend.pct.unwrap() - 37.0).abs() < 1e-9);
@@ -961,13 +1124,17 @@ mod tests {
 
     #[test]
     fn merge_without_usable_data_is_empty() {
-        let limits = merge(None, None, NOW_S);
+        let limits = merge(None, None, 120, NOW_S);
         assert!(limits.session.is_none() && limits.week.is_none());
         assert!(limits.fable.is_none() && limits.spend.is_none());
 
         let raw = r#"{"extra_usage": {"is_enabled": false}}"#;
         let e: EndpointUtilization = serde_json::from_str(raw).unwrap();
-        assert!(merge(None, Some(&e), NOW_S).spend.is_none());
+        assert!(
+            merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+                .spend
+                .is_none()
+        );
     }
 
     #[test]

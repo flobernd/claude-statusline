@@ -330,7 +330,11 @@ fn render(raw: &str) -> Option<String> {
                 None => {
                     let limits = usage::merge(
                         payload.rate_limits.as_ref(),
-                        snapshot.as_ref().map(|s| &s.utilization),
+                        snapshot.as_ref().map(|s| usage::Cached {
+                            utilization: &s.utilization,
+                            fetched_at_s: (s.fetched_at_ms / 1_000) as i64,
+                        }),
+                        usage::stale_after_s(&config),
                         now_epoch_s,
                     );
                     let (email, plan) = native_account(snapshot.as_ref());
