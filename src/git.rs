@@ -317,13 +317,19 @@ fn on_default_branch(common_dir: &Path, branch: &str) -> bool {
     }
 }
 
-/// A submodule's common dir is `.git/modules/<name>` under the
-/// superproject, nested once more per level for a submodule of a submodule.
+/// A submodule's git dir lives under the `modules` directory of the git
+/// dir that owns its checkout: `.git/modules/<name>` from the main
+/// checkout, `<common>/worktrees/<wt>/modules/<name>` from a linked
+/// worktree or a checkout of a bare common repository. Nested once more
+/// per level for a submodule of a submodule.
 fn submodule_common_dir(common_dir: &Path) -> bool {
     let is_named = |p: &Path, s: &str| p.file_name().is_some_and(|n| n == s);
-    common_dir
-        .ancestors()
-        .any(|a| is_named(a, "modules") && a.parent().is_some_and(|p| is_named(p, ".git")))
+    common_dir.ancestors().any(|a| {
+        is_named(a, "modules")
+            && a.parent().is_some_and(|p| {
+                is_named(p, ".git") || p.parent().is_some_and(|g| is_named(g, "worktrees"))
+            })
+    })
 }
 
 /// The common dir's parent names the repository: a linked worktree's
@@ -804,6 +810,15 @@ mod tests {
         assert!(submodule_common_dir(Path::new(
             "/w/super/.git/modules/lib/modules/inner"
         )));
+        assert!(submodule_common_dir(Path::new(
+            "/w/super/.git/worktrees/wt/modules/lib"
+        )));
+        assert!(submodule_common_dir(Path::new(
+            "/w/project/.bare/worktrees/main/modules/lib"
+        )));
+        assert!(!submodule_common_dir(Path::new(
+            "/w/worktrees/modules/.git"
+        )));
     }
 
     #[test]
@@ -848,6 +863,91 @@ mod tests {
         );
         assert_eq!(
             branch_location(&checkout).map(|l| l.repo).as_deref(),
+            Some("lib")
+        );
+    }
+
+    #[test]
+    fn submodule_inside_a_linked_worktree_is_named_after_its_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        init_repo(&sub);
+        let sup = dir.path().join("super");
+        std::fs::create_dir(&sup).unwrap();
+        init_repo(&sup);
+        let wt = dir.path().join("wt");
+        git(
+            &sup,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
+        );
+        git(
+            &wt,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                sub.to_str().unwrap(),
+                "lib",
+            ],
+        );
+        let checkout = wt.join("lib");
+        assert_eq!(
+            collect(&checkout).repo_name_fallback.as_deref(),
+            Some("lib")
+        );
+        assert_eq!(
+            branch_location(&checkout).map(|l| l.repo).as_deref(),
+            Some("lib")
+        );
+    }
+
+    #[test]
+    fn submodule_inside_a_bare_common_repository_checkout_is_named_after_its_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        init_repo(&sub);
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        init_repo(&src);
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        git(
+            &project,
+            &["clone", "-q", "--bare", src.to_str().unwrap(), ".bare"],
+        );
+        git(
+            &project,
+            &[
+                "--git-dir",
+                ".bare",
+                "worktree",
+                "add",
+                "-q",
+                "main",
+                "main",
+            ],
+        );
+        let checkout = project.join("main");
+        git(
+            &checkout,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                sub.to_str().unwrap(),
+                "lib",
+            ],
+        );
+        let inner = checkout.join("lib");
+        assert_eq!(collect(&inner).repo_name_fallback.as_deref(), Some("lib"));
+        assert_eq!(
+            branch_location(&inner).map(|l| l.repo).as_deref(),
             Some("lib")
         );
     }
