@@ -383,10 +383,13 @@ pub fn merge(
     stale_after_s: u64,
     now_epoch_s: i64,
 ) -> Limits {
-    // abs_diff: a snapshot stamped ahead of the render clock (a clock set back since the
-    // fetch) has aged as surely as one behind it, the rule the proxy path applies to its stamp.
+    // A snapshot stamped ahead of the render clock was fetched on a clock that has since been
+    // set back; waiting cannot make it current, so it stays stale until a fetch replaces it. A
+    // snapshot behind the clock ages the ordinary way.
     let freshness = cached.as_ref().map_or(Freshness::Live, |c| {
-        if c.fetched_at_s.abs_diff(now_epoch_s) > stale_after_s {
+        if c.fetched_at_s > now_epoch_s
+            || now_epoch_s - c.fetched_at_s > i64::try_from(stale_after_s).unwrap_or(i64::MAX)
+        {
             Freshness::Stale
         } else {
             Freshness::Live
@@ -982,13 +985,21 @@ mod tests {
     }
 
     #[test]
-    fn merge_reads_a_snapshot_ahead_of_the_clock_as_stale_too() {
+    fn merge_reads_a_snapshot_ahead_of_the_clock_as_stale_until_refetched() {
         let e = full_endpoint();
-        // Stamped 121 s after the render clock: a clock set back since the fetch.
-        let ahead = merge(None, Some(cached(&e, NOW_S + 61)), 120, NOW_S - 60);
-        assert_eq!(ahead.fable.unwrap().freshness, Freshness::Stale);
-        let within = merge(None, Some(cached(&e, NOW_S + 59)), 120, NOW_S - 60);
-        assert_eq!(within.fable.unwrap().freshness, Freshness::Live);
+        // Fetched on a clock 30 minutes fast, then the clock was corrected.
+        let fetched = NOW_S + 1_800;
+        for elapsed in [0, 1_680, 1_799] {
+            let limits = merge(None, Some(cached(&e, fetched)), 120, NOW_S + elapsed);
+            assert_eq!(
+                limits.fable.unwrap().freshness,
+                Freshness::Stale,
+                "stale {elapsed} s after the correction"
+            );
+        }
+        // One second past its own stamp the snapshot is at most a second old.
+        let limits = merge(None, Some(cached(&e, fetched)), 120, fetched + 1);
+        assert_eq!(limits.fable.unwrap().freshness, Freshness::Live);
     }
 
     #[test]
