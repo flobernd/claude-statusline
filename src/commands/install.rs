@@ -138,15 +138,17 @@ fn bak_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.bak", path.display()))
 }
 
-/// Claude Code passes the command through a shell, so a path containing
-/// whitespace must be quoted; print_config's first_token already parses
-/// the quoted form back.
+/// Claude Code hands the command to a POSIX shell (sh on Unix, Git Bash on
+/// Windows), so the path is written as one shell word. Single quotes are
+/// the only quoting that shell reads literally: double quotes still expand
+/// `$`, backticks and backslashes. print_config's first_token parses the
+/// quoted form back.
 fn command_string(exe: &str) -> String {
-    if exe.contains(char::is_whitespace) {
-        format!("\"{exe}\"")
-    } else {
-        exe.to_string()
+    let safe = |c: char| c.is_ascii_alphanumeric() || "/._:+=@%-".contains(c);
+    if !exe.is_empty() && exe.chars().all(safe) {
+        return exe.to_string();
     }
+    format!("'{}'", exe.replace('\'', "'\\''"))
 }
 
 /// Temp file plus rename: a crash mid-write must never leave the user's
@@ -178,10 +180,34 @@ mod tests {
     }
 
     #[test]
-    fn path_with_space_is_quoted() {
+    fn safe_paths_stay_bare() {
         assert_eq!(
-            command_string("C:\\Program Files\\claude-statusline.exe"),
-            "\"C:\\Program Files\\claude-statusline.exe\""
+            command_string("/usr/local/bin/claude-statusline"),
+            "/usr/local/bin/claude-statusline"
+        );
+        assert_eq!(
+            command_string("C:/tools/claude-statusline.exe"),
+            "C:/tools/claude-statusline.exe"
+        );
+    }
+
+    #[test]
+    fn unsafe_paths_become_one_single_quoted_word() {
+        assert_eq!(
+            command_string("C:/Program Files/claude-statusline.exe"),
+            "'C:/Program Files/claude-statusline.exe'"
+        );
+        assert_eq!(
+            command_string("/opt/O'Connor/claude-statusline"),
+            "'/opt/O'\\''Connor/claude-statusline'"
+        );
+        assert_eq!(
+            command_string("/tmp/q$(echo x)/claude-statusline"),
+            "'/tmp/q$(echo x)/claude-statusline'"
+        );
+        assert_eq!(
+            command_string("/tmp/`id`/claude-statusline"),
+            "'/tmp/`id`/claude-statusline'"
         );
     }
 }

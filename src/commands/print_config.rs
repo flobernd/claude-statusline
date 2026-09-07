@@ -82,14 +82,44 @@ pub fn is_our_command(command: &str) -> bool {
     base.strip_suffix(".exe").unwrap_or(base) == "claude-statusline"
 }
 
-/// First token of a command line, honoring a leading double-quoted path
-/// (Windows install paths contain spaces).
-fn first_token(command: &str) -> &str {
+/// First token of a command line. A leading single quote is the form
+/// install writes (`'\''` inside it is one literal quote); a leading double
+/// quote is the form older installs wrote and still read as ours. The word
+/// must end at the closing quote: `'x'-fork` is a different executable. An
+/// unterminated quote yields nothing rather than a guess.
+fn first_token(command: &str) -> String {
     let c = command.trim();
-    match c.strip_prefix('"') {
-        Some(rest) => rest.split('"').next().unwrap_or(""),
-        None => c.split_whitespace().next().unwrap_or(""),
+    let ends_word = |rest: &str| rest.is_empty() || rest.starts_with(char::is_whitespace);
+    if let Some(rest) = c.strip_prefix('\'') {
+        let mut out = String::new();
+        let mut rest = rest;
+        loop {
+            let Some(end) = rest.find('\'') else {
+                return String::new();
+            };
+            out.push_str(&rest[..end]);
+            rest = &rest[end + 1..];
+            match rest.strip_prefix("\\''") {
+                Some(after) => {
+                    out.push('\'');
+                    rest = after;
+                }
+                None if ends_word(rest) => return out,
+                None => return String::new(),
+            }
+        }
     }
+    if let Some(rest) = c.strip_prefix('"') {
+        let Some(end) = rest.find('"') else {
+            return String::new();
+        };
+        return if ends_word(&rest[end + 1..]) {
+            rest[..end].to_string()
+        } else {
+            String::new()
+        };
+    }
+    c.split_whitespace().next().unwrap_or("").to_string()
 }
 
 #[cfg(test)]
@@ -108,6 +138,11 @@ mod tests {
         assert!(is_our_command(
             "\"C:/Program Files/claude-statusline.exe\" --subagent-statusline"
         ));
+        assert!(is_our_command("'/opt/O'\\''Connor/claude-statusline'"));
+        assert!(is_our_command(
+            "'/tmp/q$(echo x)/claude-statusline' --subagent-statusline"
+        ));
+        assert!(is_our_command("'C:/Program Files/claude-statusline.exe'"));
     }
 
     #[test]
@@ -116,5 +151,10 @@ mod tests {
         assert!(!is_our_command("claude-status"));
         assert!(!is_our_command("my-claude-statusline-fork"));
         assert!(!is_our_command("python -m claude_statusline"));
+        assert!(!is_our_command("'/opt/other'\\''s/claude-statusline-fork'"));
+        assert!(!is_our_command("'unterminated"));
+        // The shell word runs on past the closing quote: a different executable.
+        assert!(!is_our_command("'/opt/claude-statusline'-fork"));
+        assert!(!is_our_command("\"/opt/claude-statusline\"-fork"));
     }
 }
