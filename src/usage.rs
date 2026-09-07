@@ -23,10 +23,15 @@ pub struct EndpointUtilization {
 
 impl EndpointUtilization {
     /// One definition of fetched content for the child's emptiness guard and the line's gate.
-    fn has_window(&self) -> bool {
+    /// Spend amounts count on their own: an enterprise seat with a spend limit reports null
+    /// windows and an empty limits list, and its body is an answer, not an error envelope.
+    fn has_content(&self) -> bool {
         self.five_hour.is_some()
             || self.seven_day.is_some()
             || self.limits.as_ref().is_some_and(|l| !l.is_empty())
+            || self.extra_usage.as_ref().is_some_and(|e| {
+                e.used_credits.is_some() || e.monthly_limit.is_some() || e.utilization.is_some()
+            })
     }
 }
 
@@ -110,10 +115,10 @@ pub struct Snapshot {
 
 impl Snapshot {
     /// The child writes the file as soon as it books its first retry, so only fetched content
-    /// proves a subscription. A stored utilization always has a window: the child treats a body
-    /// without one as a failure.
+    /// proves a subscription. A stored utilization always has content (a window, a scoped
+    /// limit, or spend amounts): the child treats a body without any as a failure.
     pub fn has_fetched_data(&self) -> bool {
-        self.profile.is_some() || self.utilization.has_window()
+        self.profile.is_some() || self.utilization.has_content()
     }
 }
 
@@ -185,13 +190,13 @@ pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
     Some(profile)
 }
 
-/// A 2xx body that parses but carries no window at all (an error envelope, or a shape the
+/// A 2xx body that parses but carries no content at all (an error envelope, or a shape the
 /// endpoint no longer sends) mirrors the profile's emptiness guard: reading it as success
 /// would overwrite a good cached utilization and clear its ladder, so it counts as a failure
 /// of the usage kind instead, and the child keeps the previous data and books the ladder.
 fn utilization_from_body(body: &str) -> Option<EndpointUtilization> {
     let utilization: EndpointUtilization = serde_json::from_str(body).ok()?;
-    utilization.has_window().then_some(utilization)
+    utilization.has_content().then_some(utilization)
 }
 
 pub fn cache_path() -> Option<PathBuf> {
@@ -1556,6 +1561,63 @@ mod tests {
             (Some(now + 120_000), Some(120_000)),
             "an error envelope on a 2xx must not clear the ladder"
         );
+    }
+
+    /// The body an enterprise seat with a spend limit gets: no windows, no scoped limits, only
+    /// the spend. It is an answer, and the spend chip has to follow it.
+    const SPEND_ONLY_BODY: &str = r#"{
+        "five_hour": null,
+        "seven_day": null,
+        "extra_usage": {
+            "is_enabled": true,
+            "monthly_limit": 300000,
+            "used_credits": 15831.0,
+            "utilization": 5.28,
+            "currency": "USD",
+            "disabled_reason": null
+        },
+        "limits": []
+    }"#;
+
+    #[test]
+    fn spend_amounts_count_as_fetched_content() {
+        let e = utilization_from_body(SPEND_ONLY_BODY).expect("a spend-only body is content");
+        assert_eq!(e.extra_usage.as_ref().unwrap().used_credits, Some(15_831.0));
+        assert!(e.has_content());
+        assert!(utilization_from_body("{}").is_none());
+        assert!(utilization_from_body(r#"{"extra_usage": {"is_enabled": false}}"#).is_none());
+        assert!(utilization_from_body(r#"{"extra_usage": {"utilization": 3.0}}"#).is_some());
+    }
+
+    #[test]
+    fn child_stores_a_spend_only_body_and_clears_the_ladder() {
+        let now = 1_000_000;
+        let previous = Snapshot {
+            account_uuid: Some("u-1".to_string()),
+            usage_backoff_ms: Some(600_000),
+            profile_next_at_ms: Some(now + 1),
+            ..Snapshot::default()
+        };
+        let home = child_home(60, Some(&previous));
+        let (snapshot, calls) = run_child(home.path(), now, |_| body(SPEND_ONLY_BODY));
+        let snapshot = snapshot.unwrap();
+        assert_eq!(calls, [USAGE_URL]);
+        assert_eq!(snapshot.fetched_at_ms, now);
+        assert_eq!(
+            snapshot
+                .utilization
+                .extra_usage
+                .as_ref()
+                .unwrap()
+                .used_credits,
+            Some(15_831.0)
+        );
+        assert_eq!(
+            (snapshot.usage_next_at_ms, snapshot.usage_backoff_ms),
+            (Some(now + 60_000), None),
+            "a stored body is a success and restarts the ladder"
+        );
+        assert!(snapshot.has_fetched_data());
     }
 
     #[test]

@@ -2084,6 +2084,26 @@ fn an_approved_api_key_hides_the_local_login_from_the_usage_line() {
     assert!(stdout.contains("fetched@example.com"), "stdout: {stdout}");
 }
 
+/// An enterprise seat's fetch carries the spend and nothing else; the line opens on it and
+/// shows the meter, and no window is invented.
+#[test]
+fn native_usage_line_renders_a_spend_only_snapshot() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "seat@example.com", "plan": "enterprise"}"#,
+            r#"{"five_hour": null, "seven_day": null, "limits": [],
+                "extra_usage": {"is_enabled": true, "monthly_limit": 300000, "used_credits": 15831.0}}"#,
+        )),
+    );
+    let out = run_statusline("{}", "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("spend:$158/$3000 (5%)"), "stdout: {stdout}");
+    assert!(stdout.contains("Enterprise"), "stdout: {stdout}");
+    assert!(!stdout.contains("5h:"), "no window is invented: {stdout}");
+}
+
 #[test]
 fn account_switch_removes_the_usage_cache() {
     let home = native_home(60, Some(&parked_snapshot("acct-2", "other@example.com")));

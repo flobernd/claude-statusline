@@ -521,6 +521,18 @@ mod tests {
             },
             ..usage::Snapshot::default()
         };
+        // An enterprise seat's fetch carries the spend and nothing else, and that is content.
+        let spend_only = usage::Snapshot {
+            utilization: usage::EndpointUtilization {
+                extra_usage: Some(usage::ExtraUsage {
+                    used_credits: Some(15_831.0),
+                    monthly_limit: Some(300_000.0),
+                    ..usage::ExtraUsage::default()
+                }),
+                ..usage::EndpointUtilization::default()
+            },
+            ..usage::Snapshot::default()
+        };
         // The child writes the file as soon as it books its first retry, so a schedule alone
         // proves nothing.
         let booked = usage::Snapshot {
@@ -548,6 +560,13 @@ mod tests {
             &official,
             false,
             Some(&windows)
+        ));
+        assert!(usage_line_enabled(
+            &enabled(),
+            &without,
+            &official,
+            false,
+            Some(&spend_only)
         ));
         assert!(!usage_line_enabled(
             &enabled(),
