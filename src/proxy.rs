@@ -493,6 +493,7 @@ fn try_fetch(session_id: &str) -> Option<()> {
     let base = endpoint.custom_base_url()?;
     let path = session_cache_path(session_id)?;
     let now = crate::clock::now_ms();
+    let _lock = crate::lock::try_acquire(&path.with_extension("lock"))?;
     let previous = load_session_cache(&path);
     // Re-checking the gate doubles as stampede protection when several render ticks spawn
     // children before the first answer lands.
@@ -565,7 +566,10 @@ pub(crate) fn sweep_sessions(dir: &Path) {
         }
         let path = entry.path();
         // `write_json_atomic` writes `<id>.<pid>.tmp` before it renames, so a child killed in
-        // between leaves one behind that no rename will ever claim.
+        // between leaves one behind that no rename will ever claim. Lock files are never
+        // removed: an age check cannot tell a leftover from a lock a child acquired a moment
+        // after the check, and unlinking a held lock lets a second child lock a fresh file at
+        // the same path.
         if path.extension().is_none_or(|e| e != "json" && e != "tmp") {
             continue;
         }
@@ -825,17 +829,24 @@ mod tests {
         let young = dir.path().join("young.json");
         let old_tmp = dir.path().join("old.4242.tmp");
         let young_tmp = dir.path().join("young.4242.tmp");
-        for path in [&old, &young, &old_tmp, &young_tmp] {
+        let old_lock = dir.path().join("old.lock");
+        let young_lock = dir.path().join("young.lock");
+        for path in [&old, &young, &old_tmp, &young_tmp, &old_lock, &young_lock] {
             std::fs::write(path, "{}").unwrap();
         }
         let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 3600);
         filetime_set(&old, day_ago);
         filetime_set(&old_tmp, day_ago);
+        filetime_set(&old_lock, day_ago);
         sweep_sessions(dir.path());
         assert!(!old.exists() && young.exists());
         assert!(
             !old_tmp.exists() && young_tmp.exists(),
             "a temporary a killed child left behind ages out with the session files"
+        );
+        assert!(
+            old_lock.exists() && young_lock.exists(),
+            "a lock file is never removed, whatever its age"
         );
     }
 

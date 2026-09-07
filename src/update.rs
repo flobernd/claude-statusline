@@ -171,6 +171,7 @@ fn try_fetch() -> Option<()> {
     let home = schema::home_dir()?;
     let config = schema::load_config(&home.join(".claude").join("claude-statusline.json"));
     let path = cache_path()?;
+    let _lock = crate::lock::try_acquire(&path.with_extension("lock"))?;
     // Re-checking staleness doubles as stampede protection when several
     // render ticks spawn children before the first snapshot lands.
     if !fetch_due(
@@ -185,25 +186,32 @@ fn try_fetch() -> Option<()> {
     usage::write_json_atomic(&path, &snapshot)
 }
 
-/// The only network touchpoint, kept separate so no test can reach it.
+/// The only network touchpoint, kept separate so no test can reach it. The request runs on
+/// its own thread because ureq's timeouts do not cover DNS resolution; `recv_timeout` bounds
+/// the whole call.
 fn fetch_release() -> Option<ReleaseInfo> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(5))
-        .build();
-    let body = agent
-        .get(LATEST_RELEASE_URL)
-        // GitHub rejects requests without a User-Agent.
-        .set(
-            "User-Agent",
-            concat!("claude-statusline/", env!("CARGO_PKG_VERSION")),
-        )
-        .set("Accept", "application/vnd.github+json")
-        .call()
-        .ok()?
-        .into_string()
-        .ok()?;
-    serde_json::from_str(&body).ok()
+    let total = usage::fetch_timeout();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(total)
+            .timeout(total)
+            .build();
+        let release = agent
+            .get(LATEST_RELEASE_URL)
+            // GitHub rejects requests without a User-Agent.
+            .set(
+                "User-Agent",
+                concat!("claude-statusline/", env!("CARGO_PKG_VERSION")),
+            )
+            .set("Accept", "application/vnd.github+json")
+            .call()
+            .ok()
+            .and_then(|r| r.into_string().ok())
+            .and_then(|body| serde_json::from_str(&body).ok());
+        let _ = tx.send(release);
+    });
+    rx.recv_timeout(total).ok().flatten()
 }
 
 #[cfg(test)]

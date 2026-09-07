@@ -98,10 +98,17 @@ them describe the login on this machine, not the account that serves the session
 Session and weekly values come live from the Claude Code payload. The per-model and spend
 data comes from an unofficial claude.ai endpoint, fetched in the background at most every
 `usage_fetch_interval_seconds` (default 60, `0` disables the fetch) into
-`~/.claude/claude-statusline-usage.json`. A fetch that fails is retried when the endpoint's
-`Retry-After` header says so, or otherwise after a backoff that doubles from 2 to 10 minutes.
-That endpoint may change without notice; when it does, the affected chips disappear silently
-while the payload-backed chips keep working.
+`~/.claude/claude-statusline-usage.json`.
+
+Several sessions that find the cache due on the same tick spawn one fetch between them: the
+child holds an exclusive lock on `claude-statusline-usage.lock` next to the cache while it
+reads, fetches and writes, and a sibling that finds it held exits. The lock lives on the open
+file, so a killed child leaves nothing behind that could block the next one.
+
+A fetch that fails is retried when the endpoint's `Retry-After` header says so, or otherwise
+after a backoff that doubles from 2 to 10 minutes. That endpoint may change without notice;
+when it does, the affected chips disappear silently while the payload-backed chips keep
+working.
 
 A cached chip is only ever as current as the snapshot behind it: a window whose reset has passed
 disappears, the spend goes when the month it was read in closes, and after two fetch intervals
@@ -110,24 +117,34 @@ payload windows on the same line stay live.
 
 The account email and the plan, shown with its rate-limit multiplier (`Max 20x`), come from
 the claude.ai profile endpoint, fetched by the same background process at most once an hour;
-a failed fetch backs off the same way. Both chips appear after the first profile fetch and
-stay absent while the fetch is disabled. The account chip puts your email on screen;
-`disabled_sections: ["usage_account"]` hides it. The usage cache file is removed when the
-line or the fetch is disabled, and after a login switch, so another account's numbers never
-linger.
+a failed fetch backs off the same way.
+
+The token comes from `~/.claude/.credentials.json`, or on macOS from the `Claude Code-credentials`
+item in the login Keychain when that file is absent or holds no token. The first Keychain read may
+ask whether `security` may use the item: Always Allow ends the question, and a prompt that is
+denied or left unanswered counts as a failed fetch, so it returns after the backoff. To keep the
+read away from the Keychain, set `CLAUDE_STATUSLINE_KEYCHAIN=0` in the `env` block of
+`~/.claude/settings.json`, which the statusline inherits. A `CLAUDE_CONFIG_DIR` install keeps its
+credentials elsewhere and is not read.
+
+Both chips appear after the first profile fetch and stay absent while the fetch is disabled. The account chip puts your
+email on screen; `disabled_sections: ["usage_account"]` hides it. The usage cache file is removed when the line or the
+fetch is disabled, and after a login switch, so another account's numbers never linger.
 
 ### Behind CLIProxyAPI
 
-With `cli_proxy_usage_enabled` set, a session whose `ANTHROPIC_BASE_URL` points at a
-[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance that runs the
-[cpa-claude-statusline](https://github.com/flobernd/cpa-claude-statusline) plugin gets the line
-from that plugin instead. A detached child polls
-`<base-url>/v0/resource/plugins/cpa-claude-statusline/session?id=<session-id>` every
-`cli_proxy_usage_refresh_seconds` (default 5, the floor) into
-`~/.claude/claude-statusline-sessions/<session-id>.json`, and each render tick reads that file;
-the tick never waits on the network. An answer older than a minute still paints, with its meters
-dimmed to the comment color, because it is the last reading the route gave rather than a current
-one. Files of sessions that ended are removed a day later.
+With `cli_proxy_usage_enabled` set, a session whose `ANTHROPIC_BASE_URL` points at
+a [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance that runs
+the [cpa-claude-statusline](https://github.com/flobernd/cpa-claude-statusline)
+plugin gets the line from that plugin instead. A detached child polls
+`<base-url>/v0/resource/plugins/cpa-claude-statusline/session?id=<session-id>`
+every `cli_proxy_usage_refresh_seconds` (default 5, the floor) into
+`~/.claude/claude-statusline-sessions/<session-id>.json`, beside a `<session-id>.lock` that
+keeps two children of one session apart, and each render tick reads that file; the tick never
+waits on the network. An answer older than a minute still paints, with its meters dimmed to the
+comment color, because it is the last reading the route gave rather than a current one. Files of
+sessions that ended are removed a day later. Their lock files stay: a zero-byte file per session
+id, never removed, since a lock that could be unlinked could be unlinked from under its holder.
 
 The proxy binds a session to a credential per model, so the main model, the auxiliary calls
 Claude Code makes on a smaller model, and a subagent on another model can each run on an
@@ -161,9 +178,10 @@ Notification only: updating stays `git pull` plus `cargo build --release`. The w
 about it, or set `update_check_interval_minutes` yourself (`1440` checks daily, `0`
 disables); for a non-interactive install use `--install --with-update-check`. When enabled,
 the statusline sends an anonymous request to `api.github.com` at most once per interval,
-fetched by a short-lived background process into `~/.claude/claude-statusline-update.json`.
-On a narrow terminal the chip is the first to give way, and it disappears on its own after
-an update.
+fetched by a short-lived background process into `~/.claude/claude-statusline-update.json`,
+beside a `claude-statusline-update.lock` that keeps two checks from running at once. On a
+narrow terminal the chip is the first to give way, and it disappears on its own after an
+update.
 
 ## Configuration
 
