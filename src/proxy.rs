@@ -829,17 +829,24 @@ mod tests {
         let young = dir.path().join("young.json");
         let old_tmp = dir.path().join("old.4242.tmp");
         let young_tmp = dir.path().join("young.4242.tmp");
-        for path in [&old, &young, &old_tmp, &young_tmp] {
+        let old_lock = dir.path().join("old.lock");
+        let young_lock = dir.path().join("young.lock");
+        for path in [&old, &young, &old_tmp, &young_tmp, &old_lock, &young_lock] {
             std::fs::write(path, "{}").unwrap();
         }
         let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 3600);
         filetime_set(&old, day_ago);
         filetime_set(&old_tmp, day_ago);
+        filetime_set(&old_lock, day_ago);
         sweep_sessions(dir.path());
         assert!(!old.exists() && young.exists());
         assert!(
             !old_tmp.exists() && young_tmp.exists(),
             "a temporary a killed child left behind ages out with the session files"
+        );
+        assert!(
+            !old_lock.exists() && young_lock.exists(),
+            "a lock file ages out with its session file"
         );
     }
 

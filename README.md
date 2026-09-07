@@ -139,8 +139,9 @@ With `cli_proxy_usage_enabled` set, a session whose `ANTHROPIC_BASE_URL` points 
 from that plugin instead. A detached child polls
 `<base-url>/v0/resource/plugins/cpa-claude-statusline/session?id=<session-id>` every
 `cli_proxy_usage_refresh_seconds` (default 5, the floor) into
-`~/.claude/claude-statusline-sessions/<session-id>.json`, and each render tick reads that file;
-the tick never waits on the network. An answer older than a minute still paints, with its meters
+`~/.claude/claude-statusline-sessions/<session-id>.json`, beside a `<session-id>.lock` that keeps
+two children of one session apart, and each render tick reads that file; the tick never waits on
+the network. An answer older than a minute still paints, with its meters
 dimmed to the comment color, because it is the last reading the route gave rather than a current
 one. Files of sessions that ended are removed a day later.
 
@@ -176,9 +177,10 @@ Notification only: updating stays `git pull` plus `cargo build --release`. The w
 about it, or set `update_check_interval_minutes` yourself (`1440` checks daily, `0`
 disables); for a non-interactive install use `--install --with-update-check`. When enabled,
 the statusline sends an anonymous request to `api.github.com` at most once per interval,
-fetched by a short-lived background process into `~/.claude/claude-statusline-update.json`.
-On a narrow terminal the chip is the first to give way, and it disappears on its own after
-an update.
+fetched by a short-lived background process into `~/.claude/claude-statusline-update.json`,
+beside a `claude-statusline-update.lock` that keeps two checks from running at once. On a
+narrow terminal the chip is the first to give way, and it disappears on its own after an
+update.
 
 ## Configuration
 

@@ -7,10 +7,13 @@ use std::path::Path;
 /// An exclusive advisory lock on a file, held for as long as the value
 /// lives and released explicitly on drop. Closing the descriptor alone is
 /// not enough: a child that another thread forked while the lock was held
-/// carries a copy of the descriptor until its exec, and an flock lock lives
+/// carries a copy of the descriptor until its exec, and a flock lock lives
 /// on the shared open file description, so the close would leave the lock
-/// held for that window. No path is ever unlinked, so a holder can never
-/// remove another holder's lock.
+/// held for that window. A killed holder leaves nothing to take over: the
+/// OS releases the lock at process exit. No holder ever unlinks a lock
+/// path, so one holder can never remove another's lock; the proxy sweep
+/// removes a session's lock only once it is a day old, and a hold lasts
+/// seconds.
 pub struct Lock {
     file: File,
 }
