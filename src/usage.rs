@@ -153,8 +153,6 @@ struct ProfileOrganization {
     organization_type: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     rate_limit_tier: Option<String>,
-    #[serde(default, deserialize_with = "lenient")]
-    subscription_status: Option<String>,
 }
 
 /// The profile changes on a plan switch and little else, so an hour between fetches is
@@ -174,7 +172,6 @@ pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
             organization.organization_type.as_deref(),
             account.has_claude_max,
             account.has_claude_pro,
-            organization.subscription_status.as_deref(),
         ),
         tier: organization.rate_limit_tier,
     };
@@ -1052,6 +1049,17 @@ mod tests {
         let p = profile_from_body(body).unwrap();
         assert_eq!(p.plan.as_deref(), Some("enterprise"));
         assert!(p.tier.is_none());
+        // The live shape of an enterprise seat: both plan flags false, the plan in the
+        // organization type, and a tier without a multiplier.
+        let body = r#"{"account":{"email":"seat@example.com","has_claude_max":false,"has_claude_pro":false},
+            "organization":{"organization_type":"claude_enterprise","billing_type":"stripe_subscription_contracted",
+            "rate_limit_tier":"default_claude_zero","seat_tier":"enterprise_usage_based","subscription_status":"active"}}"#;
+        let p = profile_from_body(body).unwrap();
+        assert_eq!(p.plan.as_deref(), Some("enterprise"));
+        assert_eq!(
+            crate::plan::label(p.plan.as_deref().unwrap(), p.tier.as_deref()),
+            "Enterprise"
+        );
         assert!(profile_from_body("nope").is_none());
         assert!(profile_from_body("{}").is_none());
         assert!(profile_from_body(r#"{"account":{"uuid":"u"}}"#).is_none());
