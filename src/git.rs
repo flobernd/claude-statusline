@@ -122,30 +122,104 @@ fn resolve(dir: &Path, p: &str) -> PathBuf {
 
 struct HeadInfo {
     branch: String,
-    git_dir: PathBuf,
     common_dir: PathBuf,
 }
 
 fn head_info(dir: &Path, out: Option<String>) -> Option<HeadInfo> {
     let out = out?;
     let lines: Vec<&str> = out.lines().collect();
-    if lines.len() < 3 || lines[0].is_empty() {
+    if lines.len() < 2 || lines[0].is_empty() {
         return None;
     }
     Some(HeadInfo {
         branch: lines[0].to_string(),
-        git_dir: resolve(dir, lines[1]),
-        common_dir: resolve(dir, lines[2]),
+        common_dir: resolve(dir, lines[1]),
     })
 }
 
-const HEAD_ARGS: &[&str] = &[
-    "rev-parse",
-    "--abbrev-ref",
-    "HEAD",
-    "--git-dir",
-    "--git-common-dir",
+const HEAD_ARGS: &[&str] = &["rev-parse", "--abbrev-ref", "HEAD", "--git-common-dir"];
+
+const DIR_ARGS: &[&str] = &["rev-parse", "--git-dir", "--git-common-dir"];
+
+/// The two directories alone: unlike `HEAD_ARGS` this succeeds before the
+/// first commit, when HEAD names a branch that has no object yet.
+fn dir_info(dir: &Path, out: Option<String>) -> Option<(PathBuf, PathBuf)> {
+    let out = out?;
+    let mut lines = out.lines();
+    let git_dir = resolve(dir, lines.next()?);
+    let common_dir = resolve(dir, lines.next()?);
+    Some((git_dir, common_dir))
+}
+
+/// The branch from the HEAD file, for when the status call ran out of its
+/// budget on a slow tree: `ref: refs/heads/<name>` on a branch, unborn or
+/// not, a raw object id when detached. The reftable backend keeps a
+/// placeholder here and gets no fallback.
+fn head_from_file(git_dir: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(name) = head.strip_prefix("ref: refs/heads/") {
+        return (!name.is_empty() && name != ".invalid").then(|| name.to_string());
+    }
+    (head.len() >= 40 && head.bytes().all(|b| b.is_ascii_hexdigit())).then(|| "HEAD".to_string())
+}
+
+/// Porcelain v2 with `--branch --untracked-files=all`: the branch header
+/// resolves on an unborn HEAD, every untracked file has its own `?` line,
+/// and every unmerged path has a `u` line whether or not an operation
+/// marker exists, which `git stash pop` never writes.
+const STATUS_ARGS: &[&str] = &[
+    "status",
+    "--porcelain=v2",
+    "--branch",
+    "--untracked-files=all",
 ];
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StatusInfo {
+    branch: Option<String>,
+    added: u32,
+    removed: u32,
+    changed: u32,
+    unmerged: bool,
+}
+
+/// Each entry is classified once by its XY code: untracked and staged adds
+/// count as added, deletions as removed, everything else (modified,
+/// renamed, type change, unmerged) as changed. `(detached)` reads as
+/// `HEAD`, the name rev-parse gave it before.
+fn parse_status(out: &str) -> StatusInfo {
+    let mut s = StatusInfo::default();
+    for line in out.lines() {
+        if let Some(head) = line.strip_prefix("# branch.head ") {
+            s.branch = Some(if head == "(detached)" {
+                "HEAD".to_string()
+            } else {
+                head.to_string()
+            });
+            continue;
+        }
+        let mut fields = line.split(' ');
+        let (Some(kind), code) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        match kind {
+            "?" => s.added += 1,
+            "u" => {
+                s.unmerged = true;
+                s.changed += 1;
+            }
+            "1" | "2" => match code {
+                Some(c) if c.contains('A') => s.added += 1,
+                Some(c) if c.contains('D') => s.removed += 1,
+                Some(_) => s.changed += 1,
+                None => {}
+            },
+            _ => {}
+        }
+    }
+    s
+}
 
 /// Trunk names to fall back on when no remote publishes a default branch:
 /// a repo with no remote, one where `git remote set-head` was never run, or
@@ -268,8 +342,8 @@ pub fn collect(dir: &Path) -> GitInfo {
         };
     }
     let mut info = GitInfo::default();
-    let (head, sync, stash, status) = std::thread::scope(|s| {
-        let head = s.spawn(|| run_git(dir, HEAD_ARGS));
+    let (dirs, sync, stash, status) = std::thread::scope(|s| {
+        let dirs = s.spawn(|| run_git(dir, DIR_ARGS));
         let sync =
             s.spawn(|| run_git(dir, &["rev-list", "--count", "--left-right", "HEAD...@{u}"]));
         let stash = s.spawn(|| {
@@ -278,26 +352,32 @@ pub fn collect(dir: &Path) -> GitInfo {
                 &["rev-list", "--walk-reflogs", "--count", "refs/stash"],
             )
         });
-        let status = s.spawn(|| run_git(dir, &["status", "--porcelain"]));
+        let status = s.spawn(|| run_git(dir, STATUS_ARGS));
         (
-            head.join().unwrap_or(None),
+            dirs.join().unwrap_or(None),
             sync.join().unwrap_or(None),
             stash.join().unwrap_or(None),
             status.join().unwrap_or(None),
         )
     });
 
-    let mut git_dir: Option<PathBuf> = None;
-    if let Some(h) = head_info(dir, head) {
-        info.on_default_branch = on_default_branch(&h.common_dir, &h.branch);
-        info.branch = Some(h.branch);
-        info.linked_worktree = h.git_dir != h.common_dir;
-        info.repo_name_fallback = h
-            .common_dir
+    let status = status.map(|out| parse_status(&out));
+    if let Some((git_dir, common_dir)) = dir_info(dir, dirs) {
+        let branch = match &status {
+            Some(s) => s.branch.clone(),
+            // A status that ran out of budget must not cost the branch chip.
+            None => head_from_file(&git_dir),
+        };
+        if let Some(branch) = branch {
+            info.on_default_branch = on_default_branch(&common_dir, &branch);
+            info.branch = Some(branch);
+        }
+        info.linked_worktree = git_dir != common_dir;
+        info.repo_name_fallback = common_dir
             .parent()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned());
-        git_dir = Some(h.git_dir);
+        info.state = detect_state(&git_dir, status.as_ref().is_some_and(|s| s.unmerged));
     }
     if let Some(out) = sync {
         let mut parts = out.split_whitespace();
@@ -309,51 +389,29 @@ pub fn collect(dir: &Path) -> GitInfo {
     if let Some(out) = stash {
         info.stash = out.trim().parse().unwrap_or(0);
     }
-    if let Some(out) = status {
-        (info.files_added, info.files_removed, info.files_changed) = parse_status_counts(&out);
-    }
-    if let Some(gd) = git_dir {
-        info.state = detect_state(dir, &gd);
+    if let Some(s) = &status {
+        (info.files_added, info.files_removed, info.files_changed) =
+            (s.added, s.removed, s.changed);
     }
     info
 }
 
-/// Working-tree file counts from porcelain status lines. Each entry is
-/// classified once by its two-letter XY code: new files (untracked or
-/// staged adds) count as added, deletions as removed, everything else
-/// (modified, renamed, type change, unmerged) as changed.
-fn parse_status_counts(out: &str) -> (u32, u32, u32) {
-    let (mut added, mut removed, mut changed) = (0, 0, 0);
-    for line in out.lines() {
-        let Some(code) = line.get(..2) else { continue };
-        if code == "??" || code.contains('A') {
-            added += 1;
-        } else if code.contains('D') {
-            removed += 1;
-        } else {
-            changed += 1;
-        }
+/// Unmerged paths mean Conflict whatever operation left them; otherwise
+/// the git-dir markers name the operation in progress.
+fn detect_state(git_dir: &Path, unmerged: bool) -> Option<GitState> {
+    if unmerged {
+        return Some(GitState::Conflict);
     }
-    (added, removed, changed)
-}
-
-/// Operation state from git-dir markers; any operation with unmerged
-/// paths reports as Conflict instead of the operation name.
-fn detect_state(dir: &Path, git_dir: &Path) -> Option<GitState> {
-    let op = if git_dir.join("MERGE_HEAD").is_file() {
-        GitState::Merge
+    if git_dir.join("MERGE_HEAD").is_file() {
+        Some(GitState::Merge)
     } else if git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir() {
-        GitState::Rebase
+        Some(GitState::Rebase)
     } else if git_dir.join("CHERRY_PICK_HEAD").is_file() {
-        GitState::CherryPick
+        Some(GitState::CherryPick)
     } else if git_dir.join("REVERT_HEAD").is_file() {
-        GitState::Revert
+        Some(GitState::Revert)
     } else {
-        return None;
-    };
-    match run_git(dir, &["diff", "--name-only", "--diff-filter=U"]) {
-        Some(out) if !out.trim().is_empty() => Some(GitState::Conflict),
-        _ => Some(op),
+        None
     }
 }
 
@@ -478,10 +536,117 @@ mod tests {
     }
 
     #[test]
-    fn status_counts_classification() {
-        let out = "?? new.txt\nA  staged.txt\n M mod.rs\nD  gone.rs\nR  a -> b\nMM both.rs\n";
-        assert_eq!(parse_status_counts(out), (2, 1, 3));
-        assert_eq!(parse_status_counts(""), (0, 0, 0));
+    fn status_v2_classifies_entries_and_reads_the_header() {
+        let out = concat!(
+            "# branch.oid abc\n",
+            "# branch.head feat/x\n",
+            "# branch.upstream origin/feat/x\n",
+            "# branch.ab +1 -0\n",
+            "? new.txt\n",
+            "1 A. N... 100644 100644 100644 0 0 staged.txt\n",
+            "1 .M N... 100644 100644 100644 0 0 mod.rs\n",
+            "1 D. N... 100644 000000 000000 0 0 gone.rs\n",
+            "2 R. N... 100644 100644 100644 0 0 R100 b\ta\n",
+            "1 MM N... 100644 100644 100644 0 0 both.rs\n",
+        );
+        let s = parse_status(out);
+        assert_eq!(s.branch.as_deref(), Some("feat/x"));
+        assert_eq!((s.added, s.removed, s.changed), (2, 1, 3));
+        assert!(!s.unmerged);
+
+        let s = parse_status("");
+        assert!(s.branch.is_none());
+        assert_eq!((s.added, s.removed, s.changed), (0, 0, 0));
+    }
+
+    #[test]
+    fn status_v2_reads_unborn_detached_and_unmerged() {
+        let s = parse_status("# branch.oid (initial)\n# branch.head main\n");
+        assert_eq!(s.branch.as_deref(), Some("main"));
+
+        let s = parse_status("# branch.oid abc\n# branch.head (detached)\n");
+        assert_eq!(s.branch.as_deref(), Some("HEAD"));
+
+        let s = parse_status(concat!(
+            "# branch.oid abc\n# branch.head main\n",
+            "u UU N... 100644 100644 100644 100644 1 2 3 f\n",
+        ));
+        assert!(s.unmerged);
+        assert_eq!((s.added, s.removed, s.changed), (0, 0, 1));
+    }
+
+    #[test]
+    fn untracked_directory_counts_each_file() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        std::fs::create_dir(dir.path().join("nd")).unwrap();
+        for name in ["x", "y", "z"] {
+            std::fs::write(dir.path().join("nd").join(name), "n\n").unwrap();
+        }
+        let info = collect(dir.path());
+        assert_eq!(info.files_added, 3);
+    }
+
+    #[test]
+    fn unborn_repo_reports_its_branch_and_repo_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("fresh");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        let info = collect(&repo);
+        assert_eq!(info.branch.as_deref(), Some("main"));
+        assert!(info.on_default_branch);
+        assert_eq!(info.repo_name_fallback.as_deref(), Some("fresh"));
+        assert!(!info.missing_dir);
+    }
+
+    #[test]
+    fn detached_head_reads_as_head() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        git(dir.path(), &["checkout", "--detach"]);
+        assert_eq!(collect(dir.path()).branch.as_deref(), Some("HEAD"));
+    }
+
+    #[test]
+    fn stash_pop_conflict_reports_conflict_without_a_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("f.txt"), "two\n").unwrap();
+        git(dir.path(), &["stash", "push", "-q"]);
+        std::fs::write(dir.path().join("f.txt"), "three\n").unwrap();
+        git(dir.path(), &["commit", "-qam", "c"]);
+        // The pop fails with a conflict; run without asserting success.
+        let _ = Command::new("git")
+            .args(["stash", "pop"])
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let out = run_git(dir.path(), &["rev-parse", "--git-dir"]).unwrap();
+        let git_dir = resolve(dir.path(), out.trim());
+        assert!(
+            !git_dir.join("MERGE_HEAD").exists(),
+            "the pop leaves no marker"
+        );
+        assert_eq!(collect(dir.path()).state, Some(GitState::Conflict));
+    }
+
+    #[test]
+    fn head_file_names_the_branch_or_a_detached_head() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("HEAD"), "ref: refs/heads/feat/x\n").unwrap();
+        assert_eq!(head_from_file(dir.path()).as_deref(), Some("feat/x"));
+        std::fs::write(dir.path().join("HEAD"), format!("{}\n", "a".repeat(40))).unwrap();
+        assert_eq!(head_from_file(dir.path()).as_deref(), Some("HEAD"));
+        // The reftable backend keeps a placeholder here.
+        std::fs::write(dir.path().join("HEAD"), "ref: refs/heads/.invalid\n").unwrap();
+        assert!(head_from_file(dir.path()).is_none());
+        std::fs::write(dir.path().join("HEAD"), "garbage\n").unwrap();
+        assert!(head_from_file(dir.path()).is_none());
+        assert!(head_from_file(&dir.path().join("missing")).is_none());
     }
 
     #[test]
