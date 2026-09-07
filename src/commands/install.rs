@@ -187,7 +187,11 @@ fn command_string(exe: &str) -> String {
 }
 
 /// Temp file plus rename: a crash mid-write must never leave the user's
-/// Claude Code settings truncated.
+/// Claude Code settings truncated. Settings may carry credentials in an
+/// `env` block, so on Unix the temp file is created private, never opened
+/// (a leftover of a crashed run may carry any mode and is replaced), and
+/// only then takes the destination's own mode; the rename must never
+/// widen what was there.
 fn write_atomic(path: &Path, value: &Value) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -195,11 +199,36 @@ fn write_atomic(path: &Path, value: &Value) -> Result<()> {
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     let mut text = serde_json::to_string_pretty(value)?;
     text.push('\n');
-    std::fs::write(&tmp, text)?;
+    let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = write_private(&tmp, &text) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    #[cfg(unix)]
+    if let Ok(existing) = std::fs::metadata(path) {
+        std::fs::set_permissions(&tmp, existing.permissions())?;
+    }
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(text.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    std::fs::write(path, text)
 }
 
 #[cfg(test)]
@@ -244,5 +273,53 @@ mod tests {
             command_string("/tmp/`id`/claude-statusline"),
             "'/tmp/`id`/claude-statusline'"
         );
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_a_restrictive_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic(&path, &serde_json::json!({"a": 1})).unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_a_permissive_mode_and_creates_private_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic(&path, &serde_json::json!({"a": 1})).unwrap();
+        assert_eq!(mode_of(&path), 0o644, "an open mode is the user's choice");
+
+        let fresh = dir.path().join("new").join("settings.json");
+        write_atomic(&fresh, &serde_json::json!({"a": 1})).unwrap();
+        assert_eq!(mode_of(&fresh), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_permissive_temp_file_is_never_written_through() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let tmp = dir.path().join("settings.json.tmp");
+        std::fs::write(&tmp, "old").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic(&path, &serde_json::json!({"a": 1})).unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+        assert!(!tmp.exists());
     }
 }
