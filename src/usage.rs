@@ -23,10 +23,19 @@ pub struct EndpointUtilization {
 
 impl EndpointUtilization {
     /// One definition of fetched content for the child's emptiness guard and the line's gate.
-    fn has_window(&self) -> bool {
+    /// Spend amounts count on their own when they render a meter: an enterprise seat with a
+    /// spend limit reports null windows and an empty limits list, and its body is an answer,
+    /// not an error envelope; a body with one amount and no percentage is the fragment of one
+    /// and is not. An `extra_usage` that says it is off is content too: the fetch answered, and
+    /// the chip is simply not shown.
+    fn has_content(&self) -> bool {
         self.five_hour.is_some()
             || self.seven_day.is_some()
             || self.limits.as_ref().is_some_and(|l| !l.is_empty())
+            || self
+                .extra_usage
+                .as_ref()
+                .is_some_and(|e| e.is_enabled == Some(false) || e.has_meter())
     }
 }
 
@@ -53,6 +62,14 @@ pub struct ExtraUsage {
     /// 0..100.
     #[serde(default, deserialize_with = "lenient")]
     pub utilization: Option<f64>,
+}
+
+impl ExtraUsage {
+    /// The amounts render a meter when both are present or the endpoint reported a
+    /// percentage; one amount alone is a fragment `spend_from_parts` cannot show.
+    fn has_meter(&self) -> bool {
+        self.utilization.is_some() || (self.used_credits.is_some() && self.monthly_limit.is_some())
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -110,10 +127,10 @@ pub struct Snapshot {
 
 impl Snapshot {
     /// The child writes the file as soon as it books its first retry, so only fetched content
-    /// proves a subscription. A stored utilization always has a window: the child treats a body
-    /// without one as a failure.
+    /// proves a subscription. A stored utilization always has content (a window, a scoped
+    /// limit, or spend amounts): the child treats a body without any as a failure.
     pub fn has_fetched_data(&self) -> bool {
-        self.profile.is_some() || self.utilization.has_window()
+        self.profile.is_some() || self.utilization.has_content()
     }
 }
 
@@ -153,8 +170,6 @@ struct ProfileOrganization {
     organization_type: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     rate_limit_tier: Option<String>,
-    #[serde(default, deserialize_with = "lenient")]
-    subscription_status: Option<String>,
 }
 
 /// The profile changes on a plan switch and little else, so an hour between fetches is
@@ -174,7 +189,6 @@ pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
             organization.organization_type.as_deref(),
             account.has_claude_max,
             account.has_claude_pro,
-            organization.subscription_status.as_deref(),
         ),
         tier: organization.rate_limit_tier,
     };
@@ -188,13 +202,13 @@ pub(crate) fn profile_from_body(body: &str) -> Option<Profile> {
     Some(profile)
 }
 
-/// A 2xx body that parses but carries no window at all (an error envelope, or a shape the
+/// A 2xx body that parses but carries no content at all (an error envelope, or a shape the
 /// endpoint no longer sends) mirrors the profile's emptiness guard: reading it as success
 /// would overwrite a good cached utilization and clear its ladder, so it counts as a failure
 /// of the usage kind instead, and the child keeps the previous data and books the ladder.
 fn utilization_from_body(body: &str) -> Option<EndpointUtilization> {
     let utilization: EndpointUtilization = serde_json::from_str(body).ok()?;
-    utilization.has_window().then_some(utilization)
+    utilization.has_content().then_some(utilization)
 }
 
 pub fn cache_path() -> Option<PathBuf> {
@@ -211,6 +225,10 @@ fn cache_path_in(home: &Path) -> PathBuf {
 /// `env` entries from settings.json, so these are directly visible.
 #[derive(Debug, Default)]
 pub struct EndpointEnv {
+    pub api_key: Option<String>,
+    /// Set by the caller once ~/.claude.json confirms the key is approved:
+    /// only then does Claude Code use it instead of the login.
+    pub api_key_in_use: bool,
     pub auth_token: Option<String>,
     pub base_url: Option<String>,
     pub use_bedrock: Option<String>,
@@ -221,6 +239,8 @@ impl EndpointEnv {
     pub fn from_env() -> Self {
         let var = |key: &str| std::env::var(key).ok();
         Self {
+            api_key: var("ANTHROPIC_API_KEY"),
+            api_key_in_use: false,
             auth_token: var("ANTHROPIC_AUTH_TOKEN"),
             base_url: var("ANTHROPIC_BASE_URL"),
             use_bedrock: var("CLAUDE_CODE_USE_BEDROCK"),
@@ -233,8 +253,10 @@ impl EndpointEnv {
     /// official base URL because it means gateway auth either way. The
     /// Bedrock/Vertex base URL variables need no check of their own:
     /// Claude Code ignores them unless the matching mode flag is truthy.
+    /// An approved API key counts too: the session is billed to the key, not to the login.
     pub fn is_custom(&self) -> bool {
-        is_set(&self.auth_token)
+        self.api_key_in_use
+            || is_set(&self.auth_token)
             || self
                 .base_url
                 .as_deref()
@@ -302,12 +324,23 @@ pub fn remove_cache() {
     }
 }
 
+/// Whether a chip's numbers still describe the session now. Stale numbers are the last ones a
+/// source gave and keep painting so an idle session does not lose its row, with the meter
+/// dimmed so it cannot be read as current.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Freshness {
+    #[default]
+    Live,
+    Stale,
+}
+
 #[derive(Debug)]
 pub struct Window {
     /// 0..100.
     pub pct: f64,
     /// Epoch seconds.
     pub resets_at: Option<i64>,
+    pub freshness: Freshness,
 }
 
 #[derive(Debug)]
@@ -318,16 +351,7 @@ pub struct Spend {
     pub pct: Option<f64>,
     /// Epoch seconds.
     pub resets_at: Option<i64>,
-}
-
-/// Whether the numbers still describe the session now. A stale set is the last answer the route
-/// gave: it keeps painting so an idle session does not lose its rows, with the meters dimmed so
-/// they cannot be read as current.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Freshness {
-    #[default]
-    Live,
-    Stale,
+    pub freshness: Freshness,
 }
 
 #[derive(Debug, Default)]
@@ -336,24 +360,58 @@ pub struct Limits {
     pub week: Option<Window>,
     pub fable: Option<Window>,
     pub spend: Option<Spend>,
-    pub freshness: Freshness,
 }
 
-/// The payload wins for session/week because it refreshes on every render
-/// tick; the cached endpoint snapshot only backfills and supplies the data
-/// the payload never carries (fable, spend).
+/// The cached endpoint snapshot as `merge` reads it: the numbers and when the child fetched
+/// them, which is what pins the spend to its billing month and decides whether the chips
+/// have aged.
+pub struct Cached<'a> {
+    pub utilization: &'a EndpointUtilization,
+    pub fetched_at_s: i64,
+}
+
+/// Two fetch intervals, at least two minutes: one missed fetch is ordinary, two in a row means
+/// the numbers stopped tracking the account.
+pub fn stale_after_s(config: &Config) -> u64 {
+    config
+        .usage_fetch_interval_seconds
+        .saturating_mul(2)
+        .max(120)
+}
+
+/// The payload wins for session/week because it refreshes on every render tick and is always
+/// live; the cached snapshot only backfills and supplies the data the payload never carries
+/// (fable, spend). A cached window whose reset has passed is dropped, as Claude Code drops its
+/// own, the spend goes when the month it was read in closes, and every cached chip dims once
+/// the snapshot is older than `stale_after_s`.
 pub fn merge(
     payload: Option<&schema::RateLimits>,
-    endpoint: Option<&EndpointUtilization>,
+    cached: Option<Cached<'_>>,
+    stale_after_s: u64,
     now_epoch_s: i64,
 ) -> Limits {
+    // A snapshot stamped ahead of the render clock was fetched on a clock that has since been
+    // set back; waiting cannot make it current, so it stays stale until a fetch replaces it. A
+    // snapshot behind the clock ages the ordinary way.
+    let freshness = cached.as_ref().map_or(Freshness::Live, |c| {
+        if c.fetched_at_s > now_epoch_s
+            || now_epoch_s - c.fetched_at_s > i64::try_from(stale_after_s).unwrap_or(i64::MAX)
+        {
+            Freshness::Stale
+        } else {
+            Freshness::Live
+        }
+    });
+    let endpoint = cached.as_ref().map(|c| c.utilization);
+    let current = |w: Window| (w.resets_at.is_none_or(|at| at > now_epoch_s)).then_some(w);
     let session = payload
         .and_then(|p| p.five_hour.as_ref())
         .and_then(payload_window)
         .or_else(|| {
             endpoint
                 .and_then(|e| e.five_hour.as_ref())
-                .and_then(endpoint_window)
+                .and_then(|w| endpoint_window(w, freshness))
+                .and_then(current)
         });
     let week = payload
         .and_then(|p| p.seven_day.as_ref())
@@ -361,19 +419,25 @@ pub fn merge(
         .or_else(|| {
             endpoint
                 .and_then(|e| e.seven_day.as_ref())
-                .and_then(endpoint_window)
+                .and_then(|w| endpoint_window(w, freshness))
+                .and_then(current)
         });
     Limits {
         session,
         week,
-        fable: endpoint.and_then(fable_window),
-        spend: endpoint
-            .and_then(|e| e.extra_usage.as_ref())
-            .and_then(|extra| spend_from(extra, now_epoch_s)),
-        // The payload refreshes on every tick and the snapshot is the local login's own fetch,
-        // so the native path has nothing that outlives its source the way a carried route
-        // answer does.
-        freshness: Freshness::Live,
+        fable: endpoint
+            .and_then(|e| fable_window(e, freshness))
+            .and_then(current),
+        spend: cached
+            .as_ref()
+            .and_then(|c| {
+                c.utilization
+                    .extra_usage
+                    .as_ref()
+                    .map(|x| (x, c.fetched_at_s))
+            })
+            .and_then(|(extra, fetched_at_s)| spend_from(extra, fetched_at_s, freshness))
+            .filter(|s| s.resets_at.is_none_or(|at| at > now_epoch_s)),
     }
 }
 
@@ -381,17 +445,19 @@ fn payload_window(window: &schema::RateWindow) -> Option<Window> {
     Some(Window {
         pct: window.used_percentage?,
         resets_at: window.resets_at.map(|s| s as i64),
+        freshness: Freshness::Live,
     })
 }
 
-fn endpoint_window(window: &EndpointWindow) -> Option<Window> {
+fn endpoint_window(window: &EndpointWindow, freshness: Freshness) -> Option<Window> {
     Some(Window {
         pct: window.utilization?,
         resets_at: window.resets_at.as_deref().and_then(parse_reset_iso),
+        freshness,
     })
 }
 
-fn fable_window(endpoint: &EndpointUtilization) -> Option<Window> {
+fn fable_window(endpoint: &EndpointUtilization, freshness: Freshness) -> Option<Window> {
     let limit = endpoint.limits.as_ref()?.iter().find(|l| {
         l.kind.as_deref() == Some("weekly_scoped")
             && l.scope
@@ -403,25 +469,36 @@ fn fable_window(endpoint: &EndpointUtilization) -> Option<Window> {
     Some(Window {
         pct: limit.percent?,
         resets_at: limit.resets_at.as_deref().and_then(parse_reset_iso),
+        freshness,
     })
 }
 
-fn spend_from(extra: &ExtraUsage, now_epoch_s: i64) -> Option<Spend> {
+/// A seat with extra usage switched off reports the object zeroed and off rather than
+/// omitting it; a meter built from that would read a real zero, so the flag hides it. An
+/// absent flag decides nothing: the amounts do, as before.
+fn spend_from(extra: &ExtraUsage, fetched_at_s: i64, freshness: Freshness) -> Option<Spend> {
+    if extra.is_enabled == Some(false) {
+        return None;
+    }
     spend_from_parts(
         extra.used_credits,
         extra.monthly_limit,
         extra.utilization,
-        now_epoch_s,
+        fetched_at_s,
+        freshness,
     )
 }
 
 /// Shared by the native endpoint and the CLIProxyAPI proxy route, which report the same shape
-/// under different field names.
+/// under different field names. `read_at_s` is when the amounts were read: the reset is the
+/// first of the month after that, never after the render clock, so a frozen amount cannot roll
+/// forward into a month it never described.
 pub(crate) fn spend_from_parts(
     used_cents: Option<f64>,
     limit_cents: Option<f64>,
     reported_pct: Option<f64>,
-    now_epoch_s: i64,
+    read_at_s: i64,
+    freshness: Freshness,
 ) -> Option<Spend> {
     // Amounts are authoritative when both exist; the reported utilization
     // only fills the gap, so a unit drift there cannot skew real dollars.
@@ -436,7 +513,8 @@ pub(crate) fn spend_from_parts(
         used_cents,
         limit_cents,
         pct,
-        resets_at: next_month_start(now_epoch_s),
+        resets_at: next_month_start(read_at_s),
+        freshness,
     })
 }
 
@@ -842,9 +920,111 @@ mod tests {
         assert_eq!(limit.percent, Some(81.0));
     }
 
+    fn cached(e: &EndpointUtilization, fetched_at_s: i64) -> Cached<'_> {
+        Cached {
+            utilization: e,
+            fetched_at_s,
+        }
+    }
+
+    #[test]
+    fn merge_drops_an_endpoint_window_whose_reset_has_passed() {
+        let e = full_endpoint();
+        // NOW_S is the five_hour reset itself, so that window is gone and the weekly stays.
+        let limits = merge(None, Some(cached(&e, NOW_S - 60)), 120, NOW_S);
+        assert!(limits.session.is_none());
+        assert_eq!(limits.week.map(|w| w.pct), Some(63.5));
+        assert_eq!(limits.fable.map(|w| w.pct), Some(81.0));
+        let limits = merge(None, Some(cached(&e, NOW_S - 60)), 120, WEEKLY_RESET_S);
+        assert!(limits.week.is_none() && limits.fable.is_none());
+    }
+
+    #[test]
+    fn merge_pins_spend_to_the_month_it_was_fetched_in() {
+        let e = full_endpoint();
+        let spend = merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+            .spend
+            .unwrap();
+        assert_eq!(spend.resets_at, next_month_start(NOW_S));
+        // Forty days later the reading's month has closed, whatever the local zone.
+        let later = NOW_S + 40 * 86_400;
+        assert!(
+            merge(None, Some(cached(&e, NOW_S)), 120, later)
+                .spend
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn merge_dims_endpoint_chips_older_than_the_stale_window() {
+        let e = full_endpoint();
+        let fresh = merge(
+            Some(&payload_limits()),
+            Some(cached(&e, NOW_S - 119)),
+            120,
+            NOW_S,
+        );
+        assert_eq!(fresh.fable.unwrap().freshness, Freshness::Live);
+        assert_eq!(fresh.spend.unwrap().freshness, Freshness::Live);
+        let old = merge(
+            Some(&payload_limits()),
+            Some(cached(&e, NOW_S - 121)),
+            120,
+            NOW_S,
+        );
+        assert_eq!(old.fable.unwrap().freshness, Freshness::Stale);
+        assert_eq!(old.spend.unwrap().freshness, Freshness::Stale);
+        assert_eq!(
+            old.session.unwrap().freshness,
+            Freshness::Live,
+            "a payload window refreshes every tick and never ages"
+        );
+        assert_eq!(old.week.unwrap().freshness, Freshness::Live);
+    }
+
+    #[test]
+    fn merge_backfilled_windows_age_with_the_snapshot() {
+        let e = full_endpoint();
+        // Rendered a second before the five_hour reset so that window is still current.
+        let old = merge(None, Some(cached(&e, NOW_S - 122)), 120, NOW_S - 1);
+        assert_eq!(old.session.unwrap().freshness, Freshness::Stale);
+        assert_eq!(old.week.unwrap().freshness, Freshness::Stale);
+    }
+
+    #[test]
+    fn merge_reads_a_snapshot_ahead_of_the_clock_as_stale_until_refetched() {
+        let e = full_endpoint();
+        // Fetched on a clock 30 minutes fast, then the clock was corrected.
+        let fetched = NOW_S + 1_800;
+        for elapsed in [0, 1_680, 1_799] {
+            let limits = merge(None, Some(cached(&e, fetched)), 120, NOW_S + elapsed);
+            assert_eq!(
+                limits.fable.unwrap().freshness,
+                Freshness::Stale,
+                "stale {elapsed} s after the correction"
+            );
+        }
+        // One second past its own stamp the snapshot is at most a second old.
+        let limits = merge(None, Some(cached(&e, fetched)), 120, fetched + 1);
+        assert_eq!(limits.fable.unwrap().freshness, Freshness::Live);
+    }
+
+    #[test]
+    fn stale_window_is_two_intervals_with_a_floor() {
+        let config = |s: u64| Config {
+            usage_fetch_interval_seconds: s,
+            ..Config::default()
+        };
+        assert_eq!(stale_after_s(&config(60)), 120);
+        assert_eq!(stale_after_s(&config(5)), 120);
+        assert_eq!(stale_after_s(&config(300)), 600);
+        assert_eq!(stale_after_s(&config(u64::MAX)), u64::MAX);
+    }
+
     #[test]
     fn merge_prefers_payload_windows() {
-        let limits = merge(Some(&payload_limits()), Some(&full_endpoint()), NOW_S);
+        let e = full_endpoint();
+        let limits = merge(Some(&payload_limits()), Some(cached(&e, NOW_S)), 120, NOW_S);
         let session = limits.session.unwrap();
         assert_eq!(session.pct, 42.0);
         assert_eq!(session.resets_at, Some(1_784_836_800));
@@ -855,7 +1035,8 @@ mod tests {
 
     #[test]
     fn merge_backfills_windows_from_endpoint() {
-        let limits = merge(None, Some(&full_endpoint()), NOW_S);
+        let e = full_endpoint();
+        let limits = merge(None, Some(cached(&e, NOW_S)), 120, NOW_S - 60);
         let session = limits.session.unwrap();
         assert!((session.pct - 42.0).abs() < 1e-9);
         assert_eq!(session.resets_at, Some(NOW_S));
@@ -872,26 +1053,38 @@ mod tests {
             }),
             seven_day: None,
         };
-        let limits = merge(Some(&payload), Some(&full_endpoint()), NOW_S);
+        let e = full_endpoint();
+        let limits = merge(Some(&payload), Some(cached(&e, NOW_S)), 120, NOW_S - 60);
         assert!((limits.session.unwrap().pct - 42.0).abs() < 1e-9);
         assert!((limits.week.unwrap().pct - 63.5).abs() < 1e-9);
     }
 
     #[test]
     fn merge_fable_picks_only_the_fable_scoped_limit() {
-        let fable = merge(None, Some(&full_endpoint()), NOW_S).fable.unwrap();
+        let e = full_endpoint();
+        let fable = merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+            .fable
+            .unwrap();
         assert_eq!(fable.pct, 81.0);
         assert_eq!(fable.resets_at, Some(WEEKLY_RESET_S));
 
         let raw = r#"{"limits": [{"kind": "weekly_scoped", "percent": 12,
             "scope": {"model": {"display_name": "Sonnet 5"}}}]}"#;
         let e: EndpointUtilization = serde_json::from_str(raw).unwrap();
-        assert!(merge(None, Some(&e), NOW_S).fable.is_none());
+        assert!(
+            merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+                .fable
+                .is_none()
+        );
 
         let raw = r#"{"limits": [{"kind": "session_scoped", "percent": 12,
             "scope": {"model": {"display_name": "Fable 5"}}}]}"#;
         let e: EndpointUtilization = serde_json::from_str(raw).unwrap();
-        assert!(merge(None, Some(&e), NOW_S).fable.is_none());
+        assert!(
+            merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+                .fable
+                .is_none()
+        );
     }
 
     #[test]
@@ -899,14 +1092,19 @@ mod tests {
         let raw = r#"{"limits": [{"kind": "weekly_scoped", "percent": 81,
             "resets_at": "soon", "scope": {"model": {"display_name": "Fable 5"}}}]}"#;
         let e: EndpointUtilization = serde_json::from_str(raw).unwrap();
-        let fable = merge(None, Some(&e), NOW_S).fable.unwrap();
+        let fable = merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+            .fable
+            .unwrap();
         assert_eq!(fable.pct, 81.0);
         assert_eq!(fable.resets_at, None);
     }
 
     #[test]
     fn merge_spend_uses_amounts_and_computes_percent() {
-        let spend = merge(None, Some(&full_endpoint()), NOW_S).spend.unwrap();
+        let e = full_endpoint();
+        let spend = merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+            .spend
+            .unwrap();
         assert_eq!(spend.used_cents, Some(100_200.0));
         assert_eq!(spend.limit_cents, Some(100_000.0));
         assert!((spend.pct.unwrap() - 100.2).abs() < 1e-9);
@@ -930,7 +1128,9 @@ mod tests {
         const DEC_NOW_S: i64 = 1_797_336_000;
         let raw = r#"{"extra_usage": {"monthly_limit": 50000, "used_credits": 12500}}"#;
         let e: EndpointUtilization = serde_json::from_str(raw).unwrap();
-        let spend = merge(None, Some(&e), DEC_NOW_S).spend.unwrap();
+        let spend = merge(None, Some(cached(&e, DEC_NOW_S)), 120, DEC_NOW_S)
+            .spend
+            .unwrap();
         assert!((spend.pct.unwrap() - 25.0).abs() < 1e-9);
         let reset = chrono::DateTime::from_timestamp(spend.resets_at.unwrap(), 0)
             .unwrap()
@@ -948,7 +1148,9 @@ mod tests {
     fn merge_spend_falls_back_to_utilization_percent() {
         let raw = r#"{"extra_usage": {"is_enabled": true, "utilization": 37.0}}"#;
         let e: EndpointUtilization = serde_json::from_str(raw).unwrap();
-        let spend = merge(None, Some(&e), NOW_S).spend.unwrap();
+        let spend = merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+            .spend
+            .unwrap();
         assert_eq!(spend.used_cents, None);
         assert_eq!(spend.limit_cents, None);
         assert!((spend.pct.unwrap() - 37.0).abs() < 1e-9);
@@ -956,13 +1158,51 @@ mod tests {
 
     #[test]
     fn merge_without_usable_data_is_empty() {
-        let limits = merge(None, None, NOW_S);
+        let limits = merge(None, None, 120, NOW_S);
         assert!(limits.session.is_none() && limits.week.is_none());
         assert!(limits.fable.is_none() && limits.spend.is_none());
 
         let raw = r#"{"extra_usage": {"is_enabled": false}}"#;
         let e: EndpointUtilization = serde_json::from_str(raw).unwrap();
-        assert!(merge(None, Some(&e), NOW_S).spend.is_none());
+        assert!(
+            merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+                .spend
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn spend_is_hidden_while_extra_usage_is_off_and_absent_flag_stays_permissive() {
+        // A seat with extra usage switched off: the object is there, zeroed, and off.
+        let off = r#"{"extra_usage": {"is_enabled": false, "monthly_limit": 0, "used_credits": 0, "utilization": 0}}"#;
+        let e: EndpointUtilization = serde_json::from_str(off).unwrap();
+        assert!(
+            merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+                .spend
+                .is_none()
+        );
+        assert!(
+            e.has_content(),
+            "an off spend is still an answer, not an error envelope"
+        );
+
+        let on = r#"{"extra_usage": {"is_enabled": true, "monthly_limit": 0, "used_credits": 0, "utilization": 0}}"#;
+        let e: EndpointUtilization = serde_json::from_str(on).unwrap();
+        assert_eq!(
+            merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+                .spend
+                .and_then(|s| s.pct),
+            Some(0.0),
+            "switched on with nothing spent yet is a real zero"
+        );
+
+        let unflagged = r#"{"extra_usage": {"monthly_limit": 5000, "used_credits": 1234}}"#;
+        let e: EndpointUtilization = serde_json::from_str(unflagged).unwrap();
+        assert!(
+            merge(None, Some(cached(&e, NOW_S)), 120, NOW_S)
+                .spend
+                .is_some()
+        );
     }
 
     #[test]
@@ -1052,6 +1292,17 @@ mod tests {
         let p = profile_from_body(body).unwrap();
         assert_eq!(p.plan.as_deref(), Some("enterprise"));
         assert!(p.tier.is_none());
+        // The live shape of an enterprise seat: both plan flags false, the plan in the
+        // organization type, and a tier without a multiplier.
+        let body = r#"{"account":{"email":"seat@example.com","has_claude_max":false,"has_claude_pro":false},
+            "organization":{"organization_type":"claude_enterprise","billing_type":"stripe_subscription_contracted",
+            "rate_limit_tier":"default_claude_zero","seat_tier":"enterprise_usage_based","subscription_status":"active"}}"#;
+        let p = profile_from_body(body).unwrap();
+        assert_eq!(p.plan.as_deref(), Some("enterprise"));
+        assert_eq!(
+            crate::plan::label(p.plan.as_deref().unwrap(), p.tier.as_deref()),
+            "Enterprise"
+        );
         assert!(profile_from_body("nope").is_none());
         assert!(profile_from_body("{}").is_none());
         assert!(profile_from_body(r#"{"account":{"uuid":"u"}}"#).is_none());
@@ -1375,6 +1626,107 @@ mod tests {
         );
     }
 
+    /// The body an enterprise seat with a spend limit gets: no windows, no scoped limits, only
+    /// the spend. It is an answer, and the spend chip has to follow it.
+    const SPEND_ONLY_BODY: &str = r#"{
+        "five_hour": null,
+        "seven_day": null,
+        "extra_usage": {
+            "is_enabled": true,
+            "monthly_limit": 300000,
+            "used_credits": 15831.0,
+            "utilization": 5.28,
+            "currency": "USD",
+            "disabled_reason": null
+        },
+        "limits": []
+    }"#;
+
+    #[test]
+    fn spend_amounts_count_as_fetched_content() {
+        let e = utilization_from_body(SPEND_ONLY_BODY).expect("a spend-only body is content");
+        assert_eq!(e.extra_usage.as_ref().unwrap().used_credits, Some(15_831.0));
+        assert!(e.has_content());
+        assert!(utilization_from_body("{}").is_none());
+        assert!(utilization_from_body(r#"{"extra_usage": {"is_enabled": false}}"#).is_some());
+        assert!(utilization_from_body(r#"{"extra_usage": {"utilization": 3.0}}"#).is_some());
+        assert!(
+            utilization_from_body(
+                r#"{"extra_usage": {"is_enabled": true, "monthly_limit": 300000}}"#
+            )
+            .is_none(),
+            "one amount without a percentage renders nothing and is not content"
+        );
+        assert!(
+            utilization_from_body(
+                r#"{"extra_usage": {"monthly_limit": 5000, "used_credits": 1234}}"#
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn child_stores_a_spend_only_body_and_clears_the_ladder() {
+        let now = 1_000_000;
+        let previous = Snapshot {
+            account_uuid: Some("u-1".to_string()),
+            usage_backoff_ms: Some(600_000),
+            profile_next_at_ms: Some(now + 1),
+            ..Snapshot::default()
+        };
+        let home = child_home(60, Some(&previous));
+        let (snapshot, calls) = run_child(home.path(), now, |_| body(SPEND_ONLY_BODY));
+        let snapshot = snapshot.unwrap();
+        assert_eq!(calls, [USAGE_URL]);
+        assert_eq!(snapshot.fetched_at_ms, now);
+        assert_eq!(
+            snapshot
+                .utilization
+                .extra_usage
+                .as_ref()
+                .unwrap()
+                .used_credits,
+            Some(15_831.0)
+        );
+        assert_eq!(
+            (snapshot.usage_next_at_ms, snapshot.usage_backoff_ms),
+            (Some(now + 60_000), None),
+            "a stored body is a success and restarts the ladder"
+        );
+        assert!(snapshot.has_fetched_data());
+    }
+
+    #[test]
+    fn child_keeps_the_previous_usage_when_a_spend_body_cannot_render() {
+        let now = 1_000_000;
+        let previous = Snapshot {
+            fetched_at_ms: now - 60_000,
+            account_uuid: Some("u-1".to_string()),
+            utilization: utilization_from_body(FULL_BODY).unwrap(),
+            profile_next_at_ms: Some(now + 1),
+            ..Snapshot::default()
+        };
+        let home = child_home(60, Some(&previous));
+        let fragment = r#"{"extra_usage": {"is_enabled": true, "monthly_limit": 300000}}"#;
+        let (snapshot, calls) = run_child(home.path(), now, |_| body(fragment));
+        let snapshot = snapshot.unwrap();
+        assert_eq!(calls, [USAGE_URL]);
+        assert_eq!(
+            snapshot.fetched_at_ms,
+            now - 60_000,
+            "the previous stamp survives"
+        );
+        assert!(
+            snapshot.utilization.five_hour.is_some(),
+            "the previous windows survive a body that renders nothing"
+        );
+        assert_eq!(
+            (snapshot.usage_next_at_ms, snapshot.usage_backoff_ms),
+            (Some(now + 120_000), Some(120_000)),
+            "a body that renders nothing books the failure ladder"
+        );
+    }
+
     #[test]
     fn child_success_clears_the_backoff_and_books_the_interval() {
         let now = 1_000_000;
@@ -1522,6 +1874,7 @@ mod tests {
             base_url: base_url.map(str::to_string),
             use_bedrock: use_bedrock.map(str::to_string),
             use_vertex: use_vertex.map(str::to_string),
+            ..EndpointEnv::default()
         }
     }
 
@@ -1620,5 +1973,18 @@ mod tests {
             endpoint_env(None, Some("http://proxy"), Some("0"), Some("false")).custom_base_url(),
             Some("http://proxy".to_string())
         );
+    }
+
+    #[test]
+    fn endpoint_api_key_counts_only_once_in_use() {
+        let mut env = endpoint_env(None, None, None, None);
+        env.api_key = Some("sk-ant-api03-x".to_string());
+        assert!(
+            !env.is_custom(),
+            "a key Claude Code has not approved is not in use"
+        );
+        env.api_key_in_use = true;
+        assert!(env.is_custom());
+        assert!(env.custom_base_url().is_none(), "a key names no host");
     }
 }

@@ -24,7 +24,8 @@ fn empty_stdin_prints_nothing() {
 use std::io::Write;
 use std::process::Stdio;
 
-const ENDPOINT_VARS: [&str; 4] = [
+const ENDPOINT_VARS: [&str; 5] = [
+    "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_USE_BEDROCK",
@@ -1081,13 +1082,33 @@ fn setup_declining_update_check_leaves_the_config_absent() {
 /// Like run_statusline but with colors forced on: a detected TTL shows up
 /// only in the cache_age chip's color.
 fn run_statusline_colored(stdin_data: &str, home: &std::path::Path) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_claude-statusline"))
+    run_statusline_colored_with_env(stdin_data, home, &[])
+}
+
+/// `run_statusline_colored` with the endpoint variables and the preview clock override cleared
+/// first, mirroring `run_statusline_with_env`, so a test can pin the clock without a developer
+/// shell's proxy variables leaking in. Colors stay forced on and `NO_COLOR` stays cleared.
+fn run_statusline_colored_with_env(
+    stdin_data: &str,
+    home: &std::path::Path,
+    env: &[(&str, &str)],
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_claude-statusline"));
+    command
         .env("FORCE_COLOR", "1")
         .env_remove("NO_COLOR")
         .env("CLAUDE_STATUSLINE_WIDTH", "200")
         .env("HOME", home)
         .env("USERPROFILE", home)
-        .current_dir(home)
+        .env_remove("CLAUDE_STATUSLINE_NOW_MS")
+        .current_dir(home);
+    for var in ENDPOINT_VARS {
+        command.env_remove(var);
+    }
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2129,6 +2150,70 @@ fn native_usage_line_shows_the_snapshot_profile() {
 }
 
 #[test]
+fn an_approved_api_key_hides_the_local_login_from_the_usage_line() {
+    let home = native_home(60, Some(&parked_snapshot("acct-1", "fetched@example.com")));
+    std::fs::write(
+        home.path().join(".claude.json"),
+        r#"{"oauthAccount": {"accountUuid": "acct-1"},
+            "customApiKeyResponses": {"approved": ["abcdefghijklmnopqrst"]}}"#,
+    )
+    .unwrap();
+    let key = [("ANTHROPIC_API_KEY", "sk-ant-api03-abcdefghijklmnopqrst")];
+    let out = run_statusline_with_env(NATIVE_PAYLOAD, "200", home.path(), &key);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("5h:42%"), "payload windows stay: {stdout}");
+    assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
+    assert!(
+        usage_cache(home.path()).exists(),
+        "the login's cache is left alone, as behind a gateway"
+    );
+
+    // The same key, not approved: Claude Code ignores it and the login serves the session.
+    let unapproved = [("ANTHROPIC_API_KEY", "sk-ant-api03-somethingelse00000000")];
+    let out = run_statusline_with_env(NATIVE_PAYLOAD, "200", home.path(), &unapproved);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("fetched@example.com"), "stdout: {stdout}");
+}
+
+/// An enterprise seat's fetch carries the spend and nothing else; the line opens on it and
+/// shows the meter, and no window is invented.
+#[test]
+fn native_usage_line_renders_a_spend_only_snapshot() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "seat@example.com", "plan": "enterprise"}"#,
+            r#"{"five_hour": null, "seven_day": null, "limits": [],
+                "extra_usage": {"is_enabled": true, "monthly_limit": 300000, "used_credits": 15831.0}}"#,
+        )),
+    );
+    let out = run_statusline("{}", "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("spend:$158/$3000 (5%)"), "stdout: {stdout}");
+    assert!(stdout.contains("Enterprise"), "stdout: {stdout}");
+    assert!(!stdout.contains("5h:"), "no window is invented: {stdout}");
+}
+
+/// A seat whose extra usage is switched off reports the object zeroed and off; the line shows
+/// the account and plan and no spend meter.
+#[test]
+fn native_usage_line_hides_a_switched_off_spend() {
+    let home = native_home(
+        60,
+        Some(&parked_snapshot_with(
+            "acct-1",
+            r#"{"email": "seat@example.com", "plan": "enterprise"}"#,
+            r#"{"extra_usage": {"is_enabled": false, "monthly_limit": 0, "used_credits": 0, "utilization": 0}}"#,
+        )),
+    );
+    let out = run_statusline("{}", "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("seat@example.com"), "stdout: {stdout}");
+    assert!(!stdout.contains("spend:"), "stdout: {stdout}");
+}
+
+#[test]
 fn account_switch_removes_the_usage_cache() {
     let home = native_home(60, Some(&parked_snapshot("acct-2", "other@example.com")));
     let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
@@ -2206,6 +2291,45 @@ fn native_usage_line_renders_from_a_snapshot_alone() {
         "usage line: {line}"
     );
     assert!(line.contains("7d:33%"), "usage line: {line}");
+}
+
+/// A snapshot fetched an hour ago with a fable window that has since reset and a spend from
+/// that fetch: the reset window is gone, the spend is dimmed, the payload window is live. The
+/// clock is pinned mid-month so the spend's billing month is the same on any day the test runs.
+#[test]
+fn old_native_snapshot_drops_reset_windows_and_dims_the_rest() {
+    // 2026-07-24T00:00:00Z, the preview instant.
+    let now_s: i64 = 1_784_851_200;
+    let fetched_ms = (now_s - 3_600) * 1_000;
+    let parked = (now_s + 1_800) * 1_000;
+    let utilization = r#"{"extra_usage": {"is_enabled": true, "monthly_limit": 100000, "used_credits": 25000},
+            "limits": [{"kind": "weekly_scoped", "percent": 81, "resets_at": "2000-01-01T00:00:00Z",
+                        "scope": {"model": {"display_name": "Fable"}}}]}"#;
+    let snapshot = format!(
+        r#"{{"fetched_at_ms": {fetched_ms}, "account_uuid": "acct-1", "utilization": {utilization},
+            "usage_next_at_ms": {parked}, "profile_next_at_ms": {parked}}}"#
+    );
+    let home = native_home(60, Some(&snapshot));
+    let pinned = (now_s * 1_000).to_string();
+    let out = run_statusline_colored_with_env(
+        NATIVE_PAYLOAD,
+        home.path(),
+        &[("CLAUDE_STATUSLINE_NOW_MS", &pinned)],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("fable:"),
+        "a reset window is gone: {stdout}"
+    );
+    let dim = sgr(0x56, 0x5f, 0x89);
+    assert!(
+        stdout.contains(&format!("{dim}$250")),
+        "an old spend is dimmed: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{}42%", sgr(0x9e, 0xce, 0x6a))),
+        "the payload window stays live: {stdout}"
+    );
 }
 
 /// A fetched profile opens the line on its own: the account and plan chips render, and no

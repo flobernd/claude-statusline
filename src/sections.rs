@@ -308,21 +308,26 @@ pub fn line3(
         let text = crate::plan::label(plan, None);
         push_visible(&mut out, "usage_plan", s.paint(&text, MAGENTA));
     }
-    let fresh = limits.freshness;
     if let Some(w) = &limits.session {
-        out.push(("usage_session", window_chip(s, "5h", w, now_epoch_s, fresh)));
+        out.push((
+            "usage_session",
+            window_chip(s, "5h", w, now_epoch_s, w.freshness),
+        ));
     }
     if let Some(w) = &limits.week {
-        out.push(("usage_week", window_chip(s, "7d", w, now_epoch_s, fresh)));
+        out.push((
+            "usage_week",
+            window_chip(s, "7d", w, now_epoch_s, w.freshness),
+        ));
     }
     if let Some(w) = &limits.fable {
         out.push((
             "usage_fable",
-            window_chip(s, "fable", w, now_epoch_s, fresh),
+            window_chip(s, "fable", w, now_epoch_s, w.freshness),
         ));
     }
     if let Some(spend) = &limits.spend
-        && let Some(chip) = spend_chip(s, spend, now_epoch_s, fresh)
+        && let Some(chip) = spend_chip(s, spend, now_epoch_s, spend.freshness)
     {
         out.push(("usage_spend", chip));
     }
@@ -533,22 +538,25 @@ fn sample_limits() -> crate::usage::Limits {
         session: Some(crate::usage::Window {
             pct: 42.0,
             resets_at: Some(USAGE_SAMPLE_NOW_S + 7_800),
+            freshness: crate::usage::Freshness::Live,
         }),
         week: Some(crate::usage::Window {
             pct: 63.0,
             resets_at: Some(USAGE_SAMPLE_NOW_S + 259_200),
+            freshness: crate::usage::Freshness::Live,
         }),
         fable: Some(crate::usage::Window {
             pct: 81.0,
             resets_at: Some(USAGE_SAMPLE_NOW_S + 432_000),
+            freshness: crate::usage::Freshness::Live,
         }),
         spend: Some(crate::usage::Spend {
             used_cents: Some(100_200.0),
             limit_cents: Some(100_000.0),
             pct: Some(100.2),
             resets_at: Some(USAGE_SAMPLE_NOW_S + 691_200),
+            freshness: crate::usage::Freshness::Live,
         }),
-        freshness: crate::usage::Freshness::Live,
     }
 }
 
@@ -1003,22 +1011,42 @@ mod tests {
 
     const USAGE_NOW_S: i64 = 1_784_829_600;
 
-    fn window(pct: f64, resets_at: Option<i64>) -> crate::usage::Window {
-        crate::usage::Window { pct, resets_at }
+    fn window(
+        pct: f64,
+        resets_at: Option<i64>,
+        freshness: crate::usage::Freshness,
+    ) -> crate::usage::Window {
+        crate::usage::Window {
+            pct,
+            resets_at,
+            freshness,
+        }
     }
 
     fn full_limits() -> crate::usage::Limits {
         crate::usage::Limits {
-            session: Some(window(42.0, Some(USAGE_NOW_S + 7_800))),
-            week: Some(window(63.0, Some(USAGE_NOW_S + 259_200))),
-            fable: Some(window(81.0, Some(USAGE_NOW_S + 432_000))),
+            session: Some(window(
+                42.0,
+                Some(USAGE_NOW_S + 7_800),
+                crate::usage::Freshness::Live,
+            )),
+            week: Some(window(
+                63.0,
+                Some(USAGE_NOW_S + 259_200),
+                crate::usage::Freshness::Live,
+            )),
+            fable: Some(window(
+                81.0,
+                Some(USAGE_NOW_S + 432_000),
+                crate::usage::Freshness::Live,
+            )),
             spend: Some(crate::usage::Spend {
                 used_cents: Some(100_200.0),
                 limit_cents: Some(100_000.0),
                 pct: Some(100.2),
                 resets_at: Some(USAGE_NOW_S + 691_200),
+                freshness: crate::usage::Freshness::Live,
             }),
-            freshness: crate::usage::Freshness::Live,
         }
     }
 
@@ -1059,10 +1087,24 @@ mod tests {
             )
         };
         let live = row(&full_limits());
-        let stale = row(&crate::usage::Limits {
+        let mut stale_limits = full_limits();
+        stale_limits.session = stale_limits.session.map(|w| crate::usage::Window {
             freshness: crate::usage::Freshness::Stale,
-            ..full_limits()
+            ..w
         });
+        stale_limits.week = stale_limits.week.map(|w| crate::usage::Window {
+            freshness: crate::usage::Freshness::Stale,
+            ..w
+        });
+        stale_limits.fable = stale_limits.fable.map(|w| crate::usage::Window {
+            freshness: crate::usage::Freshness::Stale,
+            ..w
+        });
+        stale_limits.spend = stale_limits.spend.map(|s| crate::usage::Spend {
+            freshness: crate::usage::Freshness::Stale,
+            ..s
+        });
+        let stale = row(&stale_limits);
 
         assert_eq!(
             names(&stale),
@@ -1102,9 +1144,22 @@ mod tests {
     }
 
     #[test]
+    fn a_row_dims_each_meter_on_its_own() {
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
+        let mut limits = full_limits();
+        limits.fable.as_mut().unwrap().freshness = crate::usage::Freshness::Stale;
+        let chips = line3(&limits, None, None, None, &colored, USAGE_NOW_S);
+        assert!(text_of(&chips, "usage_fable").contains(&sgr(COMMENT)));
+        assert!(text_of(&chips, "usage_session").contains(&sgr(crate::bar::bar_color(42.0))));
+    }
+
+    #[test]
     fn line3_returns_bare_chips() {
         let limits = crate::usage::Limits {
-            week: Some(window(63.0, None)),
+            week: Some(window(63.0, None, crate::usage::Freshness::Live)),
             ..crate::usage::Limits::default()
         };
         let chips = line3(&limits, None, None, None, &PLAIN, USAGE_NOW_S);
@@ -1152,7 +1207,7 @@ mod tests {
     #[test]
     fn plan_chip_renders_first_and_title_cased() {
         let limits = crate::usage::Limits {
-            session: Some(window(42.0, None)),
+            session: Some(window(42.0, None, crate::usage::Freshness::Live)),
             ..crate::usage::Limits::default()
         };
         let chips = line3(&limits, Some("max"), None, None, &PLAIN, USAGE_NOW_S);
@@ -1197,9 +1252,17 @@ mod tests {
     #[test]
     fn past_or_missing_resets_omit_the_countdown() {
         let limits = crate::usage::Limits {
-            session: Some(window(42.0, Some(USAGE_NOW_S))),
-            week: Some(window(63.0, Some(USAGE_NOW_S - 5))),
-            fable: Some(window(81.0, None)),
+            session: Some(window(
+                42.0,
+                Some(USAGE_NOW_S),
+                crate::usage::Freshness::Live,
+            )),
+            week: Some(window(
+                63.0,
+                Some(USAGE_NOW_S - 5),
+                crate::usage::Freshness::Live,
+            )),
+            fable: Some(window(81.0, None, crate::usage::Freshness::Live)),
             ..crate::usage::Limits::default()
         };
         let chips = line3(&limits, None, None, None, &PLAIN, USAGE_NOW_S);
@@ -1216,6 +1279,7 @@ mod tests {
                 limit_cents: None,
                 pct: Some(37.0),
                 resets_at: None,
+                freshness: crate::usage::Freshness::Live,
             }),
             ..crate::usage::Limits::default()
         };
@@ -1231,6 +1295,7 @@ mod tests {
                 limit_cents: Some(0.0),
                 pct: None,
                 resets_at: None,
+                freshness: crate::usage::Freshness::Live,
             }),
             ..crate::usage::Limits::default()
         };
@@ -1244,8 +1309,8 @@ mod tests {
             links: false,
         };
         let limits = crate::usage::Limits {
-            session: Some(window(42.0, None)),
-            week: Some(window(90.0, None)),
+            session: Some(window(42.0, None, crate::usage::Freshness::Live)),
+            week: Some(window(90.0, None, crate::usage::Freshness::Live)),
             ..crate::usage::Limits::default()
         };
         let chips = line3(&limits, None, None, None, &colored, USAGE_NOW_S);
@@ -1264,7 +1329,11 @@ mod tests {
             links: false,
         };
         let limits = crate::usage::Limits {
-            session: Some(window(42.0, Some(USAGE_NOW_S + 7_800))),
+            session: Some(window(
+                42.0,
+                Some(USAGE_NOW_S + 7_800),
+                crate::usage::Freshness::Live,
+            )),
             ..crate::usage::Limits::default()
         };
         let chips = line3(&limits, None, None, None, &colored, USAGE_NOW_S);
@@ -1283,6 +1352,7 @@ mod tests {
                 limit_cents: Some(100_000.0),
                 pct: Some(100.2),
                 resets_at: None,
+                freshness: crate::usage::Freshness::Live,
             }),
             ..crate::usage::Limits::default()
         };
@@ -1304,7 +1374,7 @@ mod tests {
     #[test]
     fn account_chip_renders_first() {
         let limits = crate::usage::Limits {
-            session: Some(window(42.0, None)),
+            session: Some(window(42.0, None, crate::usage::Freshness::Live)),
             ..crate::usage::Limits::default()
         };
         let chips = line3(
@@ -1326,7 +1396,7 @@ mod tests {
     #[test]
     fn account_chip_is_truncated_and_a_blank_one_is_skipped() {
         let limits = crate::usage::Limits {
-            session: Some(window(1.0, None)),
+            session: Some(window(1.0, None, crate::usage::Freshness::Live)),
             ..crate::usage::Limits::default()
         };
         let long = "abcdefghijklmnopqrstuvwxyz0123456789@example.com";
@@ -1339,7 +1409,7 @@ mod tests {
     #[test]
     fn control_character_account_and_plan_yield_no_chip() {
         let limits = crate::usage::Limits {
-            session: Some(window(1.0, None)),
+            session: Some(window(1.0, None, crate::usage::Freshness::Live)),
             ..crate::usage::Limits::default()
         };
         let controls = "\u{1}".repeat(32);

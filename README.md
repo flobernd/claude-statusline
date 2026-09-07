@@ -84,14 +84,16 @@ non-interactive install use `--install --with-subagent-statusline`.
 An opt-in third line shows the subscription limits otherwise hidden behind `/usage`: the
 account email, the plan type, the five-hour session and weekly windows with reset countdowns,
 the Fable-only weekly window, and the extra-usage spend meter (which also covers
-Team/Enterprise spend limits). The wizard asks about it, or set `advanced_usage_limits_enabled`
-yourself. The line renders only for native Anthropic subscriptions: Bedrock, Vertex, and
-custom-gateway sessions (a non-Anthropic `ANTHROPIC_BASE_URL` or an `ANTHROPIC_AUTH_TOKEN`)
-hide it unless the Claude Code payload still reports Anthropic rate limits, or a status from
-the CLIProxyAPI plugin route makes the same case (see "Behind CLIProxyAPI" below). A
-custom-gateway session that opens the line through its payload rate limits alone renders the
-payload windows and no account or plan chips: the claude.ai data and the cache behind them
-describe the login on this machine, not the account that serves the session.
+Team/Enterprise spend limits). A seat whose extra usage is switched off shows no spend meter
+at all rather than a zero. The wizard asks about it, or set `advanced_usage_limits_enabled`
+yourself. The line renders only for native Anthropic subscriptions: Bedrock, Vertex,
+and custom-gateway and API-key sessions (a non-Anthropic `ANTHROPIC_BASE_URL`, an
+`ANTHROPIC_AUTH_TOKEN`, or an `ANTHROPIC_API_KEY` that Claude Code has been told to use)
+hide it unless the Claude Code payload still reports Anthropic rate limits, or a status
+from the CLIProxyAPI plugin route makes the same case (see "Behind CLIProxyAPI" below). A
+custom-gateway session that opens the line through its payload rate limits alone renders
+the payload windows and no account or plan chips: the claude.ai data and the cache behind
+them describe the login on this machine, not the account that serves the session.
 
 Session and weekly values come live from the Claude Code payload. The per-model and spend
 data comes from an unofficial claude.ai endpoint, fetched in the background at most every
@@ -100,6 +102,11 @@ data comes from an unofficial claude.ai endpoint, fetched in the background at m
 `Retry-After` header says so, or otherwise after a backoff that doubles from 2 to 10 minutes.
 That endpoint may change without notice; when it does, the affected chips disappear silently
 while the payload-backed chips keep working.
+
+A cached chip is only ever as current as the snapshot behind it: a window whose reset has passed
+disappears, the spend goes when the month it was read in closes, and after two fetch intervals
+without a successful fetch the remaining cached meters dim to the comment color, while the
+payload windows on the same line stay live.
 
 The account email and the plan, shown with its rate-limit multiplier (`Max 20x`), come from
 the claude.ai profile endpoint, fetched by the same background process at most once an hour;
@@ -265,10 +272,11 @@ are plain magenta text.
 | `usage_spend`   | Label `spend:` comment; both dollar amounts and the percentage on the fill scale |
 | `usage_model`   | Magenta; the model id                                                          |
 
-Reset countdowns are comment throughout, as is the leading glyph that marks the line. Behind
-CLIProxyAPI a row whose answer has gone stale paints every percentage and dollar amount comment
-instead of on the fill scale; the account, plan, and model chips keep their magenta, because
-those do not go out of date.
+Reset countdowns are comment throughout, as is the leading glyph that marks the line. A meter whose
+numbers have gone stale paints its percentage and dollar amounts comment instead of on the fill
+scale: behind CLIProxyAPI the whole row ages with the route's answer, on the native line each
+cached chip ages with the snapshot while the payload windows stay live. The account, plan, and
+model chips keep their magenta, because those do not go out of date.
 
 ### Subagent rows
 

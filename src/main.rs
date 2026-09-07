@@ -273,7 +273,12 @@ fn render(raw: &str) -> Option<String> {
     // The flag check comes first so the default path never pays the extra
     // ~/.claude.json read on a render tick.
     let usage_rows: Vec<String> = if config.advanced_usage_limits_enabled {
-        let endpoint = usage::EndpointEnv::from_env();
+        let mut endpoint = usage::EndpointEnv::from_env();
+        if let Some(key) = endpoint.api_key.as_deref() {
+            endpoint.api_key_in_use = schema::home_dir()
+                .map(|h| schema::load_account_info(&h.join(".claude.json")))
+                .is_some_and(|info| info.api_key_approved(key));
+        }
         let proxy = proxy_status(&config, &payload, &endpoint);
         let snapshot = if config.usage_fetch_interval_seconds == 0 {
             // The cache belongs to the fetch on every endpoint: with the fetch off it would
@@ -325,7 +330,11 @@ fn render(raw: &str) -> Option<String> {
                 None => {
                     let limits = usage::merge(
                         payload.rate_limits.as_ref(),
-                        snapshot.as_ref().map(|s| &s.utilization),
+                        snapshot.as_ref().map(|s| usage::Cached {
+                            utilization: &s.utilization,
+                            fetched_at_s: (s.fetched_at_ms / 1_000) as i64,
+                        }),
+                        usage::stale_after_s(&config),
                         now_epoch_s,
                     );
                     let (email, plan) = native_account(snapshot.as_ref());
@@ -512,6 +521,18 @@ mod tests {
             },
             ..usage::Snapshot::default()
         };
+        // An enterprise seat's fetch carries the spend and nothing else, and that is content.
+        let spend_only = usage::Snapshot {
+            utilization: usage::EndpointUtilization {
+                extra_usage: Some(usage::ExtraUsage {
+                    used_credits: Some(15_831.0),
+                    monthly_limit: Some(300_000.0),
+                    ..usage::ExtraUsage::default()
+                }),
+                ..usage::EndpointUtilization::default()
+            },
+            ..usage::Snapshot::default()
+        };
         // The child writes the file as soon as it books its first retry, so a schedule alone
         // proves nothing.
         let booked = usage::Snapshot {
@@ -539,6 +560,13 @@ mod tests {
             &official,
             false,
             Some(&windows)
+        ));
+        assert!(usage_line_enabled(
+            &enabled(),
+            &without,
+            &official,
+            false,
+            Some(&spend_only)
         ));
         assert!(!usage_line_enabled(
             &enabled(),
