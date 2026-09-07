@@ -48,8 +48,8 @@ pub fn visible_width(s: &str) -> usize {
 
 /// The longest prefix of `text` that fits in `cells`, measured as a string
 /// after each character so a cut never lands inside a wide character or
-/// a joined sequence. A dangling joiner or selector measures like the
-/// sequence it starts, so it is dropped together with what follows it.
+/// a joined sequence. A variation selector that would widen its base is
+/// cut with it; a trailing joiner is zero-width and stays.
 pub fn take_cells(text: &str, cells: usize) -> String {
     let mut out = String::new();
     for c in text.chars() {

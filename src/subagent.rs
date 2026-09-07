@@ -167,7 +167,7 @@ pub fn row_chips(
 
 const SEP: &str = " \u{2502} ";
 const DROP: &[&str] = &["effort", "model", "context_tokens", "elapsed"];
-/// Below this many kept characters a truncated activity is noise.
+/// Below this many kept cells a truncated activity is noise.
 const MIN_ACTIVITY: usize = 6;
 
 fn row_width(chips: &[(&'static str, String)], sep_width: usize) -> usize {

@@ -25,8 +25,9 @@ fn open_under(path: &str, allowed_root: &Path) -> Option<std::fs::File> {
     std::fs::File::open(&real).ok()
 }
 
-/// The last `bytes` of the file as complete lines, and whether a partial
-/// first line was dropped (true only when the window started mid-record).
+/// The last `bytes` of the file as complete lines, and whether the first
+/// line was dropped: a window that does not begin at a newline cannot know
+/// where its first record started.
 fn tail_lines(f: &mut std::fs::File, size: u64, bytes: u64) -> Option<(String, bool)> {
     let start = size.saturating_sub(bytes);
     f.seek(SeekFrom::Start(start)).ok()?;
