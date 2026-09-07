@@ -25,6 +25,7 @@ jobs:
         # repository. Raise it so a timeout here means a real hang.
         env:
           CLAUDE_STATUSLINE_GIT_TIMEOUT_MS: 10000
+
   assets:
     runs-on: ubuntu-latest
     steps:
