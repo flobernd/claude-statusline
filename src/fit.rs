@@ -1,3 +1,4 @@
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 /// Width in terminal cells after stripping SGR and OSC 8 escapes. Payload
@@ -46,18 +47,24 @@ pub fn visible_width(s: &str) -> usize {
     width
 }
 
-/// The longest prefix of `text` that fits in `cells`, measured as a string
-/// after each character so a cut never lands inside a wide character or
-/// a joined sequence. A variation selector that would widen its base is
-/// cut with it; a trailing joiner is zero-width and stays.
+/// The longest prefix of `text` that fits in `cells`, built from whole
+/// grapheme clusters, each measured once: a cluster is what a terminal
+/// draws as one unit, so a cut never lands inside a wide character, a
+/// joined sequence or a base with its marks, and the walk stays linear
+/// in the text however many zero-width characters it carries. A
+/// cluster's width is not the sum of its characters' widths (a joined
+/// sequence can measure wider half-built than whole), which is why the
+/// prefix is never measured character by character.
 pub fn take_cells(text: &str, cells: usize) -> String {
     let mut out = String::new();
-    for c in text.chars() {
-        out.push(c);
-        if out.width() > cells {
-            out.pop();
+    let mut used = 0;
+    for cluster in text.graphemes(true) {
+        let width = cluster.width();
+        if used + width > cells {
             break;
         }
+        used += width;
+        out.push_str(cluster);
     }
     out
 }
@@ -179,5 +186,35 @@ mod tests {
         );
         assert_eq!(take_cells("\u{1F468}\u{200D}\u{1F469}", 1), "");
         assert_eq!(take_cells("abc", 0), "");
+        // A joined sequence measures wider half-built than whole: the
+        // heart with its selector reads three cells before the join
+        // completes, and the whole family reads two.
+        let couple = "\u{1F469}\u{200D}\u{2764}\u{FE0F}\u{200D}\u{1F469}";
+        assert_eq!(take_cells(couple, 2), couple);
+        assert_eq!(take_cells(&format!("{couple}x"), 2), couple);
+        assert_eq!(take_cells(couple, 1), "");
+        // A variation selector that widens its base is cut with it.
+        assert_eq!(take_cells("\u{2764}\u{FE0F}x", 1), "");
+        assert_eq!(take_cells("\u{2764}\u{FE0F}x", 2), "\u{2764}\u{FE0F}");
+        // A flag is one cluster of two cells.
+        assert_eq!(take_cells("\u{1F1E9}\u{1F1EA}x", 1), "");
+        assert_eq!(take_cells("\u{1F1E9}\u{1F1EA}x", 3), "\u{1F1E9}\u{1F1EA}x");
+    }
+
+    #[test]
+    fn take_cells_is_linear_in_zero_width_text() {
+        let text = format!("a{}bcdefghijklmnop", "\u{0301}".repeat(20_000));
+        let start = std::time::Instant::now();
+        let kept = take_cells(&text, 10);
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(200),
+            "took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(
+            kept.chars().count(),
+            20_010,
+            "the marks ride with their base"
+        );
     }
 }
