@@ -196,7 +196,7 @@ struct StatusInfo {
 /// Each entry is classified once by its XY code: untracked and staged adds
 /// count as added, deletions as removed, everything else (modified,
 /// renamed, type change, unmerged) as changed. `(detached)` reads as
-/// `HEAD`, the name rev-parse gave it before.
+/// `HEAD`, the name the subagent rows show for the same state.
 fn parse_status(out: &str) -> StatusInfo {
     let mut s = StatusInfo::default();
     for line in out.lines() {
@@ -399,7 +399,8 @@ pub fn collect(dir: &Path) -> GitInfo {
     if let Some((git_dir, common_dir)) = dir_info(dir, dirs) {
         let branch = match &status {
             Some(s) => s.branch.clone(),
-            // A status that ran out of budget must not cost the branch chip.
+            // A status that ran out of budget, or cannot run at all as in a bare
+            // repository, must not cost the branch chip.
             None => head_from_file(&git_dir),
         };
         if let Some(branch) = branch {
