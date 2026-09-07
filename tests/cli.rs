@@ -686,7 +686,12 @@ fn install_writes_forward_slash_command_paths() {
     // backslashes, so a backslash path breaks silently.
     for key in ["statusLine", "subagentStatusLine"] {
         let cmd = v[key]["command"].as_str().unwrap();
-        assert!(!cmd.contains('\\'), "{key} command: {cmd}");
+        // The shell escape for an apostrophe is the one backslash the
+        // command may carry; a path separator never is.
+        assert!(
+            !cmd.replace("'\\''", "").contains('\\'),
+            "{key} command: {cmd}"
+        );
     }
 }
 

@@ -89,7 +89,11 @@ pub fn is_our_command(command: &str) -> bool {
 /// unterminated quote yields nothing rather than a guess.
 fn first_token(command: &str) -> String {
     let c = command.trim();
-    let ends_word = |rest: &str| rest.is_empty() || rest.starts_with(char::is_whitespace);
+    // A POSIX shell ends a word at whitespace or at an operator; anything
+    // else, `-fork` say, continues the same word and names another file.
+    let ends_word = |rest: &str| {
+        rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || "|&;()<>".contains(c))
+    };
     if let Some(rest) = c.strip_prefix('\'') {
         let mut out = String::new();
         let mut rest = rest;
@@ -143,6 +147,9 @@ mod tests {
             "'/tmp/q$(echo x)/claude-statusline' --subagent-statusline"
         ));
         assert!(is_our_command("'C:/Program Files/claude-statusline.exe'"));
+        assert!(is_our_command("\"/opt/claude-statusline\"|cat"));
+        assert!(is_our_command("'/opt/claude-statusline';echo done"));
+        assert!(is_our_command("'/opt/claude-statusline'>/dev/null"));
     }
 
     #[test]
