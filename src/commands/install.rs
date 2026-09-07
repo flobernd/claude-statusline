@@ -9,30 +9,29 @@ pub fn install(with_subagent: bool) -> Result<()> {
         let parsed = std::fs::read_to_string(&path)
             .ok()
             .and_then(|t| serde_json::from_str::<Value>(&t).ok());
-
-        // The .bak must hold the user's pre-install state, not our own
-        // previous entries: skip it only when everything we may overwrite
-        // is already ours.
-        let entry_is_ours = |key: &str| {
-            parsed
-                .as_ref()
-                .and_then(|v| v.get(key))
-                .and_then(|sl| sl.get("command"))
-                .and_then(|c| c.as_str())
-                .map(super::print_config::is_our_command)
+        let keys: &[&str] = if with_subagent {
+            &["statusLine", "subagentStatusLine"]
+        } else {
+            &["statusLine"]
         };
-        let current_is_ours = entry_is_ours("statusLine") == Some(true)
-            && (!with_subagent || entry_is_ours("subagentStatusLine").unwrap_or(true));
-        if !current_is_ours && let Err(e) = std::fs::copy(&path, bak_path(&path)) {
-            eprintln!("Warning: could not create backup: {e}");
-        }
-
         match parsed {
-            Some(Value::Object(existing)) => settings = existing,
-            _ => eprintln!(
-                "Warning: could not parse existing settings.json; writing new settings with statusLine only (backup at {}).",
-                bak_path(&path).display()
-            ),
+            Some(Value::Object(existing)) => {
+                if let Err(e) = refresh_backup(&path, &existing, keys) {
+                    eprintln!("Warning: could not update backup: {e}");
+                }
+                settings = existing;
+            }
+            _ => {
+                // Unparseable settings cannot be merged key by key, so the
+                // raw bytes are kept verbatim; they are the user's data.
+                if let Err(e) = std::fs::copy(&path, bak_path(&path)) {
+                    eprintln!("Warning: could not create backup: {e}");
+                }
+                eprintln!(
+                    "Warning: could not parse existing settings.json; writing new settings with statusLine only (backup at {}).",
+                    bak_path(&path).display()
+                );
+            }
         }
     }
 
@@ -136,6 +135,42 @@ pub fn uninstall() -> Result<()> {
 
 fn bak_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.bak", path.display()))
+}
+
+/// The .bak must hold the user's pre-install state for each entry we
+/// write, decided per key: a foreign entry is saved, an entry that is
+/// already ours keeps whatever the backup saved before it, and an entry
+/// the user removed is removed from the backup so uninstall cannot bring
+/// it back. Without a backup yet, the whole file is the starting point so
+/// a first install still snapshots everything. A backup that does not
+/// parse is the raw copy of settings that did not parse either: the only
+/// recovery path the user has, and not ours to rewrite.
+fn refresh_backup(path: &Path, current: &Map<String, Value>, keys: &[&str]) -> Result<()> {
+    let bak = bak_path(path);
+    let mut backup = match std::fs::read_to_string(&bak) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(Value::Object(map)) => map,
+            _ => return Ok(()),
+        },
+        Err(_) => current.clone(),
+    };
+    for key in keys {
+        let ours = current
+            .get(*key)
+            .and_then(|sl| sl.get("command"))
+            .and_then(|c| c.as_str())
+            .is_some_and(super::print_config::is_our_command);
+        match current.get(*key) {
+            Some(entry) if !ours => {
+                backup.insert((*key).to_string(), entry.clone());
+            }
+            Some(_) => {}
+            None => {
+                backup.remove(*key);
+            }
+        }
+    }
+    write_atomic(&bak, &Value::Object(backup))
 }
 
 /// Claude Code hands the command to a POSIX shell (sh on Unix, Git Bash on

@@ -770,6 +770,75 @@ fn plain_reinstall_preserves_original_backup_despite_foreign_subagent() {
 }
 
 #[test]
+fn subagent_opt_in_after_install_keeps_the_original_main_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{"statusLine": {"type": "command", "command": "other-main"},
+            "subagentStatusLine": {"type": "command", "command": "other-sub"}}"#,
+    )
+    .unwrap();
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    assert!(
+        run_with_settings(&["--install", "--with-subagent-statusline"], &path)
+            .status
+            .success()
+    );
+
+    let bak: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{}.bak", path.display())).unwrap())
+            .unwrap();
+    assert_eq!(bak["statusLine"]["command"], "other-main");
+    assert_eq!(bak["subagentStatusLine"]["command"], "other-sub");
+
+    assert!(run_with_settings(&["--uninstall"], &path).status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(v["statusLine"]["command"], "other-main");
+    assert_eq!(v["subagentStatusLine"]["command"], "other-sub");
+}
+
+#[test]
+fn an_entry_removed_by_hand_is_not_resurrected_from_the_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{"statusLine": {"type": "command", "command": "other-main"}}"#,
+    )
+    .unwrap();
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    // The user deletes the whole entry, then installs again.
+    std::fs::write(&path, r#"{"model": "opus"}"#).unwrap();
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    assert!(run_with_settings(&["--uninstall"], &path).status.success());
+
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(v.get("statusLine").is_none(), "settings: {v}");
+    assert_eq!(v["model"], "opus");
+}
+
+/// An install over settings that do not parse keeps the raw bytes as the backup. That copy
+/// is the only recovery path, so a later install must leave it exactly as it is.
+#[test]
+fn reinstall_leaves_a_raw_backup_of_unparseable_settings_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, "{not json").unwrap();
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    let bak = format!("{}.bak", path.display());
+    assert_eq!(std::fs::read_to_string(&bak).unwrap(), "{not json");
+    assert!(run_with_settings(&["--install"], &path).status.success());
+    assert_eq!(
+        std::fs::read_to_string(&bak).unwrap(),
+        "{not json",
+        "the only recovery copy survives a reinstall"
+    );
+}
+
+#[test]
 fn uninstall_with_only_foreign_entries_reports_not_installed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
