@@ -56,6 +56,7 @@ fn run_statusline_with_env(
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env_remove("CLAUDE_STATUSLINE_NOW_MS")
+        .env("CLAUDE_STATUSLINE_KEYCHAIN", "0")
         .current_dir(home);
     for var in ENDPOINT_VARS {
         command.env_remove(var);
@@ -1100,6 +1101,7 @@ fn run_statusline_colored_with_env(
         .env("CLAUDE_STATUSLINE_WIDTH", "200")
         .env("HOME", home)
         .env("USERPROFILE", home)
+        .env("CLAUDE_STATUSLINE_KEYCHAIN", "0")
         .env_remove("CLAUDE_STATUSLINE_NOW_MS")
         .current_dir(home);
     for var in ENDPOINT_VARS {

@@ -631,6 +631,10 @@ pub(crate) enum Fetched {
 /// flow can be tested without a network.
 type Fetch<'a> = &'a dyn Fn(&str, &str) -> Fetched;
 
+/// (credentials file) -> token. A parameter of the child for the same reason as `Fetch`: the
+/// production reader may consult the login Keychain, which no test may reach.
+type TokenReader<'a> = &'a dyn Fn(&Path) -> Option<String>;
+
 /// One attempt at a kind, once its body was parsed.
 enum Outcome {
     Success,
@@ -688,13 +692,23 @@ fn attempt<T>(
 
 fn try_fetch() -> Option<()> {
     let home = schema::home_dir()?;
-    try_fetch_with(&home, &fetch_json, crate::clock::now_ms())
+    try_fetch_with(
+        &home,
+        &fetch_json,
+        &read_access_token,
+        crate::clock::now_ms(),
+    )
 }
 
 /// The control flow of the child. Each kind runs on its own schedule, usage first, and the
 /// profile runs whether or not the usage fetch succeeded: a rate-limited usage endpoint must
 /// not starve the account chip. A failure keeps the previous data and stamp of its kind.
-fn try_fetch_with(home: &Path, fetch: Fetch<'_>, now_ms: u64) -> Option<()> {
+fn try_fetch_with(
+    home: &Path,
+    fetch: Fetch<'_>,
+    read_token: TokenReader<'_>,
+    now_ms: u64,
+) -> Option<()> {
     let claude_dir = home.join(".claude");
     let config = schema::load_config(&claude_dir.join("claude-statusline.json"));
     if config.usage_fetch_interval_seconds == 0 {
@@ -725,7 +739,7 @@ fn try_fetch_with(home: &Path, fetch: Fetch<'_>, now_ms: u64) -> Option<()> {
     // A missing or unreadable token is not an early return: every due kind fails without a
     // network call and books its ladder below, so a session with no OAuth login backs off
     // one rung per render tick instead of spawning a fresh child on every one.
-    let token = read_access_token(&claude_dir.join(".credentials.json"));
+    let token = read_token(&claude_dir.join(".credentials.json"));
     if usage_due {
         let (utilization, outcome) = match token.as_deref() {
             Some(token) => attempt(fetch, USAGE_URL, token, utilization_from_body),
@@ -766,15 +780,113 @@ fn try_fetch_with(home: &Path, fetch: Fetch<'_>, now_ms: u64) -> Option<()> {
 }
 
 /// The token feeds the Authorization header and nothing else; it is never
-/// logged, stored, or echoed on any failure path.
+/// logged, stored, or echoed on any failure path. On macOS Claude Code
+/// keeps the same JSON in the login Keychain instead of the file, so the
+/// file is tried first and the Keychain second. `CLAUDE_STATUSLINE_KEYCHAIN=0`
+/// keeps the read to the file, for tests and captures whose scratch HOME
+/// cannot isolate the login Keychain.
 fn read_access_token(credentials_path: &Path) -> Option<String> {
+    file_token(credentials_path).or_else(|| {
+        let disabled = std::env::var_os("CLAUDE_STATUSLINE_KEYCHAIN").is_some_and(|v| v == "0");
+        if disabled {
+            None
+        } else {
+            read_keychain_token()
+        }
+    })
+}
+
+fn file_token(credentials_path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(credentials_path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    token_from_credentials(&text)
+}
+
+fn token_from_credentials(text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
     value
         .get("claudeAiOauth")?
         .get("accessToken")?
         .as_str()
         .map(str::to_string)
+}
+
+/// The item Claude Code writes: service `Claude Code-credentials`, account
+/// the login user. The name check mirrors Claude Code's own, which stores
+/// under `claude-code-user` when $USER is not a plain identifier.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn keychain_account(user: Option<&str>) -> String {
+    match user {
+        Some(u)
+            if !u.is_empty()
+                && u.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-') =>
+        {
+            u.to_string()
+        }
+        _ => "claude-code-user".to_string(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_keychain_token() -> Option<String> {
+    let account = keychain_account(std::env::var("USER").ok().as_deref());
+    keychain_token_from(Path::new("security"), &account, fetch_timeout())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_keychain_token() -> Option<String> {
+    None
+}
+
+/// `security` can block on an unlock prompt, so the command is polled
+/// against the budget and killed and reaped when it runs out: a thread
+/// abandoned around `.output()` would leave the prompt and the process
+/// behind on every retry. The item is one short line, well inside the pipe
+/// buffer, so reading it after the exit cannot block.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn keychain_token_from(program: &Path, account: &str, budget: Duration) -> Option<String> {
+    use std::io::Read;
+    let mut child = Command::new(program)
+        .args([
+            "find-generic-password",
+            "-a",
+            account,
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-w",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut out = String::new();
+                child.stdout.take()?.read_to_string(&mut out).ok()?;
+                return token_from_credentials(out.trim());
+            }
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 /// The budget of every detached fetch: long enough for a slow network hop, short enough that
@@ -1483,7 +1595,7 @@ mod tests {
             calls.borrow_mut().push(url.to_string());
             answer(url)
         };
-        try_fetch_with(home, &fetch, now_ms);
+        try_fetch_with(home, &fetch, &file_token, now_ms);
         let snapshot = std::fs::read_to_string(cache_path_in(home))
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok());
@@ -1893,6 +2005,65 @@ mod tests {
             (snapshot.profile_next_at_ms, snapshot.profile_backoff_ms),
             (Some(now + 120_000), Some(120_000)),
             "a missing token books the ladder for the due profile kind"
+        );
+    }
+
+    #[test]
+    fn token_parses_from_the_credentials_shape_only() {
+        assert_eq!(
+            token_from_credentials(r#"{"claudeAiOauth": {"accessToken": "tok", "x": 1}}"#)
+                .as_deref(),
+            Some("tok")
+        );
+        assert!(token_from_credentials(r#"{"claudeAiOauth": {"accessToken": 5}}"#).is_none());
+        assert!(token_from_credentials(r#"{"accessToken": "tok"}"#).is_none());
+        assert!(token_from_credentials("not json").is_none());
+        assert!(token_from_credentials("").is_none());
+    }
+
+    #[test]
+    fn keychain_account_falls_back_for_an_unusable_user_name() {
+        assert_eq!(keychain_account(Some("flo")), "flo");
+        assert_eq!(keychain_account(Some("a.b_c-9")), "a.b_c-9");
+        assert_eq!(keychain_account(Some("bad name")), "claude-code-user");
+        assert_eq!(keychain_account(Some("")), "claude-code-user");
+        assert_eq!(keychain_account(None), "claude-code-user");
+    }
+
+    #[cfg(unix)]
+    fn fake_command(dir: &Path, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("security");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keychain_adapter_reads_the_item_and_gives_up_on_a_stuck_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = fake_command(
+            dir.path(),
+            "#!/bin/sh\n[ \"$1\" = find-generic-password ] || exit 1\n[ \"$3\" = flo ] || exit 1\n\
+             printf '%s\\n' '{\"claudeAiOauth\": {\"accessToken\": \"tok\"}}'\n",
+        );
+        assert_eq!(
+            keychain_token_from(&ok, "flo", Duration::from_secs(5)).as_deref(),
+            Some("tok")
+        );
+        let failing = fake_command(dir.path(), "#!/bin/sh\nexit 44\n");
+        assert!(keychain_token_from(&failing, "flo", Duration::from_secs(5)).is_none());
+
+        // security blocks on an unlock prompt: the adapter must return at the
+        // budget and leave no process behind.
+        let stuck = fake_command(dir.path(), "#!/bin/sh\nsleep 5\n");
+        let start = std::time::Instant::now();
+        assert!(keychain_token_from(&stuck, "flo", Duration::from_millis(200)).is_none());
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            start.elapsed()
         );
     }
 
