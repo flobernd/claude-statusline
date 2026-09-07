@@ -1222,6 +1222,131 @@ fn session_cache(home: &std::path::Path) -> std::path::PathBuf {
         .join(format!("{PROXY_SESSION}.json"))
 }
 
+/// Moves one of the session file's stamps back, standing in for the time a test cannot wait
+/// out. Aging `attempted_at_ms` past the fixture's interval makes the next poll ask; aging
+/// `fetched_at_ms` past the freshness ceiling makes the next tick read the answer as stale.
+fn age_stamp(path: &std::path::Path, field: &str, by_ms: u64) {
+    let mut cache: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let stamp = cache[field].as_u64().unwrap();
+    cache[field] = serde_json::json!(stamp - by_ms);
+    std::fs::write(path, cache.to_string()).unwrap();
+}
+
+/// The SGR run a chip opens with, so a test can tell a dimmed meter from a colored one.
+fn sgr(r: u8, g: u8, b: u8) -> String {
+    format!("\u{1b}[38;2;{r};{g};{b}m")
+}
+
+/// The plugin drops an account an hour after it last served and then answers 404 for the
+/// session. That is an idle session rather than a broken proxy, so the rows stay: the poll
+/// carries the last answer forward and the tick paints it with the meters dimmed.
+#[test]
+fn a_forgotten_session_keeps_its_rows_with_the_meters_dimmed() {
+    let home = proxy_home(true);
+    // The same port answers twice: the carry-forward only applies to the base URL of the stored
+    // answer, so a second responder on another port would prove nothing.
+    let (base, served) = serve_sequence(&[
+        ("200 OK", PROXY_BODY),
+        ("404 Not Found", r#"{"error":"unknown_session"}"#),
+    ]);
+    let env = [("ANTHROPIC_BASE_URL", base.as_str()), ("FORCE_COLOR", "1")];
+    fetch_proxy(home.path(), &base);
+    let path = session_cache(home.path());
+    age_stamp(&path, "attempted_at_ms", 3_601_000);
+    fetch_proxy(home.path(), &base);
+    assert_eq!(
+        served.join().unwrap().len(),
+        2,
+        "the second poll has to reach the plugin's 404"
+    );
+    // The attempt stamp stays fresh, so the tick reads the file instead of spawning a child that
+    // would rewrite it.
+    age_stamp(&path, "fetched_at_ms", 61_000);
+
+    let out = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().filter(|l| l.contains("5h:")).count(),
+        2,
+        "both rows survive the session the plugin forgot: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{}6%", sgr(86, 95, 137))),
+        "the meter must paint dim: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains(&format!("{}6%", sgr(158, 206, 106))),
+        "the meter must not keep its bar color: {stdout:?}"
+    );
+    assert!(
+        stdout.contains(&format!("{}biz@example.com", sgr(187, 154, 247))),
+        "an account does not age: {stdout:?}"
+    );
+}
+
+/// Extra usage renews monthly and its reset is derived from the answer rather than sent with it,
+/// so a carried answer has to keep the month it was read in. Forty days back crosses a boundary
+/// whatever the local timezone: the amount describes a month that has closed, so it goes while
+/// the rest of the row stays.
+#[test]
+fn a_carried_answer_loses_the_spend_of_a_closed_billing_month() {
+    let home = proxy_home(true);
+    let (base, served) = serve_once(PROXY_BODY);
+    fetch_proxy(home.path(), &base);
+    assert!(served.join().unwrap().is_some());
+    let path = session_cache(home.path());
+    // The attempt stamp stays fresh, so the tick reads the file instead of spawning a child.
+    age_stamp(&path, "fetched_at_ms", 40 * 24 * 3_600 * 1_000);
+    let out = run_statusline_with_env(
+        PROXY_PAYLOAD,
+        "200",
+        home.path(),
+        &[("ANTHROPIC_BASE_URL", &base), ("FORCE_COLOR", "1")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().filter(|l| l.contains("5h:")).count(),
+        2,
+        "the rows outlive the billing month: {stdout}"
+    );
+    assert!(
+        !stdout.contains("spend:"),
+        "an amount from a closed month must not pick up a fresh countdown: {stdout}"
+    );
+}
+
+/// The poll keeps running through the pause, so the first request after it puts the session back
+/// in the plugin's book and the meters return to their bar colors.
+#[test]
+fn a_dimmed_row_goes_live_again_once_the_plugin_answers() {
+    let home = proxy_home(true);
+    let (base, served) = serve_sequence(&[
+        ("200 OK", PROXY_BODY),
+        ("404 Not Found", r#"{"error":"unknown_session"}"#),
+        ("200 OK", PROXY_BODY),
+    ]);
+    let env = [("ANTHROPIC_BASE_URL", base.as_str()), ("FORCE_COLOR", "1")];
+    let path = session_cache(home.path());
+    for _ in 0..2 {
+        fetch_proxy(home.path(), &base);
+        age_stamp(&path, "attempted_at_ms", 3_601_000);
+    }
+    fetch_proxy(home.path(), &base);
+    assert_eq!(
+        served.join().unwrap().len(),
+        3,
+        "every poll of the three has to reach the route"
+    );
+
+    let out = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("{}6%", sgr(158, 206, 106))),
+        "the answered poll takes the row off dim: {stdout:?}"
+    );
+}
+
 #[test]
 fn proxy_route_feeds_one_row_per_account() {
     let home = proxy_home(true);
@@ -1354,26 +1479,34 @@ fn disabled_model_chip_hides_it_on_every_row() {
     assert!(!stdout.contains("claude-sonnet-5"), "stdout: {stdout}");
 }
 
+/// Whatever stopped the answer refreshing, a child that no longer lands as much as a plugin that
+/// forgot the session, the rows stay and the meters dim. The numbers are the last ones the route
+/// gave, and saying so beats taking the line away.
 #[test]
-fn stale_session_file_hides_the_line() {
+fn an_aged_session_file_dims_the_rows_instead_of_hiding_them() {
     let home = proxy_home(true);
     let (base, served) = serve_once(PROXY_BODY);
     fetch_proxy(home.path(), &base);
     assert!(served.join().unwrap().is_some());
     let path = session_cache(home.path());
-    let mut cache: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    let fetched = cache["fetched_at_ms"].as_u64().unwrap();
-    cache["fetched_at_ms"] = serde_json::json!(fetched - 61_000);
     // The attempt stamp stays fresh, so the tick must not spawn a child that would rewrite the file.
-    std::fs::write(&path, cache.to_string()).unwrap();
+    age_stamp(&path, "fetched_at_ms", 61_000);
     let out = run_statusline_with_env(
         PROXY_PAYLOAD,
         "200",
         home.path(),
-        &[("ANTHROPIC_BASE_URL", &base)],
+        &[("ANTHROPIC_BASE_URL", &base), ("FORCE_COLOR", "1")],
     );
-    assert!(!String::from_utf8_lossy(&out.stdout).contains("5h:"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().filter(|l| l.contains("5h:")).count(),
+        2,
+        "the rows outlive the answer's freshness: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{}6%", sgr(86, 95, 137))),
+        "the meter must paint dim: {stdout:?}"
+    );
 }
 
 #[test]
@@ -1478,10 +1611,10 @@ fn gateway_failure_is_remembered_for_five_minutes() {
 }
 
 /// A blip must not blank the line: the failing poll carries the stored answer forward, so the
-/// rows stay up until the freshness window runs out instead of going the moment one poll fails
-/// and then staying gone for the negative cache's five minutes.
+/// rows stay up instead of going the moment one poll fails and then staying gone for the
+/// negative cache's five minutes.
 #[test]
-fn failed_poll_keeps_the_last_answer_for_a_minute() {
+fn failed_poll_keeps_the_last_answer() {
     let home = proxy_home(true);
     // The same port answers twice: the carry-forward only applies to the base URL of the stored
     // answer, so a second responder on another port would prove nothing.
@@ -1494,11 +1627,7 @@ fn failed_poll_keeps_the_last_answer_for_a_minute() {
     let path = session_cache(home.path());
     // The stamp is aged past the fixture's hour-long interval rather than the file removed: the
     // file holds the answer the failing poll has to carry.
-    let mut cache: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    let attempted = cache["attempted_at_ms"].as_u64().unwrap();
-    cache["attempted_at_ms"] = serde_json::json!(attempted - 3_601_000);
-    std::fs::write(&path, cache.to_string()).unwrap();
+    age_stamp(&path, "attempted_at_ms", 3_601_000);
     fetch_proxy(home.path(), &base);
     assert_eq!(
         served.join().unwrap().len(),
@@ -1526,16 +1655,21 @@ fn failed_poll_keeps_the_last_answer_for_a_minute() {
         "retry_at_ms {retry_at_ms} must sit within five minutes of now {now_ms}"
     );
 
-    // Once the carried answer ages out the line hides. The attempt stamp stays fresh, so the
-    // tick reads the file instead of spawning a child that would rewrite it.
-    let mut cache: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    let fetched = cache["fetched_at_ms"].as_u64().unwrap();
-    cache["fetched_at_ms"] = serde_json::json!(fetched - 61_000);
-    std::fs::write(&path, cache.to_string()).unwrap();
-    let out = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &env);
+    // Once the carried answer ages out the rows dim rather than going. The attempt stamp stays
+    // fresh, so the tick reads the file instead of spawning a child that would rewrite it.
+    age_stamp(&path, "fetched_at_ms", 61_000);
+    let colored = [("ANTHROPIC_BASE_URL", base.as_str()), ("FORCE_COLOR", "1")];
+    let out = run_statusline_with_env(PROXY_PAYLOAD, "200", home.path(), &colored);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.contains("5h:"), "stdout: {stdout}");
+    assert_eq!(
+        stdout.lines().filter(|l| l.contains("5h:")).count(),
+        2,
+        "the rows outlive the carried answer's freshness: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{}6%", sgr(86, 95, 137))),
+        "the meter must paint dim: {stdout:?}"
+    );
 }
 
 #[test]

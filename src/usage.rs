@@ -320,12 +320,23 @@ pub struct Spend {
     pub resets_at: Option<i64>,
 }
 
+/// Whether the numbers still describe the session now. A stale set is the last answer the route
+/// gave: it keeps painting so an idle session does not lose its rows, with the meters dimmed so
+/// they cannot be read as current.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Freshness {
+    #[default]
+    Live,
+    Stale,
+}
+
 #[derive(Debug, Default)]
 pub struct Limits {
     pub session: Option<Window>,
     pub week: Option<Window>,
     pub fable: Option<Window>,
     pub spend: Option<Spend>,
+    pub freshness: Freshness,
 }
 
 /// The payload wins for session/week because it refreshes on every render
@@ -359,6 +370,10 @@ pub fn merge(
         spend: endpoint
             .and_then(|e| e.extra_usage.as_ref())
             .and_then(|extra| spend_from(extra, now_epoch_s)),
+        // The payload refreshes on every tick and the snapshot is the local login's own fetch,
+        // so the native path has nothing that outlives its source the way a carried route
+        // answer does.
+        freshness: Freshness::Live,
     }
 }
 
