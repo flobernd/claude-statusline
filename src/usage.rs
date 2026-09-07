@@ -784,30 +784,41 @@ pub(crate) fn fetch_timeout() -> Duration {
 }
 
 /// The only network touchpoint, kept separate so no test can reach it. A status error keeps
-/// the Retry-After of its response, so a 429 window is waited out rather than hammered.
+/// the Retry-After of its response, so a 429 window is waited out rather than hammered. ureq's
+/// timeouts do not cover DNS resolution, so the request runs on its own thread and the total
+/// budget is enforced by `recv_timeout`, which bounds a stuck resolver too.
 fn fetch_json(url: &str, token: &str) -> Fetched {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(fetch_timeout())
-        .timeout(fetch_timeout())
-        .build();
-    let response = agent
-        .get(url)
-        .set("Authorization", &format!("Bearer {token}"))
-        .set("anthropic-beta", "oauth-2025-04-20")
-        .call();
-    match response {
-        Ok(response) => match response.into_string() {
-            Ok(body) => Fetched::Body(body),
-            Err(_) => Fetched::Failed { retry_after: None },
-        },
-        Err(ureq::Error::Status(_, response)) => Fetched::Failed {
-            retry_after: backoff::retry_after(
-                response.header("Retry-After"),
-                (crate::clock::now_ms() / 1_000) as i64,
-            ),
-        },
-        Err(ureq::Error::Transport(_)) => Fetched::Failed { retry_after: None },
-    }
+    let total = fetch_timeout();
+    let url = url.to_string();
+    let token = token.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(total)
+            .timeout(total)
+            .build();
+        let response = agent
+            .get(&url)
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("anthropic-beta", "oauth-2025-04-20")
+            .call();
+        let result = match response {
+            Ok(response) => match response.into_string() {
+                Ok(body) => Fetched::Body(body),
+                Err(_) => Fetched::Failed { retry_after: None },
+            },
+            Err(ureq::Error::Status(_, response)) => Fetched::Failed {
+                retry_after: backoff::retry_after(
+                    response.header("Retry-After"),
+                    (crate::clock::now_ms() / 1_000) as i64,
+                ),
+            },
+            Err(ureq::Error::Transport(_)) => Fetched::Failed { retry_after: None },
+        };
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(total)
+        .unwrap_or(Fetched::Failed { retry_after: None })
 }
 
 /// Temp file plus rename so a render tick can never observe a half-written
