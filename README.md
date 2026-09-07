@@ -118,8 +118,9 @@ from that plugin instead. A detached child polls
 `<base-url>/v0/resource/plugins/cpa-claude-statusline/session?id=<session-id>` every
 `cli_proxy_usage_refresh_seconds` (default 5, the floor) into
 `~/.claude/claude-statusline-sessions/<session-id>.json`, and each render tick reads that file;
-the tick never waits on the network. An answer older than a minute is not shown. Files of
-sessions that ended are removed a day later.
+the tick never waits on the network. An answer older than a minute still paints, with its meters
+dimmed to the comment color, because it is the last reading the route gave rather than a current
+one. Files of sessions that ended are removed a day later.
 
 The proxy binds a session to a credential per model, so the main model, the auxiliary calls
 Claude Code makes on a smaller model, and a subagent on another model can each run on an
@@ -135,6 +136,15 @@ hidden, as it does for any other custom endpoint. A base URL that fails, by an a
 the plugin or by no answer at all, is not polled again for 5 minutes, remembered in
 `~/.claude/claude-statusline-proxy.json`. A session the plugin does not know yet is polled on
 the interval, because the first tick of a session comes before its first proxied request.
+
+The plugin forgets an account an hour after it last served, and answers 404 for a session once
+it has forgotten all of them. The rows survive that: an idle session keeps its last answer with
+the meters dimmed, and the next request puts it back on the live colors within a poll. A window
+still disappears once its own reset passes, and the spend belongs to the billing month the answer
+was read in, so it goes when that month closes rather than picking up the next month's countdown.
+A row that has outlived every meter shows the account, plan, and model alone, in their normal
+colors: the dim signal exists only while a meter does, and with `NO_COLOR` set there is no signal
+at all.
 
 ## Update notification
 
@@ -255,7 +265,10 @@ are plain magenta text.
 | `usage_spend`   | Label `spend:` comment; both dollar amounts and the percentage on the fill scale |
 | `usage_model`   | Magenta; the model id                                                          |
 
-Reset countdowns are comment throughout, as is the leading glyph that marks the line.
+Reset countdowns are comment throughout, as is the leading glyph that marks the line. Behind
+CLIProxyAPI a row whose answer has gone stale paints every percentage and dollar amount comment
+instead of on the fill scale; the account, plan, and model chips keep their magenta, because
+those do not go out of date.
 
 ### Subagent rows
 

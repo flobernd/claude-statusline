@@ -302,12 +302,12 @@ fn render(raw: &str) -> Option<String> {
         ) {
             let now_epoch_s = (clock::now_ms() / 1000) as i64;
             match &proxy {
-                Some(status) => status
+                Some((status, answer)) => status
                     .accounts
                     .iter()
                     .take(config.proxy_max_accounts())
                     .filter_map(|account| {
-                        let limits = proxy::limits(account, now_epoch_s);
+                        let limits = proxy::limits(account, now_epoch_s, *answer);
                         compose(
                             sections::line3(
                                 &limits,
@@ -412,7 +412,7 @@ fn proxy_status(
     config: &schema::Config,
     payload: &schema::Payload,
     endpoint: &usage::EndpointEnv,
-) -> Option<proxy::ProxyStatus> {
+) -> Option<(proxy::ProxyStatus, proxy::Answer)> {
     if !config.cli_proxy_usage_enabled {
         return None;
     }

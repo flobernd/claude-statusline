@@ -308,17 +308,21 @@ pub fn line3(
         let text = crate::plan::label(plan, None);
         push_visible(&mut out, "usage_plan", s.paint(&text, MAGENTA));
     }
+    let fresh = limits.freshness;
     if let Some(w) = &limits.session {
-        out.push(("usage_session", window_chip(s, "5h", w, now_epoch_s)));
+        out.push(("usage_session", window_chip(s, "5h", w, now_epoch_s, fresh)));
     }
     if let Some(w) = &limits.week {
-        out.push(("usage_week", window_chip(s, "7d", w, now_epoch_s)));
+        out.push(("usage_week", window_chip(s, "7d", w, now_epoch_s, fresh)));
     }
     if let Some(w) = &limits.fable {
-        out.push(("usage_fable", window_chip(s, "fable", w, now_epoch_s)));
+        out.push((
+            "usage_fable",
+            window_chip(s, "fable", w, now_epoch_s, fresh),
+        ));
     }
     if let Some(spend) = &limits.spend
-        && let Some(chip) = spend_chip(s, spend, now_epoch_s)
+        && let Some(chip) = spend_chip(s, spend, now_epoch_s, fresh)
     {
         out.push(("usage_spend", chip));
     }
@@ -356,13 +360,29 @@ pub fn with_line_glyph(
     chips
 }
 
-fn window_chip(s: &Style, label: &str, w: &crate::usage::Window, now_epoch_s: i64) -> String {
+/// A stale row's meters paint in the comment color. Its percentages are the last ones the route
+/// gave and another session on the same account moves them, so a bar color would claim a reading
+/// nobody took; the label, the countdown and the width are unaffected.
+fn meter_color(freshness: crate::usage::Freshness, pct: f64) -> crate::theme::Rgb {
+    match freshness {
+        crate::usage::Freshness::Live => crate::bar::bar_color(pct),
+        crate::usage::Freshness::Stale => COMMENT,
+    }
+}
+
+fn window_chip(
+    s: &Style,
+    label: &str,
+    w: &crate::usage::Window,
+    now_epoch_s: i64,
+    freshness: crate::usage::Freshness,
+) -> String {
     format!(
         "{}{}{}",
         s.paint(&format!("{label}:"), COMMENT),
         s.paint(
             &format!("{}%", w.pct.round() as u64),
-            crate::bar::bar_color(w.pct)
+            meter_color(freshness, w.pct)
         ),
         countdown(s, w.resets_at, now_epoch_s),
     )
@@ -382,9 +402,14 @@ fn countdown(s: &Style, resets_at: Option<i64>, now_epoch_s: i64) -> String {
 
 /// A spend entry without a percentage (a zero limit with no reported
 /// utilization) has no meaningful meter and no color, so no chip.
-fn spend_chip(s: &Style, spend: &crate::usage::Spend, now_epoch_s: i64) -> Option<String> {
+fn spend_chip(
+    s: &Style,
+    spend: &crate::usage::Spend,
+    now_epoch_s: i64,
+    freshness: crate::usage::Freshness,
+) -> Option<String> {
     let pct = spend.pct?;
-    let color = crate::bar::bar_color(pct);
+    let color = meter_color(freshness, pct);
     let pct_text = format!("{}%", pct.round() as u64);
     let meter = match (spend.used_cents, spend.limit_cents) {
         (Some(used), Some(limit)) => format!(
@@ -523,6 +548,7 @@ fn sample_limits() -> crate::usage::Limits {
             pct: Some(100.2),
             resets_at: Some(USAGE_SAMPLE_NOW_S + 691_200),
         }),
+        freshness: crate::usage::Freshness::Live,
     }
 }
 
@@ -992,6 +1018,7 @@ mod tests {
                 pct: Some(100.2),
                 resets_at: Some(USAGE_NOW_S + 691_200),
             }),
+            freshness: crate::usage::Freshness::Live,
         }
     }
 
@@ -1009,6 +1036,69 @@ mod tests {
             text_of(&chips, "usage_spend"),
             "spend:$1002/$1000 (100%) (8d)"
         );
+    }
+
+    fn sgr(c: crate::theme::Rgb) -> String {
+        format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
+    }
+
+    #[test]
+    fn a_stale_row_dims_its_meters_and_keeps_the_identity_chips() {
+        let colored = Style {
+            colors: true,
+            links: false,
+        };
+        let row = |limits: &crate::usage::Limits| {
+            line3(
+                limits,
+                Some("max"),
+                Some("biz@example.com"),
+                Some("claude-opus-5"),
+                &colored,
+                USAGE_NOW_S,
+            )
+        };
+        let live = row(&full_limits());
+        let stale = row(&crate::usage::Limits {
+            freshness: crate::usage::Freshness::Stale,
+            ..full_limits()
+        });
+
+        assert_eq!(
+            names(&stale),
+            names(&live),
+            "staleness marks the row, it must not drop a chip"
+        );
+        for (meter, pct) in [
+            ("usage_session", 42.0),
+            ("usage_week", 63.0),
+            ("usage_fable", 81.0),
+            ("usage_spend", 100.2),
+        ] {
+            let bar = sgr(crate::bar::bar_color(pct));
+            let (live_text, stale_text) = (text_of(&live, meter), text_of(&stale, meter));
+            assert!(live_text.contains(&bar), "live {meter}: {live_text:?}");
+            assert!(
+                !stale_text.contains(&bar),
+                "stale {meter} keeps its bar color: {stale_text:?}"
+            );
+            assert!(
+                stale_text.contains(&sgr(COMMENT)),
+                "stale {meter} is not dimmed: {stale_text:?}"
+            );
+            assert_eq!(
+                crate::fit::visible_width(stale_text),
+                crate::fit::visible_width(live_text),
+                "stale {meter} changed the row's width"
+            );
+        }
+        for identity in ["usage_account", "usage_plan", "usage_model"] {
+            let text = text_of(&stale, identity);
+            assert!(
+                text.contains(&sgr(MAGENTA)),
+                "an account, plan or model does not age: {text:?}"
+            );
+        }
     }
 
     #[test]

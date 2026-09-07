@@ -3,7 +3,7 @@
 //! files the child writes, and the negative cache file.
 
 use crate::schema::{self, lenient, lenient_vec};
-use crate::usage::{Limits, Window};
+use crate::usage::{Freshness, Limits, Window};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -177,10 +177,21 @@ pub(crate) fn classify(status: u16, body: &str) -> RouteResult {
     }
 }
 
-/// A window whose reset has passed is dropped, as Claude Code drops stale payload windows;
-/// spend is built by `usage::spend_from_parts`, the same amounts-first rule the native endpoint
-/// uses.
-pub fn limits(account: &ProxyAccount, now_epoch_s: i64) -> Limits {
+/// The stored answer's age, as the two facts a row needs from it. The stamp is what pins spend
+/// to the month the route reported it in: unlike a window's reset, which the plugin sends, the
+/// spend reset is derived, so computing it from the render clock would roll a frozen amount
+/// forward into a month it never described.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Answer {
+    pub fetched_at_s: i64,
+    pub freshness: Freshness,
+}
+
+/// A window whose reset has passed is dropped, as Claude Code drops stale payload windows.
+/// Spend is built by `usage::spend_from_parts`, the same amounts-first rule the native endpoint
+/// uses, but from the answer's own stamp, and it is dropped on the same passed-reset rule: an
+/// amount from a closed billing month describes nothing the user can still spend against.
+pub fn limits(account: &ProxyAccount, now_epoch_s: i64, answer: Answer) -> Limits {
     let window = |w: Option<&ProxyWindow>| -> Option<Window> {
         let w = w?;
         let pct = w.used_percentage?;
@@ -197,14 +208,19 @@ pub fn limits(account: &ProxyAccount, now_epoch_s: i64) -> Limits {
         session: window(windows.and_then(|w| w.five_hour.as_ref())),
         week: window(windows.and_then(|w| w.seven_day.as_ref())),
         fable: window(windows.and_then(|w| w.fable.as_ref())),
-        spend: account.spend.as_ref().and_then(|s| {
-            crate::usage::spend_from_parts(
-                s.used_cents,
-                s.limit_cents,
-                s.used_percentage,
-                now_epoch_s,
-            )
-        }),
+        spend: account
+            .spend
+            .as_ref()
+            .and_then(|s| {
+                crate::usage::spend_from_parts(
+                    s.used_cents,
+                    s.limit_cents,
+                    s.used_percentage,
+                    answer.fetched_at_s,
+                )
+            })
+            .filter(|s| s.resets_at.is_none_or(|at| at > now_epoch_s)),
+        freshness: answer.freshness,
     }
 }
 
@@ -294,9 +310,10 @@ pub fn forget_failure(cache: &mut NegativeCache, base_url: &str) -> bool {
     cache.remove(&cache_key(base_url)).is_some()
 }
 
-/// A stored route answer older than this is not shown: the plugin refreshes on every poll, so
-/// a minute of silence means the child stopped landing and the line must not paint numbers that
-/// no longer describe the session.
+/// A stored route answer older than this paints dimmed: the plugin refreshes on every poll, so
+/// a minute of silence means the numbers stopped tracking the session and the line must not
+/// offer them as current. It marks them rather than dropping them, because an idle session is
+/// the common reason and losing the rows there costs more than the frozen meters do.
 pub const STATUS_MAX_AGE_S: u64 = 60;
 
 /// Session files last written more than this long ago are the leftovers of ended sessions.
@@ -353,18 +370,30 @@ fn same_base(cache: &SessionCache, base_url: &str) -> bool {
         .is_some_and(|b| cache_key(b) == cache_key(base_url))
 }
 
-/// The stored answer, when it is this base URL's, fresh, and still the plugin's shape. A stamp
-/// further ahead than the ceiling reads as expired, the rule `fetch_due` applies to its own
-/// stamp, so a clock that jumped forward and back cannot freeze numbers on the line.
-pub fn cached_status(cache: &SessionCache, base_url: &str, now_ms: u64) -> Option<ProxyStatus> {
+/// The stored answer, when it is this base URL's and still the plugin's shape, with how well it
+/// still describes the session. Age decides `Live` or `Stale` rather than whether to answer at
+/// all: the row survives an idle session, dimmed. A stamp further ahead than the ceiling reads
+/// as stale, the rule `fetch_due` applies to its own stamp, so a clock that jumped forward and
+/// back marks the numbers rather than trusting them.
+pub fn cached_status(
+    cache: &SessionCache,
+    base_url: &str,
+    now_ms: u64,
+) -> Option<(ProxyStatus, Answer)> {
     if !same_base(cache, base_url) {
         return None;
     }
     let fetched = cache.fetched_at_ms?;
-    if fetched.abs_diff(now_ms) > STATUS_MAX_AGE_S.saturating_mul(1_000) {
-        return None;
-    }
-    parse_status(&cache.status.as_ref()?.to_string())
+    let freshness = if fetched.abs_diff(now_ms) > STATUS_MAX_AGE_S.saturating_mul(1_000) {
+        Freshness::Stale
+    } else {
+        Freshness::Live
+    };
+    let answer = Answer {
+        fetched_at_s: (fetched / 1_000) as i64,
+        freshness,
+    };
+    Some((parse_status(&cache.status.as_ref()?.to_string())?, answer))
 }
 
 /// Due without a file, for another base URL, or once the attempt stamp is an interval old. A
@@ -402,10 +431,10 @@ fn new_attempt(base_url: &str, now_ms: u64) -> SessionCache {
     }
 }
 
-/// The same stamped attempt with the previous answer riding along, so one failed poll shows the
-/// last numbers until `cached_status`'s freshness window runs out instead of blanking the line at
-/// once and then holding it blank for the negative cache's wait. An answer stored for another
-/// base URL is dropped: it belongs to another proxy.
+/// The same stamped attempt with the previous answer riding along, so a poll that brings nothing
+/// back keeps showing the last numbers instead of blanking the line at once and then holding it
+/// blank for the negative cache's wait. An answer stored for another base URL is dropped: it
+/// belongs to another proxy.
 fn carried_attempt(previous: Option<&SessionCache>, base_url: &str, now_ms: u64) -> SessionCache {
     let kept = previous.filter(|c| same_base(c, base_url));
     SessionCache {
@@ -491,9 +520,15 @@ fn try_fetch(session_id: &str) -> Option<()> {
             crate::usage::write_json_atomic(&path, &next)?;
             Some(())
         }
-        // The plugin answered and knows nothing of the session, so nothing about it is worth
-        // keeping: no status is stored and the next tick hides the line.
-        RouteResult::UnknownSession => crate::usage::write_json_atomic(&path, &next),
+        // The plugin knows nothing of this session: either it has not served a request from it
+        // yet, or it dropped the account an hour after the last response. The second case is an
+        // idle session on a working proxy, so the stored answer rides along and the rows stay up
+        // dimmed rather than going the moment the user pauses. A session that never had an
+        // answer has nothing to carry, so the first case still paints nothing.
+        RouteResult::UnknownSession => {
+            let forgotten = carried_attempt(previous.as_ref(), &base, now);
+            crate::usage::write_json_atomic(&path, &forgotten)
+        }
         // Rejected names a gateway that answered without the plugin; Unreachable names one
         // that gave no answer at all. Both book the same wait by decision, so a slow or
         // restarting gateway costs the poll the same as an absent plugin.
@@ -581,6 +616,13 @@ mod tests {
 
     const NOW: i64 = 1_756_820_000;
 
+    fn live(fetched_at_s: i64) -> Answer {
+        Answer {
+            fetched_at_s,
+            freshness: Freshness::Live,
+        }
+    }
+
     #[test]
     fn cache_ids_are_file_name_safe() {
         for ok in ["11111111-2222-4333-8444-555555555555", "a", "A_b.c-9"] {
@@ -626,25 +668,8 @@ mod tests {
             Some(TWO_ACCOUNTS),
         );
         assert_eq!(
-            cached_status(&good, BASE, NOW_MS).map(|s| s.accounts.len()),
-            Some(2)
-        );
-        let stale = cache(
-            BASE,
-            Some(NOW_MS),
-            Some(NOW_MS - 61_000),
-            Some(TWO_ACCOUNTS),
-        );
-        assert!(cached_status(&stale, BASE, NOW_MS).is_none());
-        let ahead = cache(
-            BASE,
-            Some(NOW_MS),
-            Some(NOW_MS + 61_000),
-            Some(TWO_ACCOUNTS),
-        );
-        assert!(
-            cached_status(&ahead, BASE, NOW_MS).is_none(),
-            "a stamp beyond the ceiling reads as expired, as it does for the poll"
+            cached_status(&good, BASE, NOW_MS).map(|(s, a)| (s.accounts.len(), a.freshness)),
+            Some((2, Freshness::Live))
         );
         let other = cache(
             "http://other:1",
@@ -675,6 +700,37 @@ mod tests {
     }
 
     #[test]
+    fn cached_status_marks_an_aged_answer_stale_instead_of_dropping_it() {
+        let stale = cache(
+            BASE,
+            Some(NOW_MS),
+            Some(NOW_MS - 61_000),
+            Some(TWO_ACCOUNTS),
+        );
+        assert_eq!(
+            cached_status(&stale, BASE, NOW_MS).map(|(s, a)| (s.accounts.len(), a.freshness)),
+            Some((2, Freshness::Stale)),
+            "the last answer keeps painting once it ages out"
+        );
+        assert_eq!(
+            cached_status(&stale, BASE, NOW_MS).map(|(_, a)| a.fetched_at_s),
+            Some(((NOW_MS - 61_000) / 1_000) as i64),
+            "the stamp rides along, so spend keeps the billing month it was read in"
+        );
+        let ahead = cache(
+            BASE,
+            Some(NOW_MS),
+            Some(NOW_MS + 61_000),
+            Some(TWO_ACCOUNTS),
+        );
+        assert_eq!(
+            cached_status(&ahead, BASE, NOW_MS).map(|(_, a)| a.freshness),
+            Some(Freshness::Stale),
+            "a stamp beyond the ceiling reads as stale, as it reads as expired for the poll"
+        );
+    }
+
+    #[test]
     fn a_new_attempt_keeps_userinfo_out_of_the_session_file() {
         let raw = "http://u:p@127.0.0.1:8317";
         let attempt = new_attempt(raw, NOW_MS);
@@ -699,9 +755,9 @@ mod tests {
             (Some(NOW_MS), Some(2))
         );
         assert_eq!(
-            cached_status(&carried, BASE, 2).map(|s| s.accounts.len()),
+            cached_status(&carried, BASE, 2).map(|(s, _)| s.accounts.len()),
             Some(2),
-            "the last answer still paints until it ages out"
+            "the last answer rides along for the next tick to paint"
         );
         let other = cache("http://other:1", Some(1), Some(2), Some(TWO_ACCOUNTS));
         let switched = carried_attempt(Some(&other), BASE, NOW_MS);
@@ -1002,7 +1058,7 @@ mod tests {
             past = NOW - 1
         );
         let status = parse_status(&body).unwrap();
-        let limits = limits(&status.accounts[0], NOW);
+        let limits = limits(&status.accounts[0], NOW, live(NOW));
         assert_eq!(limits.session.as_ref().map(|w| w.pct), Some(6.0));
         assert!(limits.week.is_none(), "an expired window must drop");
         assert_eq!(
@@ -1022,12 +1078,34 @@ mod tests {
         let with_percent =
             parse_status(r#"{"schema":1,"accounts":[{"spend":{"used_percentage":40}}]}"#).unwrap();
         assert_eq!(
-            limits(&with_percent.accounts[0], NOW)
+            limits(&with_percent.accounts[0], NOW, live(NOW))
                 .spend
                 .and_then(|s| s.pct),
             Some(40.0)
         );
         let without = parse_status(r#"{"schema":1,"accounts":[{"spend":{}}]}"#).unwrap();
-        assert!(limits(&without.accounts[0], NOW).spend.is_none());
+        assert!(limits(&without.accounts[0], NOW, live(NOW)).spend.is_none());
+    }
+
+    #[test]
+    fn a_carried_answer_drops_the_spend_of_a_billing_month_that_closed() {
+        let status = parse_status(
+            r#"{"schema":1,"accounts":[{"spend":{"used_cents":1234,"limit_cents":5000}}]}"#,
+        )
+        .unwrap();
+        let account = &status.accounts[0];
+        assert!(
+            limits(account, NOW, live(NOW - 3_600)).spend.is_some(),
+            "an answer from the current billing month keeps its meter"
+        );
+        // Forty days back crosses a month boundary whatever the local timezone.
+        let closed = Answer {
+            fetched_at_s: NOW - 40 * 86_400,
+            freshness: Freshness::Stale,
+        };
+        assert!(
+            limits(account, NOW, closed).spend.is_none(),
+            "the amount describes a month that has ended, so the meter goes with it"
+        );
     }
 }
