@@ -4,6 +4,7 @@ mod commands;
 mod fit;
 mod format;
 mod git;
+mod plan;
 mod proxy;
 mod schema;
 mod sections;
@@ -306,13 +307,16 @@ fn render(raw: &str) -> Option<String> {
                         snapshot.as_ref().map(|s| &s.utilization),
                         now_epoch_s,
                     );
-                    let plan = account
-                        .organization_type
-                        .as_deref()
-                        .and_then(|t| t.strip_prefix("claude_"))
-                        .map(str::to_string);
+                    let (email, plan) = native_account(snapshot.as_ref(), &account);
                     compose(
-                        sections::line3(&limits, plan.as_deref(), None, None, &style, now_epoch_s),
+                        sections::line3(
+                            &limits,
+                            plan.as_deref(),
+                            email.as_deref(),
+                            None,
+                            &style,
+                            now_epoch_s,
+                        ),
                         LINE3_DROP,
                         true,
                     )
@@ -403,6 +407,23 @@ fn proxy_status(
     proxy::cached_status(cache.as_ref()?, &base, now)
 }
 
+/// The fetched profile names the account the numbers belong to. The local
+/// file fills each gap: before the first child run, when the fetch is off,
+/// and for a field the endpoint left empty.
+fn native_account(
+    snapshot: Option<&usage::Snapshot>,
+    account: &schema::AccountInfo,
+) -> (Option<String>, Option<String>) {
+    let profile = snapshot.and_then(|s| s.profile.as_ref());
+    let email = profile
+        .and_then(|p| p.email.clone())
+        .or_else(|| account.email.clone());
+    let plan = profile
+        .and_then(|p| p.plan.clone())
+        .or_else(|| plan::derive(account.organization_type.as_deref(), None, None, None));
+    (email, plan)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,6 +434,7 @@ mod tests {
         let account = schema::AccountInfo {
             organization_type: Some("claude_max".to_string()),
             account_uuid: None,
+            email: None,
         };
         let official = usage::EndpointEnv::default();
         assert!(!usage_line_enabled(
@@ -442,10 +464,12 @@ mod tests {
         let native = schema::AccountInfo {
             organization_type: Some("claude_enterprise".to_string()),
             account_uuid: None,
+            email: None,
         };
         let external = schema::AccountInfo {
             organization_type: Some("external".to_string()),
             account_uuid: None,
+            email: None,
         };
         let unknown = schema::AccountInfo::default();
         let official = usage::EndpointEnv::default();
@@ -479,6 +503,7 @@ mod tests {
         let native = schema::AccountInfo {
             organization_type: Some("claude_max".to_string()),
             account_uuid: None,
+            email: None,
         };
         let custom = usage::EndpointEnv {
             base_url: Some("https://gateway.example.com".to_string()),
@@ -527,5 +552,46 @@ mod tests {
         assert!(!usage_line_enabled(
             &enabled, &without, &unknown, &custom, false
         ));
+    }
+
+    #[test]
+    fn native_account_prefers_the_snapshot_profile_per_field() {
+        let account = schema::AccountInfo {
+            organization_type: Some("claude_max".to_string()),
+            account_uuid: None,
+            email: Some("local@example.com".to_string()),
+        };
+        assert_eq!(
+            native_account(None, &account),
+            (
+                Some("local@example.com".to_string()),
+                Some("max".to_string())
+            )
+        );
+        let fetched = usage::Snapshot {
+            profile: Some(usage::Profile {
+                email: Some("fetched@example.com".to_string()),
+                plan: Some("team".to_string()),
+            }),
+            ..usage::Snapshot::default()
+        };
+        assert_eq!(
+            native_account(Some(&fetched), &account),
+            (
+                Some("fetched@example.com".to_string()),
+                Some("team".to_string())
+            )
+        );
+        let partial = usage::Snapshot {
+            profile: Some(usage::Profile::default()),
+            ..usage::Snapshot::default()
+        };
+        assert_eq!(
+            native_account(Some(&partial), &account),
+            (
+                Some("local@example.com".to_string()),
+                Some("max".to_string())
+            )
+        );
     }
 }

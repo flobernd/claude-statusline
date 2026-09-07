@@ -1597,6 +1597,58 @@ fn line3_drop_order_keeps_the_session_window() {
     );
 }
 
+fn native_home(snapshot: Option<&str>) -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join(".claude");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("claude-statusline.json"),
+        r#"{"advanced_usage_limits_enabled": true, "usage_fetch_interval_seconds": 0}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join(".claude.json"),
+        r#"{"oauthAccount": {"organizationType": "claude_max", "accountUuid": "acct-1",
+            "emailAddress": "local@example.com"}}"#,
+    )
+    .unwrap();
+    if let Some(body) = snapshot {
+        std::fs::write(dir.join("claude-statusline-usage.json"), body).unwrap();
+    }
+    home
+}
+
+const NATIVE_PAYLOAD: &str =
+    r#"{"rate_limits": {"five_hour": {"used_percentage": 42, "resets_at": 4102444800}}}"#;
+
+#[test]
+fn native_usage_line_shows_the_local_email_without_a_snapshot() {
+    let home = native_home(None);
+    let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("local@example.com"), "stdout: {stdout}");
+    assert!(stdout.contains("Max"), "stdout: {stdout}");
+    assert!(stdout.contains("5h:42%"), "stdout: {stdout}");
+}
+
+#[test]
+fn native_usage_line_prefers_the_snapshot_profile() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let snapshot = format!(
+        r#"{{"fetched_at_ms": {now}, "account_uuid": "acct-1", "utilization": {{}},
+            "profile": {{"email": "fetched@example.com", "plan": "team"}}, "profile_fetched_at_ms": {now}}}"#
+    );
+    let home = native_home(Some(&snapshot));
+    let out = run_statusline(NATIVE_PAYLOAD, "200", home.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("fetched@example.com"), "stdout: {stdout}");
+    assert!(stdout.contains("Team"), "stdout: {stdout}");
+    assert!(!stdout.contains("local@example.com"), "stdout: {stdout}");
+}
+
 #[test]
 fn missing_workspace_dir_renders_the_red_branch_chip() {
     let home = tempfile::tempdir().unwrap();

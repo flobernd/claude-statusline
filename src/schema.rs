@@ -238,6 +238,8 @@ pub struct AccountInfo {
     pub organization_type: Option<String>,
     #[serde(default, deserialize_with = "lenient", rename = "accountUuid")]
     pub account_uuid: Option<String>,
+    #[serde(default, deserialize_with = "lenient", rename = "emailAddress")]
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -435,12 +437,13 @@ mod tests {
         let path = dir.path().join(".claude.json");
         std::fs::write(
             &path,
-            r#"{"oauthAccount":{"organizationType":"claude_max","accountUuid":"u-1"}}"#,
+            r#"{"oauthAccount":{"organizationType":"claude_max","accountUuid":"u-1","emailAddress":"me@example.com"}}"#,
         )
         .unwrap();
         let info = load_account_info(&path);
         assert_eq!(info.organization_type.as_deref(), Some("claude_max"));
         assert_eq!(info.account_uuid.as_deref(), Some("u-1"));
+        assert_eq!(info.email.as_deref(), Some("me@example.com"));
     }
 
     #[test]
