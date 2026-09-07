@@ -2,8 +2,11 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// The newest assistant message is at the end of the file by definition,
-/// so a small tail always reaches it.
+/// so a small tail usually reaches it. A tool result larger than the tail
+/// cuts it, and then the window doubles until a complete record answers,
+/// the window reaches the file's start, or the ceiling is hit.
 const TAIL_BYTES: u64 = 64 * 1024;
+const TAIL_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 pub fn last_assistant_timestamp_ms(path: &str) -> Option<i64> {
     let root = crate::schema::home_dir()?.join(".claude");
@@ -13,53 +16,87 @@ pub fn last_assistant_timestamp_ms(path: &str) -> Option<i64> {
 /// transcript_path is external input; require the resolved real path to
 /// live under the allowed root so a hostile payload cannot make us read
 /// arbitrary files.
-fn tail_text(path: &str, allowed_root: &Path) -> Option<String> {
+fn open_under(path: &str, allowed_root: &Path) -> Option<std::fs::File> {
     let real = Path::new(path).canonicalize().ok()?;
     let root = allowed_root.canonicalize().ok()?;
     if !real.starts_with(&root) {
         return None;
     }
-    let mut f = std::fs::File::open(&real).ok()?;
-    let size = f.metadata().ok()?.len();
-    if size == 0 {
-        return None;
-    }
-    let start = size.saturating_sub(TAIL_BYTES);
+    std::fs::File::open(&real).ok()
+}
+
+/// The last `bytes` of the file as complete lines, and whether the first
+/// line was dropped: a window that does not begin at a newline cannot know
+/// where its first record started.
+fn tail_lines(f: &mut std::fs::File, size: u64, bytes: u64) -> Option<(String, bool)> {
+    let start = size.saturating_sub(bytes);
     f.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).ok()?;
     let mut text = String::from_utf8_lossy(&buf).into_owned();
+    let mut cut = false;
     if start > 0 && !text.starts_with('\n') {
-        let cut = text.find('\n')?; // partial first line when the tail starts mid-line
-        text.drain(..=cut);
+        match text.find('\n') {
+            Some(at) => {
+                text.drain(..=at);
+            }
+            None => text.clear(),
+        }
+        cut = true;
     }
-    Some(text)
+    Some((text, cut))
+}
+
+/// Reads a growing tail until `find` answers or the window covers the
+/// whole file or the ceiling. Growth does not stop at a window that
+/// starts on a record boundary: the record before that boundary is still
+/// unread, and only the file's start or the ceiling says there is nothing
+/// left to read.
+fn scan_tail<T>(path: &str, allowed_root: &Path, find: impl Fn(&str) -> Option<T>) -> Option<T> {
+    let mut f = open_under(path, allowed_root)?;
+    let size = f.metadata().ok()?.len();
+    if size == 0 {
+        return None;
+    }
+    let mut bytes = TAIL_BYTES;
+    loop {
+        let (text, _) = tail_lines(&mut f, size, bytes)?;
+        if let Some(found) = find(&text) {
+            return Some(found);
+        }
+        if bytes >= TAIL_MAX_BYTES || bytes >= size {
+            return None;
+        }
+        bytes = (bytes * 2).min(TAIL_MAX_BYTES);
+    }
 }
 
 pub fn last_assistant_ts_under(path: &str, allowed_root: &Path) -> Option<i64> {
-    let text = tail_text(path, allowed_root)?;
-    for line in text.split('\n').rev() {
-        // Cheap substring pre-filter before json parsing each line.
-        if !line.contains("\"assistant\"") || !line.contains("\"timestamp\"") {
-            continue;
+    scan_tail(path, allowed_root, |text| {
+        for line in text.split('\n').rev() {
+            // Cheap substring pre-filter before json parsing each line.
+            if !line.contains("\"assistant\"") || !line.contains("\"timestamp\"") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let is_assistant = v.pointer("/message/role").and_then(|r| r.as_str())
+                == Some("assistant")
+                || v.get("role").and_then(|r| r.as_str()) == Some("assistant");
+            if !is_assistant {
+                continue;
+            }
+            if let Some(ts) = v
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .and_then(parse_iso8601_ms)
+            {
+                return Some(ts);
+            }
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let is_assistant = v.pointer("/message/role").and_then(|r| r.as_str()) == Some("assistant")
-            || v.get("role").and_then(|r| r.as_str()) == Some("assistant");
-        if !is_assistant {
-            continue;
-        }
-        if let Some(ts) = v
-            .get("timestamp")
-            .and_then(|t| t.as_str())
-            .and_then(parse_iso8601_ms)
-        {
-            return Some(ts);
-        }
-    }
-    None
+        None
+    })
 }
 
 /// The two TTLs the cache API offers; the transcript reports written
@@ -77,32 +114,33 @@ pub fn last_cache_ttl_ms(path: &str) -> Option<i64> {
 /// both buckets reports the longer TTL: red means certainly expired, which
 /// only holds past the longest TTL written.
 pub fn last_cache_ttl_under(path: &str, allowed_root: &Path) -> Option<i64> {
-    let text = tail_text(path, allowed_root)?;
-    for line in text.split('\n').rev() {
-        // Cheap substring pre-filter before json parsing each line. The
-        // closing quote keeps cache_creation_input_tokens from matching.
-        if !line.contains("\"cache_creation\"") {
-            continue;
+    scan_tail(path, allowed_root, |text| {
+        for line in text.split('\n').rev() {
+            // Cheap substring pre-filter before json parsing each line. The
+            // closing quote keeps cache_creation_input_tokens from matching.
+            if !line.contains("\"cache_creation\"") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let Some(cc) = v.pointer("/message/usage/cache_creation") else {
+                continue;
+            };
+            let written = |field: &str| {
+                cc.get(field)
+                    .and_then(|t| t.as_f64())
+                    .is_some_and(|t| t > 0.0)
+            };
+            if written("ephemeral_1h_input_tokens") {
+                return Some(TTL_1H_MS);
+            }
+            if written("ephemeral_5m_input_tokens") {
+                return Some(TTL_5M_MS);
+            }
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let Some(cc) = v.pointer("/message/usage/cache_creation") else {
-            continue;
-        };
-        let written = |field: &str| {
-            cc.get(field)
-                .and_then(|t| t.as_f64())
-                .is_some_and(|t| t > 0.0)
-        };
-        if written("ephemeral_1h_input_tokens") {
-            return Some(TTL_1H_MS);
-        }
-        if written("ephemeral_5m_input_tokens") {
-            return Some(TTL_5M_MS);
-        }
-    }
-    None
+        None
+    })
 }
 
 /// Parse "YYYY-MM-DDTHH:MM:SS(.fff...)Z" (or "+00:00") to epoch ms.
@@ -374,5 +412,78 @@ mod tests {
             ],
         );
         assert_eq!(last_cache_ttl_under(&path, dir.path()), None);
+    }
+
+    #[test]
+    fn a_record_larger_than_the_tail_does_not_hide_the_assistant_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = format!(
+            r#"{{"type":"user","tool_result":"{}"}}"#,
+            "x".repeat(3 * TAIL_BYTES as usize)
+        );
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"assistant","timestamp":"2026-07-02T23:00:49.920Z","message":{"role":"assistant","usage":{"cache_creation":{"ephemeral_1h_input_tokens":9}}}}"#,
+                big.as_str(),
+            ],
+        );
+        assert_eq!(
+            last_assistant_ts_under(&path, dir.path()),
+            Some(1_783_033_249_920)
+        );
+        assert_eq!(last_cache_ttl_under(&path, dir.path()), Some(TTL_1H_MS));
+    }
+
+    #[test]
+    fn the_tail_stops_growing_at_its_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = format!(
+            r#"{{"type":"user","tool_result":"{}"}}"#,
+            "x".repeat(TAIL_MAX_BYTES as usize + 1024)
+        );
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[
+                r#"{"type":"assistant","timestamp":"2026-07-02T23:00:49.920Z","message":{"role":"assistant"}}"#,
+                big.as_str(),
+            ],
+        );
+        assert_eq!(last_assistant_ts_under(&path, dir.path()), None);
+    }
+
+    #[test]
+    fn a_window_that_starts_on_a_record_boundary_keeps_growing() {
+        let dir = tempfile::tempdir().unwrap();
+        let assistant = r#"{"type":"assistant","timestamp":"2026-07-02T23:00:49.920Z","message":{"role":"assistant","usage":{"cache_creation":{"ephemeral_1h_input_tokens":9}}}}"#;
+        // The user record is sized so the second window (128 KiB) starts
+        // exactly on the newline that follows the assistant record.
+        let prefix = r#"{"type":"user","tool_result":""#;
+        let suffix = r#""}"#;
+        let pad = 2 * TAIL_BYTES as usize - 2 - prefix.len() - suffix.len();
+        let big = format!("{prefix}{}{suffix}", "x".repeat(pad));
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, format!("{assistant}\n{big}\n")).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        assert_eq!(
+            last_assistant_ts_under(&path, dir.path()),
+            Some(1_783_033_249_920)
+        );
+        assert_eq!(last_cache_ttl_under(&path, dir.path()), Some(TTL_1H_MS));
+    }
+
+    #[test]
+    fn the_common_case_is_one_read() {
+        // A file that fits in the first window is read once, whatever the
+        // scan finds: the window covers the whole file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_transcript(
+            dir.path(),
+            "s.jsonl",
+            &[r#"{"type":"user","message":{"role":"user"}}"#],
+        );
+        assert_eq!(last_assistant_ts_under(&path, dir.path()), None);
     }
 }

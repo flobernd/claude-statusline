@@ -1,17 +1,31 @@
-/// Width in terminal cells after stripping SGR and OSC 8 escapes. Every
-/// glyph the statusline emits is single-width, so chars-as-1 is exact.
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+/// Width in terminal cells after stripping SGR and OSC 8 escapes. Payload
+/// text (task names, branches, emails) is not limited to single-width
+/// glyphs, so the visible runs are measured per UAX #11, each run on its
+/// own: an escape ends a sequence, so an emoji split around one is two
+/// glyphs. The fixed glyphs the statusline emits are ambiguous-width and
+/// count one, as they did before.
 pub fn visible_width(s: &str) -> usize {
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
     let mut width = 0;
+    let mut run = String::new();
+    let flush = |run: &mut String, width: &mut usize| {
+        *width += run.width();
+        run.clear();
+    };
     while i < chars.len() {
         if chars[i] == '\x1b' && i + 1 < chars.len() && chars[i + 1] == '[' {
+            flush(&mut run, &mut width);
             i += 2;
             while i < chars.len() && chars[i] != 'm' {
                 i += 1;
             }
             i += 1;
         } else if chars[i] == '\x1b' && i + 1 < chars.len() && chars[i + 1] == ']' {
+            flush(&mut run, &mut width);
             i += 2;
             while i < chars.len() {
                 if chars[i] == '\x07' {
@@ -25,11 +39,34 @@ pub fn visible_width(s: &str) -> usize {
                 i += 1;
             }
         } else {
-            width += 1;
+            run.push(chars[i]);
             i += 1;
         }
     }
+    flush(&mut run, &mut width);
     width
+}
+
+/// The longest prefix of `text` that fits in `cells`, built from whole
+/// grapheme clusters, each measured once: a cluster is what a terminal
+/// draws as one unit, so a cut never lands inside a wide character, a
+/// joined sequence or a base with its marks, and the walk stays linear
+/// in the text however many zero-width characters it carries. A
+/// cluster's width is not the sum of its characters' widths (a joined
+/// sequence can measure wider half-built than whole), which is why the
+/// prefix is never measured character by character.
+pub fn take_cells(text: &str, cells: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for cluster in text.graphemes(true) {
+        let width = cluster.width();
+        if used + width > cells {
+            break;
+        }
+        used += width;
+        out.push_str(cluster);
+    }
+    out
 }
 
 /// Drop sections in drop_order until the separator-joined line fits.
@@ -114,5 +151,70 @@ mod tests {
         let items = vec![("a", "aa".to_string()), ("b", "bb".to_string())];
         let fitted = fit_line(items, 3, 80, &["a", "b"]);
         assert_eq!(fitted.len(), 2);
+    }
+
+    #[test]
+    fn wide_and_combining_characters_measure_in_cells() {
+        assert_eq!(visible_width("\u{754c}\u{754c}"), 4);
+        assert_eq!(visible_width("e\u{0301}"), 1);
+        assert_eq!(visible_width("\x1b[38;2;1;2;3m\u{754c}\x1b[0m"), 2);
+        assert_eq!(
+            visible_width("\u{2502}\u{2B06}\u{2387}\u{2338}\u{2302}\u{2301}"),
+            6
+        );
+        // Sequences: a variation selector makes the heart emoji-wide, and a ZWJ family is
+        // one two-cell glyph, not four characters.
+        assert_eq!(visible_width("\u{2764}\u{FE0F}"), 2);
+        assert_eq!(visible_width("\u{1F468}\u{200D}\u{1F469}"), 2);
+        // An escape between the two halves must not merge them into one sequence.
+        assert_eq!(visible_width("\u{1F468}\x1b[0m\u{200D}\u{1F469}"), 4);
+    }
+
+    #[test]
+    fn take_cells_never_splits_a_wide_character_or_a_sequence() {
+        assert_eq!(take_cells("abc", 5), "abc");
+        assert_eq!(take_cells("abc", 2), "ab");
+        assert_eq!(
+            take_cells("\u{754c}\u{754c}\u{754c}", 5),
+            "\u{754c}\u{754c}"
+        );
+        assert_eq!(take_cells("a\u{754c}", 2), "a");
+        assert_eq!(take_cells("e\u{0301}x", 1), "e\u{0301}");
+        assert_eq!(
+            take_cells("\u{1F468}\u{200D}\u{1F469}x", 2),
+            "\u{1F468}\u{200D}\u{1F469}"
+        );
+        assert_eq!(take_cells("\u{1F468}\u{200D}\u{1F469}", 1), "");
+        assert_eq!(take_cells("abc", 0), "");
+        // A joined sequence measures wider half-built than whole: the
+        // heart with its selector reads three cells before the join
+        // completes, and the whole family reads two.
+        let couple = "\u{1F469}\u{200D}\u{2764}\u{FE0F}\u{200D}\u{1F469}";
+        assert_eq!(take_cells(couple, 2), couple);
+        assert_eq!(take_cells(&format!("{couple}x"), 2), couple);
+        assert_eq!(take_cells(couple, 1), "");
+        // A variation selector that widens its base is cut with it.
+        assert_eq!(take_cells("\u{2764}\u{FE0F}x", 1), "");
+        assert_eq!(take_cells("\u{2764}\u{FE0F}x", 2), "\u{2764}\u{FE0F}");
+        // A flag is one cluster of two cells.
+        assert_eq!(take_cells("\u{1F1E9}\u{1F1EA}x", 1), "");
+        assert_eq!(take_cells("\u{1F1E9}\u{1F1EA}x", 3), "\u{1F1E9}\u{1F1EA}x");
+    }
+
+    #[test]
+    fn take_cells_is_linear_in_zero_width_text() {
+        let text = format!("a{}bcdefghijklmnop", "\u{0301}".repeat(20_000));
+        let start = std::time::Instant::now();
+        let kept = take_cells(&text, 10);
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(200),
+            "took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(
+            kept.chars().count(),
+            20_010,
+            "the marks ride with their base"
+        );
     }
 }
