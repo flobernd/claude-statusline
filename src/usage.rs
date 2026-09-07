@@ -23,20 +23,19 @@ pub struct EndpointUtilization {
 
 impl EndpointUtilization {
     /// One definition of fetched content for the child's emptiness guard and the line's gate.
-    /// Spend amounts count on their own: an enterprise seat with a spend limit reports null
-    /// windows and an empty limits list, and its body is an answer, not an error envelope. An
-    /// `extra_usage` that says it is off is content too: the fetch answered, and the chip is
-    /// simply not shown.
+    /// Spend amounts count on their own when they render a meter: an enterprise seat with a
+    /// spend limit reports null windows and an empty limits list, and its body is an answer,
+    /// not an error envelope; a body with one amount and no percentage is the fragment of one
+    /// and is not. An `extra_usage` that says it is off is content too: the fetch answered, and
+    /// the chip is simply not shown.
     fn has_content(&self) -> bool {
         self.five_hour.is_some()
             || self.seven_day.is_some()
             || self.limits.as_ref().is_some_and(|l| !l.is_empty())
-            || self.extra_usage.as_ref().is_some_and(|e| {
-                e.is_enabled == Some(false)
-                    || e.used_credits.is_some()
-                    || e.monthly_limit.is_some()
-                    || e.utilization.is_some()
-            })
+            || self
+                .extra_usage
+                .as_ref()
+                .is_some_and(|e| e.is_enabled == Some(false) || e.has_meter())
     }
 }
 
@@ -63,6 +62,14 @@ pub struct ExtraUsage {
     /// 0..100.
     #[serde(default, deserialize_with = "lenient")]
     pub utilization: Option<f64>,
+}
+
+impl ExtraUsage {
+    /// The amounts render a meter when both are present or the endpoint reported a
+    /// percentage; one amount alone is a fragment `spend_from_parts` cannot show.
+    fn has_meter(&self) -> bool {
+        self.utilization.is_some() || (self.used_credits.is_some() && self.monthly_limit.is_some())
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -1643,6 +1650,19 @@ mod tests {
         assert!(utilization_from_body("{}").is_none());
         assert!(utilization_from_body(r#"{"extra_usage": {"is_enabled": false}}"#).is_some());
         assert!(utilization_from_body(r#"{"extra_usage": {"utilization": 3.0}}"#).is_some());
+        assert!(
+            utilization_from_body(
+                r#"{"extra_usage": {"is_enabled": true, "monthly_limit": 300000}}"#
+            )
+            .is_none(),
+            "one amount without a percentage renders nothing and is not content"
+        );
+        assert!(
+            utilization_from_body(
+                r#"{"extra_usage": {"monthly_limit": 5000, "used_credits": 1234}}"#
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -1674,6 +1694,37 @@ mod tests {
             "a stored body is a success and restarts the ladder"
         );
         assert!(snapshot.has_fetched_data());
+    }
+
+    #[test]
+    fn child_keeps_the_previous_usage_when_a_spend_body_cannot_render() {
+        let now = 1_000_000;
+        let previous = Snapshot {
+            fetched_at_ms: now - 60_000,
+            account_uuid: Some("u-1".to_string()),
+            utilization: utilization_from_body(FULL_BODY).unwrap(),
+            profile_next_at_ms: Some(now + 1),
+            ..Snapshot::default()
+        };
+        let home = child_home(60, Some(&previous));
+        let fragment = r#"{"extra_usage": {"is_enabled": true, "monthly_limit": 300000}}"#;
+        let (snapshot, calls) = run_child(home.path(), now, |_| body(fragment));
+        let snapshot = snapshot.unwrap();
+        assert_eq!(calls, [USAGE_URL]);
+        assert_eq!(
+            snapshot.fetched_at_ms,
+            now - 60_000,
+            "the previous stamp survives"
+        );
+        assert!(
+            snapshot.utilization.five_hour.is_some(),
+            "the previous windows survive a body that renders nothing"
+        );
+        assert_eq!(
+            (snapshot.usage_next_at_ms, snapshot.usage_backoff_ms),
+            (Some(now + 120_000), Some(120_000)),
+            "a body that renders nothing books the failure ladder"
+        );
     }
 
     #[test]
