@@ -5,11 +5,20 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
 
 /// An exclusive advisory lock on a file, held for as long as the value
-/// lives. The OS releases it when the descriptor closes, so a child killed
-/// outright leaves nothing to take over, and no path is ever unlinked, so a
-/// holder can never remove another holder's lock.
+/// lives and released explicitly on drop. Closing the descriptor alone is
+/// not enough: a child that another thread forked while the lock was held
+/// carries a copy of the descriptor until its exec, and an flock lock lives
+/// on the shared open file description, so the close would leave the lock
+/// held for that window. No path is ever unlinked, so a holder can never
+/// remove another holder's lock.
 pub struct Lock {
-    _file: File,
+    file: File,
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 /// The file is created once and never removed; `try_lock` is the one
@@ -31,7 +40,7 @@ pub fn try_acquire(path: &Path) -> Option<Lock> {
     match file.try_lock() {
         Ok(()) | Err(TryLockError::Error(_)) => {
             let _ = file.set_modified(std::time::SystemTime::now());
-            Some(Lock { _file: file })
+            Some(Lock { file })
         }
         Err(TryLockError::WouldBlock) => None,
     }
