@@ -63,11 +63,14 @@ impl GitState {
     }
 }
 
-/// Run git with a hard timeout so a hung repository (network FS, huge
-/// object store) can never stall the statusline render.
 fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
-    let timeout = git_timeout();
-    let mut child = Command::new("git")
+    run_command(Path::new("git"), dir, args, git_timeout())
+}
+
+/// Run a command with a hard timeout so a hung repository (network FS,
+/// huge object store) can never stall the statusline render.
+fn run_command(program: &Path, dir: &Path, args: &[&str], timeout: Duration) -> Option<String> {
+    let mut child = Command::new(program)
         .args(args)
         .current_dir(dir)
         // A statusline must never take even optional locks in the repo it
@@ -89,25 +92,31 @@ fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                let deadline = start + timeout;
+                while !reader.is_finished() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if !reader.is_finished() {
+                    return None;
+                }
                 let out = reader.join().ok().flatten();
                 if !status.success() {
                     return None;
                 }
                 return out;
             }
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = reader.join();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(5));
+            Ok(None) if start.elapsed() > timeout => {
+                // The reader is not joined: a grandchild that inherited the
+                // pipe keeps it open past the kill, and the render must
+                // not wait on it. The thread ends with the process.
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
             }
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = reader.join();
                 return None;
             }
         }
@@ -122,30 +131,127 @@ fn resolve(dir: &Path, p: &str) -> PathBuf {
 
 struct HeadInfo {
     branch: String,
-    git_dir: PathBuf,
     common_dir: PathBuf,
 }
 
 fn head_info(dir: &Path, out: Option<String>) -> Option<HeadInfo> {
     let out = out?;
     let lines: Vec<&str> = out.lines().collect();
-    if lines.len() < 3 || lines[0].is_empty() {
+    if lines.len() < 2 || lines[0].is_empty() {
         return None;
     }
     Some(HeadInfo {
         branch: lines[0].to_string(),
-        git_dir: resolve(dir, lines[1]),
-        common_dir: resolve(dir, lines[2]),
+        common_dir: resolve(dir, lines[1]),
     })
 }
 
-const HEAD_ARGS: &[&str] = &[
-    "rev-parse",
-    "--abbrev-ref",
-    "HEAD",
-    "--git-dir",
-    "--git-common-dir",
+const HEAD_ARGS: &[&str] = &["rev-parse", "--abbrev-ref", "HEAD", "--git-common-dir"];
+
+const DIR_ARGS: &[&str] = &["rev-parse", "--git-dir", "--git-common-dir"];
+
+/// The two directories alone: unlike `HEAD_ARGS` this succeeds before the
+/// first commit, when HEAD names a branch that has no object yet.
+fn dir_info(dir: &Path, out: Option<String>) -> Option<(PathBuf, PathBuf)> {
+    let out = out?;
+    let mut lines = out.lines();
+    let git_dir = resolve(dir, lines.next()?);
+    let common_dir = resolve(dir, lines.next()?);
+    Some((git_dir, common_dir))
+}
+
+/// The branch from the HEAD file, for when the status call ran out of its
+/// budget on a slow tree: `ref: refs/heads/<name>` on a branch, unborn or
+/// not, a raw object id when detached. The reftable backend keeps a
+/// placeholder here and is answered by `branch_from_refs` instead.
+fn head_from_file(git_dir: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(name) = head.strip_prefix("ref: refs/heads/") {
+        return (!name.is_empty() && name != ".invalid").then(|| name.to_string());
+    }
+    (head.len() >= 40 && head.bytes().all(|b| b.is_ascii_hexdigit())).then(|| "HEAD".to_string())
+}
+
+/// The branch through the ref store, for a HEAD file that names nothing:
+/// `symbolic-ref` prints the branch on an unborn head too and fails when
+/// detached, which `rev-parse` then names `HEAD`. Both work without a
+/// work tree.
+fn branch_from_refs(dir: &Path) -> Option<String> {
+    if let Some(name) = run_git(dir, &["symbolic-ref", "--short", "-q", "HEAD"]) {
+        let name = name.trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    run_git(dir, &["rev-parse", "--verify", "-q", "HEAD"]).map(|_| "HEAD".to_string())
+}
+
+/// Unmerged index entries, read without touching the work tree, for when
+/// the status call could not answer.
+fn index_has_unmerged(dir: &Path) -> bool {
+    run_git(dir, &["ls-files", "--unmerged"]).is_some_and(|out| !out.trim().is_empty())
+}
+
+/// Porcelain v2 with `--branch --untracked-files=all`: the branch header
+/// resolves on an unborn HEAD, every untracked file has its own `?` line,
+/// and every unmerged path has a `u` line whether or not an operation
+/// marker exists, which `git stash pop` never writes. The upstream
+/// comparison is left off: the sync worker already makes it, and a large
+/// divergence must not push this call past its budget.
+const STATUS_ARGS: &[&str] = &[
+    "status",
+    "--porcelain=v2",
+    "--branch",
+    "--no-ahead-behind",
+    "--untracked-files=all",
 ];
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StatusInfo {
+    branch: Option<String>,
+    added: u32,
+    removed: u32,
+    changed: u32,
+    unmerged: bool,
+}
+
+/// Each entry is classified once by its XY code: untracked and staged adds
+/// count as added, deletions as removed, everything else (modified,
+/// renamed, type change, unmerged) as changed. `(detached)` reads as
+/// `HEAD`, the name the subagent rows show for the same state.
+fn parse_status(out: &str) -> StatusInfo {
+    let mut s = StatusInfo::default();
+    for line in out.lines() {
+        if let Some(head) = line.strip_prefix("# branch.head ") {
+            s.branch = Some(if head == "(detached)" {
+                "HEAD".to_string()
+            } else {
+                head.to_string()
+            });
+            continue;
+        }
+        let mut fields = line.split(' ');
+        let (Some(kind), code) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        match kind {
+            "?" => s.added += 1,
+            "u" => {
+                s.unmerged = true;
+                s.changed += 1;
+            }
+            "1" | "2" => match code {
+                Some(c) if c.contains('A') => s.added += 1,
+                Some(c) if c.contains('D') => s.removed += 1,
+                Some(_) => s.changed += 1,
+                None => {}
+            },
+            _ => {}
+        }
+    }
+    s
+}
 
 /// Trunk names to fall back on when no remote publishes a default branch:
 /// a repo with no remote, one where `git remote set-head` was never run, or
@@ -234,6 +340,38 @@ fn on_default_branch(common_dir: &Path, branch: &str) -> bool {
     }
 }
 
+/// A submodule's git dir lives under the `modules` directory of the git
+/// dir that owns its checkout: `.git/modules/<name>` from the main
+/// checkout, `<common>/worktrees/<wt>/modules/<name>` from a linked
+/// worktree or a checkout of a bare common repository. Nested once more
+/// per level for a submodule of a submodule.
+fn submodule_common_dir(common_dir: &Path) -> bool {
+    let is_named = |p: &Path, s: &str| p.file_name().is_some_and(|n| n == s);
+    common_dir.ancestors().any(|a| {
+        is_named(a, "modules")
+            && a.parent().is_some_and(|p| {
+                is_named(p, ".git") || p.parent().is_some_and(|g| is_named(g, "worktrees"))
+            })
+    })
+}
+
+/// The common dir's parent names the repository: a linked worktree's
+/// common dir is the main repository's `.git`, and a bare common
+/// repository beside its checkouts is named by its own parent too. A
+/// submodule's parent would say `modules`, so its checkout root names it,
+/// looked up only then: `--show-toplevel` aborts the whole rev-parse in a
+/// bare repository or inside a `.git` directory, layouts that must keep
+/// their chips, so it cannot ride along with the directory lookup.
+fn repo_name(dir: &Path, common_dir: &Path) -> Option<String> {
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
+    if submodule_common_dir(common_dir) {
+        let out = run_git(dir, &["rev-parse", "--show-toplevel"])?;
+        name(&resolve(dir, out.trim()))
+    } else {
+        common_dir.parent().and_then(name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchLocation {
     pub repo: String,
@@ -241,16 +379,9 @@ pub struct BranchLocation {
     pub on_default_branch: bool,
 }
 
-/// Repo name comes from the common dir's parent, not the checkout directory,
-/// so a linked worktree reports the main repository rather than its own
-/// checkout folder.
 pub fn branch_location(dir: &Path) -> Option<BranchLocation> {
     let info = head_info(dir, run_git(dir, HEAD_ARGS))?;
-    let repo = info
-        .common_dir
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().into_owned())?;
+    let repo = repo_name(dir, &info.common_dir)?;
     Some(BranchLocation {
         on_default_branch: on_default_branch(&info.common_dir, &info.branch),
         repo,
@@ -268,8 +399,8 @@ pub fn collect(dir: &Path) -> GitInfo {
         };
     }
     let mut info = GitInfo::default();
-    let (head, sync, stash, status) = std::thread::scope(|s| {
-        let head = s.spawn(|| run_git(dir, HEAD_ARGS));
+    let (dirs, sync, stash, status) = std::thread::scope(|s| {
+        let dirs = s.spawn(|| run_git(dir, DIR_ARGS));
         let sync =
             s.spawn(|| run_git(dir, &["rev-list", "--count", "--left-right", "HEAD...@{u}"]));
         let stash = s.spawn(|| {
@@ -278,26 +409,38 @@ pub fn collect(dir: &Path) -> GitInfo {
                 &["rev-list", "--walk-reflogs", "--count", "refs/stash"],
             )
         });
-        let status = s.spawn(|| run_git(dir, &["status", "--porcelain"]));
+        let status = s.spawn(|| run_git(dir, STATUS_ARGS));
         (
-            head.join().unwrap_or(None),
+            dirs.join().unwrap_or(None),
             sync.join().unwrap_or(None),
             stash.join().unwrap_or(None),
             status.join().unwrap_or(None),
         )
     });
 
-    let mut git_dir: Option<PathBuf> = None;
-    if let Some(h) = head_info(dir, head) {
-        info.on_default_branch = on_default_branch(&h.common_dir, &h.branch);
-        info.branch = Some(h.branch);
-        info.linked_worktree = h.git_dir != h.common_dir;
-        info.repo_name_fallback = h
-            .common_dir
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned());
-        git_dir = Some(h.git_dir);
+    let status = status.map(|out| parse_status(&out));
+    if let Some((git_dir, common_dir)) = dir_info(dir, dirs) {
+        let branch = match &status {
+            Some(s) => s.branch.clone(),
+            // A status that ran out of budget, or cannot run at all as in a bare
+            // repository, must not cost the branch chip: the HEAD file answers on
+            // the files backend, and the ref store answers where HEAD is a
+            // placeholder, as on reftable.
+            None => head_from_file(&git_dir).or_else(|| branch_from_refs(dir)),
+        };
+        if let Some(branch) = branch {
+            info.on_default_branch = on_default_branch(&common_dir, &branch);
+            info.branch = Some(branch);
+        }
+        info.linked_worktree = git_dir != common_dir;
+        info.repo_name_fallback = repo_name(dir, &common_dir);
+        // Without a status the index is asked directly: a slow untracked scan
+        // must not turn a conflict into a plain operation label.
+        let unmerged = match &status {
+            Some(s) => s.unmerged,
+            None => index_has_unmerged(dir),
+        };
+        info.state = detect_state(&git_dir, unmerged);
     }
     if let Some(out) = sync {
         let mut parts = out.split_whitespace();
@@ -309,57 +452,55 @@ pub fn collect(dir: &Path) -> GitInfo {
     if let Some(out) = stash {
         info.stash = out.trim().parse().unwrap_or(0);
     }
-    if let Some(out) = status {
-        (info.files_added, info.files_removed, info.files_changed) = parse_status_counts(&out);
-    }
-    if let Some(gd) = git_dir {
-        info.state = detect_state(dir, &gd);
+    if let Some(s) = &status {
+        (info.files_added, info.files_removed, info.files_changed) =
+            (s.added, s.removed, s.changed);
     }
     info
 }
 
-/// Working-tree file counts from porcelain status lines. Each entry is
-/// classified once by its two-letter XY code: new files (untracked or
-/// staged adds) count as added, deletions as removed, everything else
-/// (modified, renamed, type change, unmerged) as changed.
-fn parse_status_counts(out: &str) -> (u32, u32, u32) {
-    let (mut added, mut removed, mut changed) = (0, 0, 0);
-    for line in out.lines() {
-        let Some(code) = line.get(..2) else { continue };
-        if code == "??" || code.contains('A') {
-            added += 1;
-        } else if code.contains('D') {
-            removed += 1;
-        } else {
-            changed += 1;
-        }
+/// Unmerged paths mean Conflict whatever operation left them; otherwise
+/// the git-dir markers name the operation in progress.
+fn detect_state(git_dir: &Path, unmerged: bool) -> Option<GitState> {
+    if unmerged {
+        return Some(GitState::Conflict);
     }
-    (added, removed, changed)
-}
-
-/// Operation state from git-dir markers; any operation with unmerged
-/// paths reports as Conflict instead of the operation name.
-fn detect_state(dir: &Path, git_dir: &Path) -> Option<GitState> {
-    let op = if git_dir.join("MERGE_HEAD").is_file() {
-        GitState::Merge
+    if git_dir.join("MERGE_HEAD").is_file() {
+        Some(GitState::Merge)
     } else if git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir() {
-        GitState::Rebase
+        Some(GitState::Rebase)
     } else if git_dir.join("CHERRY_PICK_HEAD").is_file() {
-        GitState::CherryPick
+        Some(GitState::CherryPick)
     } else if git_dir.join("REVERT_HEAD").is_file() {
-        GitState::Revert
+        Some(GitState::Revert)
     } else {
-        return None;
-    };
-    match run_git(dir, &["diff", "--name-only", "--diff-filter=U"]) {
-        Some(out) if !out.trim().is_empty() => Some(GitState::Conflict),
-        _ => Some(op),
+        None
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_returns_even_when_a_grandchild_holds_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+        // A fake git that spawns a sleeper sharing its stdout and then
+        // blocks itself, so both the child and its grandchild outlive the
+        // budget.
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("git");
+        std::fs::write(&fake, "#!/bin/sh\nsleep 5 &\nsleep 5\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = Instant::now();
+        assert!(run_command(&fake, dir.path(), &[], Duration::from_millis(200)).is_none());
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            start.elapsed()
+        );
+    }
 
     /// Test helper: run git configured for hermetic operation (no user or
     /// system config, fixed identity).
@@ -478,10 +619,185 @@ mod tests {
     }
 
     #[test]
-    fn status_counts_classification() {
-        let out = "?? new.txt\nA  staged.txt\n M mod.rs\nD  gone.rs\nR  a -> b\nMM both.rs\n";
-        assert_eq!(parse_status_counts(out), (2, 1, 3));
-        assert_eq!(parse_status_counts(""), (0, 0, 0));
+    fn status_v2_classifies_entries_and_reads_the_header() {
+        let out = concat!(
+            "# branch.oid abc\n",
+            "# branch.head feat/x\n",
+            "# branch.upstream origin/feat/x\n",
+            "# branch.ab +1 -0\n",
+            "? new.txt\n",
+            "1 A. N... 100644 100644 100644 0 0 staged.txt\n",
+            "1 .M N... 100644 100644 100644 0 0 mod.rs\n",
+            "1 D. N... 100644 000000 000000 0 0 gone.rs\n",
+            "2 R. N... 100644 100644 100644 0 0 R100 b\ta\n",
+            "1 MM N... 100644 100644 100644 0 0 both.rs\n",
+        );
+        let s = parse_status(out);
+        assert_eq!(s.branch.as_deref(), Some("feat/x"));
+        assert_eq!((s.added, s.removed, s.changed), (2, 1, 3));
+        assert!(!s.unmerged);
+
+        let s = parse_status("");
+        assert!(s.branch.is_none());
+        assert_eq!((s.added, s.removed, s.changed), (0, 0, 0));
+    }
+
+    #[test]
+    fn status_v2_reads_unborn_detached_and_unmerged() {
+        let s = parse_status("# branch.oid (initial)\n# branch.head main\n");
+        assert_eq!(s.branch.as_deref(), Some("main"));
+
+        let s = parse_status("# branch.oid abc\n# branch.head (detached)\n");
+        assert_eq!(s.branch.as_deref(), Some("HEAD"));
+
+        let s = parse_status(concat!(
+            "# branch.oid abc\n# branch.head main\n",
+            "u UU N... 100644 100644 100644 100644 1 2 3 f\n",
+        ));
+        assert!(s.unmerged);
+        assert_eq!((s.added, s.removed, s.changed), (0, 0, 1));
+    }
+
+    #[test]
+    fn untracked_directory_counts_each_file() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        std::fs::create_dir(dir.path().join("nd")).unwrap();
+        for name in ["x", "y", "z"] {
+            std::fs::write(dir.path().join("nd").join(name), "n\n").unwrap();
+        }
+        let info = collect(dir.path());
+        assert_eq!(info.files_added, 3);
+    }
+
+    #[test]
+    fn unborn_repo_reports_its_branch_and_repo_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("fresh");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        let info = collect(&repo);
+        assert_eq!(info.branch.as_deref(), Some("main"));
+        assert!(info.on_default_branch);
+        assert_eq!(info.repo_name_fallback.as_deref(), Some("fresh"));
+        assert!(!info.missing_dir);
+    }
+
+    #[test]
+    fn detached_head_reads_as_head() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        git(dir.path(), &["checkout", "--detach"]);
+        assert_eq!(collect(dir.path()).branch.as_deref(), Some("HEAD"));
+    }
+
+    #[test]
+    fn stash_pop_conflict_reports_conflict_without_a_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("f.txt"), "two\n").unwrap();
+        git(dir.path(), &["stash", "push", "-q"]);
+        std::fs::write(dir.path().join("f.txt"), "three\n").unwrap();
+        git(dir.path(), &["commit", "-qam", "c"]);
+        // The pop fails with a conflict; run without asserting success.
+        let _ = Command::new("git")
+            .args(["stash", "pop"])
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let out = run_git(dir.path(), &["rev-parse", "--git-dir"]).unwrap();
+        let git_dir = resolve(dir.path(), out.trim());
+        assert!(
+            !git_dir.join("MERGE_HEAD").exists(),
+            "the pop leaves no marker"
+        );
+        assert_eq!(collect(dir.path()).state, Some(GitState::Conflict));
+    }
+
+    #[test]
+    fn head_file_names_the_branch_or_a_detached_head() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("HEAD"), "ref: refs/heads/feat/x\n").unwrap();
+        assert_eq!(head_from_file(dir.path()).as_deref(), Some("feat/x"));
+        std::fs::write(dir.path().join("HEAD"), format!("{}\n", "a".repeat(40))).unwrap();
+        assert_eq!(head_from_file(dir.path()).as_deref(), Some("HEAD"));
+        // The reftable backend keeps a placeholder here.
+        std::fs::write(dir.path().join("HEAD"), "ref: refs/heads/.invalid\n").unwrap();
+        assert!(head_from_file(dir.path()).is_none());
+        std::fs::write(dir.path().join("HEAD"), "garbage\n").unwrap();
+        assert!(head_from_file(dir.path()).is_none());
+        assert!(head_from_file(&dir.path().join("missing")).is_none());
+    }
+
+    #[test]
+    fn refs_answer_the_branch_when_the_head_file_cannot() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        assert_eq!(branch_from_refs(dir.path()).as_deref(), Some("main"));
+        git(dir.path(), &["checkout", "-q", "--detach"]);
+        assert_eq!(branch_from_refs(dir.path()).as_deref(), Some("HEAD"));
+        let fresh = dir.path().join("fresh");
+        std::fs::create_dir(&fresh).unwrap();
+        git(&fresh, &["init", "-q", "-b", "main"]);
+        assert_eq!(branch_from_refs(&fresh).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn reftable_bare_repository_keeps_its_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        init_repo(&src);
+        let bare = dir.path().join("bare.git");
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                "--ref-format=reftable",
+                src.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            head_from_file(&bare).is_none(),
+            "reftable keeps a placeholder HEAD"
+        );
+        assert_eq!(collect(&bare).branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn the_index_reports_a_conflict_when_status_cannot() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        assert!(!index_has_unmerged(dir.path()));
+        git(dir.path(), &["checkout", "-q", "-b", "other"]);
+        std::fs::write(dir.path().join("f.txt"), "two\n").unwrap();
+        git(dir.path(), &["commit", "-qam", "two"]);
+        git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("f.txt"), "three\n").unwrap();
+        git(dir.path(), &["commit", "-qam", "three"]);
+        let _ = Command::new("git")
+            .args(["merge", "-q", "other"])
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        assert!(index_has_unmerged(dir.path()));
+        assert_eq!(
+            detect_state(&dir.path().join(".git"), index_has_unmerged(dir.path())),
+            Some(GitState::Conflict)
+        );
     }
 
     #[test]
@@ -582,6 +898,201 @@ mod tests {
                 branch: "feat/x".to_string(),
                 on_default_branch: false,
             })
+        );
+    }
+
+    #[test]
+    fn submodule_common_dirs_sit_under_a_git_modules_directory() {
+        assert!(!submodule_common_dir(Path::new("/w/repo/.git")));
+        assert!(!submodule_common_dir(Path::new("/w/project/.bare")));
+        assert!(!submodule_common_dir(Path::new("/w/modules/.git")));
+        assert!(submodule_common_dir(Path::new("/w/super/.git/modules/lib")));
+        assert!(submodule_common_dir(Path::new(
+            "/w/super/.git/modules/lib/modules/inner"
+        )));
+        assert!(submodule_common_dir(Path::new(
+            "/w/super/.git/worktrees/wt/modules/lib"
+        )));
+        assert!(submodule_common_dir(Path::new(
+            "/w/project/.bare/worktrees/main/modules/lib"
+        )));
+        assert!(!submodule_common_dir(Path::new(
+            "/w/worktrees/modules/.git"
+        )));
+    }
+
+    #[test]
+    fn repo_name_takes_the_common_dir_parent_outside_a_submodule() {
+        let dir = Path::new("/nonexistent");
+        assert_eq!(
+            repo_name(dir, Path::new("/w/repo/.git")).as_deref(),
+            Some("repo")
+        );
+        // A bare common repository with checkouts beside it: the parent still names it.
+        assert_eq!(
+            repo_name(dir, Path::new("/w/project/.bare")).as_deref(),
+            Some("project")
+        );
+    }
+
+    #[test]
+    fn submodule_is_named_after_its_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        init_repo(&sub);
+        let sup = dir.path().join("super");
+        std::fs::create_dir(&sup).unwrap();
+        init_repo(&sup);
+        git(
+            &sup,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                sub.to_str().unwrap(),
+                "lib",
+            ],
+        );
+        let checkout = sup.join("lib");
+        assert_eq!(
+            collect(&checkout).repo_name_fallback.as_deref(),
+            Some("lib")
+        );
+        assert_eq!(
+            branch_location(&checkout).map(|l| l.repo).as_deref(),
+            Some("lib")
+        );
+    }
+
+    #[test]
+    fn submodule_inside_a_linked_worktree_is_named_after_its_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        init_repo(&sub);
+        let sup = dir.path().join("super");
+        std::fs::create_dir(&sup).unwrap();
+        init_repo(&sup);
+        let wt = dir.path().join("wt");
+        git(
+            &sup,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
+        );
+        git(
+            &wt,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                sub.to_str().unwrap(),
+                "lib",
+            ],
+        );
+        let checkout = wt.join("lib");
+        assert_eq!(
+            collect(&checkout).repo_name_fallback.as_deref(),
+            Some("lib")
+        );
+        assert_eq!(
+            branch_location(&checkout).map(|l| l.repo).as_deref(),
+            Some("lib")
+        );
+    }
+
+    #[test]
+    fn submodule_inside_a_bare_common_repository_checkout_is_named_after_its_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        init_repo(&sub);
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        init_repo(&src);
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        git(
+            &project,
+            &["clone", "-q", "--bare", src.to_str().unwrap(), ".bare"],
+        );
+        git(
+            &project,
+            &[
+                "--git-dir",
+                ".bare",
+                "worktree",
+                "add",
+                "-q",
+                "main",
+                "main",
+            ],
+        );
+        let checkout = project.join("main");
+        git(
+            &checkout,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                sub.to_str().unwrap(),
+                "lib",
+            ],
+        );
+        let inner = checkout.join("lib");
+        assert_eq!(collect(&inner).repo_name_fallback.as_deref(), Some("lib"));
+        assert_eq!(
+            branch_location(&inner).map(|l| l.repo).as_deref(),
+            Some("lib")
+        );
+    }
+
+    #[test]
+    fn bare_repository_keeps_its_branch_and_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        init_repo(&src);
+        let bare = dir.path().join("bare.git");
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                src.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        let info = collect(&bare);
+        assert_eq!(info.branch.as_deref(), Some("main"));
+        assert!(info.repo_name_fallback.is_some());
+        assert!(!info.linked_worktree);
+        assert_eq!(info.state, None);
+        assert_eq!(
+            branch_location(&bare).map(|l| l.branch).as_deref(),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn inside_the_git_dir_keeps_its_branch_and_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("myrepo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let inside = repo.join(".git");
+        let info = collect(&inside);
+        assert_eq!(info.branch.as_deref(), Some("main"));
+        assert_eq!(info.repo_name_fallback.as_deref(), Some("myrepo"));
+        assert_eq!(
+            branch_location(&inside).map(|l| l.repo).as_deref(),
+            Some("myrepo")
         );
     }
 
