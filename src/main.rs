@@ -1,3 +1,4 @@
+mod backoff;
 mod bar;
 mod clock;
 mod commands;
@@ -298,8 +299,28 @@ fn render(raw: &str) -> Option<String> {
                         )
                     })
                     .collect(),
+                None if config.cli_proxy_usage_enabled && endpoint.custom_base_url().is_some() => {
+                    // The route answered nothing this tick, but the session is still a
+                    // proxied one: the local login is not the account behind the proxy, so
+                    // the payload windows are all that may render, and the local cache and
+                    // fetch child stay untouched.
+                    let limits = usage::merge(payload.rate_limits.as_ref(), None, now_epoch_s);
+                    compose(
+                        sections::line3(&limits, None, None, None, &style, now_epoch_s),
+                        LINE3_DROP,
+                        true,
+                    )
+                    .into_iter()
+                    .collect()
+                }
                 None => {
-                    usage::spawn_fetch_if_stale(&config);
+                    // The cache belongs to the fetch: with the fetch off it
+                    // would show numbers that never refresh again.
+                    if config.usage_fetch_interval_seconds == 0 {
+                        usage::remove_cache();
+                    } else {
+                        usage::spawn_fetch_if_stale(&config);
+                    }
                     let snapshot = usage::cache_path()
                         .and_then(|p| usage::load_snapshot(&p, account.account_uuid.as_deref()));
                     let limits = usage::merge(
@@ -328,6 +349,9 @@ fn render(raw: &str) -> Option<String> {
             Vec::new()
         }
     } else {
+        // With the line off, a cache from an earlier opt-in would only go
+        // stale on disk.
+        usage::remove_cache();
         proxy::remove_session_caches();
         Vec::new()
     };
