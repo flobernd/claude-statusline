@@ -208,6 +208,10 @@ fn cache_path_in(home: &Path) -> PathBuf {
 /// `env` entries from settings.json, so these are directly visible.
 #[derive(Debug, Default)]
 pub struct EndpointEnv {
+    pub api_key: Option<String>,
+    /// Set by the caller once ~/.claude.json confirms the key is approved:
+    /// only then does Claude Code use it instead of the login.
+    pub api_key_in_use: bool,
     pub auth_token: Option<String>,
     pub base_url: Option<String>,
     pub use_bedrock: Option<String>,
@@ -218,6 +222,8 @@ impl EndpointEnv {
     pub fn from_env() -> Self {
         let var = |key: &str| std::env::var(key).ok();
         Self {
+            api_key: var("ANTHROPIC_API_KEY"),
+            api_key_in_use: false,
             auth_token: var("ANTHROPIC_AUTH_TOKEN"),
             base_url: var("ANTHROPIC_BASE_URL"),
             use_bedrock: var("CLAUDE_CODE_USE_BEDROCK"),
@@ -230,8 +236,10 @@ impl EndpointEnv {
     /// official base URL because it means gateway auth either way. The
     /// Bedrock/Vertex base URL variables need no check of their own:
     /// Claude Code ignores them unless the matching mode flag is truthy.
+    /// An approved API key counts too: the session is billed to the key, not to the login.
     pub fn is_custom(&self) -> bool {
-        is_set(&self.auth_token)
+        self.api_key_in_use
+            || is_set(&self.auth_token)
             || self
                 .base_url
                 .as_deref()
@@ -1530,6 +1538,7 @@ mod tests {
             base_url: base_url.map(str::to_string),
             use_bedrock: use_bedrock.map(str::to_string),
             use_vertex: use_vertex.map(str::to_string),
+            ..EndpointEnv::default()
         }
     }
 
@@ -1628,5 +1637,18 @@ mod tests {
             endpoint_env(None, Some("http://proxy"), Some("0"), Some("false")).custom_base_url(),
             Some("http://proxy".to_string())
         );
+    }
+
+    #[test]
+    fn endpoint_api_key_counts_only_once_in_use() {
+        let mut env = endpoint_env(None, None, None, None);
+        env.api_key = Some("sk-ant-api03-x".to_string());
+        assert!(
+            !env.is_custom(),
+            "a key Claude Code has not approved is not in use"
+        );
+        env.api_key_in_use = true;
+        assert!(env.is_custom());
+        assert!(env.custom_base_url().is_none(), "a key names no host");
     }
 }

@@ -273,7 +273,12 @@ fn render(raw: &str) -> Option<String> {
     // The flag check comes first so the default path never pays the extra
     // ~/.claude.json read on a render tick.
     let usage_rows: Vec<String> = if config.advanced_usage_limits_enabled {
-        let endpoint = usage::EndpointEnv::from_env();
+        let mut endpoint = usage::EndpointEnv::from_env();
+        if let Some(key) = endpoint.api_key.as_deref() {
+            endpoint.api_key_in_use = schema::home_dir()
+                .map(|h| schema::load_account_info(&h.join(".claude.json")))
+                .is_some_and(|info| info.api_key_approved(key));
+        }
         let proxy = proxy_status(&config, &payload, &endpoint);
         let snapshot = if config.usage_fetch_interval_seconds == 0 {
             // The cache belongs to the fetch on every endpoint: with the fetch off it would

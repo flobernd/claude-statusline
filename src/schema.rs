@@ -236,25 +236,68 @@ pub fn home_dir() -> Option<PathBuf> {
 pub struct AccountInfo {
     #[serde(default, deserialize_with = "lenient", rename = "accountUuid")]
     pub account_uuid: Option<String>,
+    /// The last twenty characters of each API key the user approved for
+    /// Claude Code, which is how Claude Code records them.
+    #[serde(skip)]
+    pub approved_api_key_tails: Vec<String>,
+}
+
+impl AccountInfo {
+    /// Claude Code uses ANTHROPIC_API_KEY only after the user approved it,
+    /// matching the trimmed key's last twenty characters against this list;
+    /// an unapproved key is ignored and the login serves the session.
+    pub fn api_key_approved(&self, key: &str) -> bool {
+        let key = key.trim();
+        if key.is_empty() {
+            return false;
+        }
+        let tail: String = key
+            .chars()
+            .rev()
+            .take(20)
+            .collect::<Vec<char>>()
+            .into_iter()
+            .rev()
+            .collect();
+        self.approved_api_key_tails.contains(&tail)
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ApiKeyResponses {
+    #[serde(default, deserialize_with = "lenient_vec")]
+    approved: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct ClaudeJson {
     #[serde(default, deserialize_with = "lenient", rename = "oauthAccount")]
     oauth_account: Option<AccountInfo>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        rename = "customApiKeyResponses"
+    )]
+    custom_api_key_responses: Option<ApiKeyResponses>,
 }
 
 /// The login the usage cache is matched against, from Claude Code's
-/// ~/.claude.json. Anything missing or malformed yields None, which reads
-/// as an unknown login, never as an error the statusline should surface.
+/// ~/.claude.json, with the API keys the user approved. Anything missing or
+/// malformed yields the default, which reads as an unknown login and no
+/// approved key, never as an error the statusline should surface.
 pub fn load_account_info(claude_json_path: &Path) -> AccountInfo {
     let Ok(text) = std::fs::read_to_string(claude_json_path) else {
         return AccountInfo::default();
     };
-    serde_json::from_str::<ClaudeJson>(&text)
-        .ok()
-        .and_then(|c| c.oauth_account)
-        .unwrap_or_default()
+    let Ok(parsed) = serde_json::from_str::<ClaudeJson>(&text) else {
+        return AccountInfo::default();
+    };
+    let mut info = parsed.oauth_account.unwrap_or_default();
+    info.approved_api_key_tails = parsed
+        .custom_api_key_responses
+        .map(|r| r.approved)
+        .unwrap_or_default();
+    info
 }
 
 #[cfg(test)]
@@ -450,6 +493,30 @@ mod tests {
         std::fs::write(&path, r#"{"oauthAccount":{"accountUuid": 42}}"#).unwrap();
         let info = load_account_info(&path);
         assert!(info.account_uuid.is_none());
+    }
+
+    #[test]
+    fn api_key_approval_matches_the_trimmed_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        std::fs::write(
+            &path,
+            r#"{"oauthAccount":{"accountUuid":"u-1"},
+                "customApiKeyResponses":{"approved":["abcdefghijklmnopqrst", "short"],"rejected":["x"]}}"#,
+        )
+        .unwrap();
+        let info = load_account_info(&path);
+        assert_eq!(info.account_uuid.as_deref(), Some("u-1"));
+        // Claude Code records the last twenty characters of an approved key, never the key.
+        assert!(info.api_key_approved("sk-ant-api03-abcdefghijklmnopqrst"));
+        assert!(info.api_key_approved(" sk-ant-api03-0000000000abcdefghijklmnopqrst \n"));
+        assert!(
+            info.api_key_approved("short"),
+            "a key under twenty characters is its own tail"
+        );
+        assert!(!info.api_key_approved("sk-ant-api03-abcdefghijklmnopqrsX"));
+        assert!(!info.api_key_approved(""));
+        assert!(!AccountInfo::default().api_key_approved("sk-ant-api03-abcdefghijklmnopqrst"));
     }
 
     #[test]

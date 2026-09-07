@@ -24,7 +24,8 @@ fn empty_stdin_prints_nothing() {
 use std::io::Write;
 use std::process::Stdio;
 
-const ENDPOINT_VARS: [&str; 4] = [
+const ENDPOINT_VARS: [&str; 5] = [
+    "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_USE_BEDROCK",
@@ -2035,6 +2036,32 @@ fn native_usage_line_shows_the_snapshot_profile() {
         usage_cache(home.path()).exists(),
         "a matching snapshot stays on disk"
     );
+}
+
+#[test]
+fn an_approved_api_key_hides_the_local_login_from_the_usage_line() {
+    let home = native_home(60, Some(&parked_snapshot("acct-1", "fetched@example.com")));
+    std::fs::write(
+        home.path().join(".claude.json"),
+        r#"{"oauthAccount": {"accountUuid": "acct-1"},
+            "customApiKeyResponses": {"approved": ["abcdefghijklmnopqrst"]}}"#,
+    )
+    .unwrap();
+    let key = [("ANTHROPIC_API_KEY", "sk-ant-api03-abcdefghijklmnopqrst")];
+    let out = run_statusline_with_env(NATIVE_PAYLOAD, "200", home.path(), &key);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("5h:42%"), "payload windows stay: {stdout}");
+    assert!(!stdout.contains("fetched@example.com"), "stdout: {stdout}");
+    assert!(
+        usage_cache(home.path()).exists(),
+        "the login's cache is left alone, as behind a gateway"
+    );
+
+    // The same key, not approved: Claude Code ignores it and the login serves the session.
+    let unapproved = [("ANTHROPIC_API_KEY", "sk-ant-api03-somethingelse00000000")];
+    let out = run_statusline_with_env(NATIVE_PAYLOAD, "200", home.path(), &unapproved);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("fetched@example.com"), "stdout: {stdout}");
 }
 
 #[test]

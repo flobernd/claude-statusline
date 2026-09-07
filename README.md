@@ -86,7 +86,8 @@ account email, the plan type, the five-hour session and weekly windows with rese
 the Fable-only weekly window, and the extra-usage spend meter (which also covers
 Team/Enterprise spend limits). The wizard asks about it, or set `advanced_usage_limits_enabled`
 yourself. The line renders only for native Anthropic subscriptions: Bedrock, Vertex, and
-custom-gateway sessions (a non-Anthropic `ANTHROPIC_BASE_URL` or an `ANTHROPIC_AUTH_TOKEN`)
+custom-gateway and API-key sessions (a non-Anthropic `ANTHROPIC_BASE_URL`, an
+`ANTHROPIC_AUTH_TOKEN`, or an `ANTHROPIC_API_KEY` that Claude Code has been told to use)
 hide it unless the Claude Code payload still reports Anthropic rate limits, or a status from
 the CLIProxyAPI plugin route makes the same case (see "Behind CLIProxyAPI" below). A
 custom-gateway session that opens the line through its payload rate limits alone renders the
