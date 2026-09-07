@@ -63,11 +63,14 @@ impl GitState {
     }
 }
 
-/// Run git with a hard timeout so a hung repository (network FS, huge
-/// object store) can never stall the statusline render.
 fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
-    let timeout = git_timeout();
-    let mut child = Command::new("git")
+    run_command(Path::new("git"), dir, args, git_timeout())
+}
+
+/// Run a command with a hard timeout so a hung repository (network FS,
+/// huge object store) can never stall the statusline render.
+fn run_command(program: &Path, dir: &Path, args: &[&str], timeout: Duration) -> Option<String> {
+    let mut child = Command::new(program)
         .args(args)
         .current_dir(dir)
         // A statusline must never take even optional locks in the repo it
@@ -89,25 +92,31 @@ fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                let deadline = start + timeout;
+                while !reader.is_finished() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if !reader.is_finished() {
+                    return None;
+                }
                 let out = reader.join().ok().flatten();
                 if !status.success() {
                     return None;
                 }
                 return out;
             }
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = reader.join();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(5));
+            Ok(None) if start.elapsed() > timeout => {
+                // The reader is not joined: a grandchild that inherited the
+                // pipe keeps it open past the kill, and the render must
+                // not wait on it. The thread ends with the process.
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
             }
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = reader.join();
                 return None;
             }
         }
@@ -434,6 +443,26 @@ fn detect_state(git_dir: &Path, unmerged: bool) -> Option<GitState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_returns_even_when_a_grandchild_holds_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+        // A fake git that spawns a sleeper sharing its stdout and then
+        // blocks itself, so both the child and its grandchild outlive the
+        // budget.
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("git");
+        std::fs::write(&fake, "#!/bin/sh\nsleep 5 &\nsleep 5\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = Instant::now();
+        assert!(run_command(&fake, dir.path(), &[], Duration::from_millis(200)).is_none());
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            start.elapsed()
+        );
+    }
 
     /// Test helper: run git configured for hermetic operation (no user or
     /// system config, fixed identity).
