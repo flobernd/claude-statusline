@@ -187,16 +187,24 @@ fn command_string(exe: &str) -> String {
 }
 
 /// Temp file plus rename: a crash mid-write must never leave the user's
-/// Claude Code settings truncated. Settings may carry credentials in an
-/// `env` block, so on Unix the temp file is created private, never opened
-/// (a leftover of a crashed run may carry any mode and is replaced), and
-/// only then takes the destination's own mode; the rename must never
-/// widen what was there.
+/// Claude Code settings truncated. The temp name carries the process id
+/// and a per-process counter, so every write owns a file of its own and
+/// none can publish another's unfinished write, whether the other runs
+/// in a second install or on a second thread. Settings may carry
+/// credentials in an `env` block, so on Unix the file is created private
+/// and exclusively, and only then takes the destination's own mode; the
+/// rename must never widen what was there.
 fn write_atomic(path: &Path, value: &Value) -> Result<()> {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
+    let serial = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = PathBuf::from(format!(
+        "{}.{}.{serial}.tmp",
+        path.display(),
+        std::process::id()
+    ));
     let mut text = serde_json::to_string_pretty(value)?;
     text.push('\n');
     let _ = std::fs::remove_file(&tmp);
@@ -206,7 +214,9 @@ fn write_atomic(path: &Path, value: &Value) -> Result<()> {
     }
     #[cfg(unix)]
     if let Ok(existing) = std::fs::metadata(path) {
-        std::fs::set_permissions(&tmp, existing.permissions())?;
+        std::fs::set_permissions(&tmp, existing.permissions()).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
     }
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
@@ -315,11 +325,45 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        let tmp = dir.path().join("settings.json.tmp");
-        std::fs::write(&tmp, "old").unwrap();
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let stale = dir.path().join("settings.json.1.0.tmp");
+        std::fs::write(&stale, "old").unwrap();
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
         write_atomic(&path, &serde_json::json!({"a": 1})).unwrap();
         assert_eq!(mode_of(&path), 0o600);
-        assert!(!tmp.exists());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            "{\n  \"a\": 1\n}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&stale).unwrap(),
+            "old",
+            "a stranger's file is not ours to touch"
+        );
+    }
+
+    #[test]
+    fn concurrent_writers_each_publish_a_complete_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::thread::scope(|s| {
+            for i in 0..8 {
+                let path = path.clone();
+                s.spawn(move || {
+                    for round in 0..20 {
+                        write_atomic(&path, &serde_json::json!({"writer": i, "round": round}))
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        let text = std::fs::read_to_string(&path).unwrap();
+        let v: Value = serde_json::from_str(&text).expect("the published file is whole");
+        assert!(v.get("writer").is_some() && v.get("round").is_some());
+        let leftovers = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "tmp"))
+            .count();
+        assert_eq!(leftovers, 0, "every writer removes its own temp file");
     }
 }
