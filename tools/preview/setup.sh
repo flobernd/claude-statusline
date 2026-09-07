@@ -168,6 +168,14 @@ JSON
 # scratch tree and resolve the captures against claude-statusline itself.
 export GIT_CEILING_DIRECTORIES=$WORK
 export FORCE_COLOR=1 CLAUDE_STATUSLINE_WIDTH=220 CLAUDE_STATUSLINE_NOW_MS=$NOW_MS
+# A developer shell that points Claude Code at a gateway or a key would
+# classify the usage capture as a non-subscription session and drop its
+# chips; the integration tests clear the same variables.
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX
+# The scratch HOME cannot isolate a Mac's login Keychain: were a seeded
+# next-at stamp ever to read as due, the capture would fetch with the
+# real token and write the real account into the preview home.
+export CLAUDE_STATUSLINE_KEYCHAIN=0
 unset NO_COLOR || true
 for v in cwd repo worktree; do
   HOME=$PHOME "$BIN" < "$OUT/p-$v.json" > "$OUT/main-$v.ansi"
