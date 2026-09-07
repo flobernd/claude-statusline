@@ -209,11 +209,10 @@ fn shrink_chip(
         chips.remove(pos);
         return;
     }
-    let text: String = raw
-        .chars()
-        .take(keep.max(min_keep))
-        .chain(std::iter::once('\u{2026}'))
-        .collect();
+    let text = format!(
+        "{}\u{2026}",
+        crate::fit::take_cells(raw, keep.max(min_keep))
+    );
     chips[pos].1 = b.style.paint(&text, color);
 }
 
@@ -869,6 +868,14 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn wide_name_truncates_to_the_column_budget_in_cells() {
+        let t = task(r#"{"name": "界界界界界"}"#);
+        let r = render_row(&t, 5, &PLAIN, &[], 0, &TaskLocation::Same).unwrap();
+        assert_eq!(r, "\u{754c}\u{754c}\u{2026}");
+        assert_eq!(crate::fit::visible_width(&r), 5);
     }
 
     #[test]
