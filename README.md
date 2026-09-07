@@ -133,17 +133,18 @@ fetch is disabled, and after a login switch, so another account's numbers never 
 
 ### Behind CLIProxyAPI
 
-With `cli_proxy_usage_enabled` set, a session whose `ANTHROPIC_BASE_URL` points at a
-[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance that runs the
-[cpa-claude-statusline](https://github.com/flobernd/cpa-claude-statusline) plugin gets the line
-from that plugin instead. A detached child polls
-`<base-url>/v0/resource/plugins/cpa-claude-statusline/session?id=<session-id>` every
-`cli_proxy_usage_refresh_seconds` (default 5, the floor) into
-`~/.claude/claude-statusline-sessions/<session-id>.json`, beside a `<session-id>.lock` that keeps
-two children of one session apart, and each render tick reads that file; the tick never waits on
-the network. An answer older than a minute still paints, with its meters
-dimmed to the comment color, because it is the last reading the route gave rather than a current
-one. Files of sessions that ended are removed a day later.
+With `cli_proxy_usage_enabled` set, a session whose `ANTHROPIC_BASE_URL` points at
+a [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance that runs
+the [cpa-claude-statusline](https://github.com/flobernd/cpa-claude-statusline)
+plugin gets the line from that plugin instead. A detached child polls
+`<base-url>/v0/resource/plugins/cpa-claude-statusline/session?id=<session-id>`
+every `cli_proxy_usage_refresh_seconds` (default 5, the floor) into
+`~/.claude/claude-statusline-sessions/<session-id>.json`, beside a `<session-id>.lock` that
+keeps two children of one session apart, and each render tick reads that file; the tick never
+waits on the network. An answer older than a minute still paints, with its meters dimmed to the
+comment color, because it is the last reading the route gave rather than a current one. Files of
+sessions that ended are removed a day later. Their lock files stay: a zero-byte file per session
+id, never removed, since a lock that could be unlinked could be unlinked from under its holder.
 
 The proxy binds a session to a credential per model, so the main model, the auxiliary calls
 Claude Code makes on a smaller model, and a subagent on another model can each run on an

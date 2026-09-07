@@ -10,10 +10,8 @@ use std::path::Path;
 /// carries a copy of the descriptor until its exec, and a flock lock lives
 /// on the shared open file description, so the close would leave the lock
 /// held for that window. A killed holder leaves nothing to take over: the
-/// OS releases the lock at process exit. No holder ever unlinks a lock
-/// path, so one holder can never remove another's lock; the proxy sweep
-/// removes a session's lock only once it is a day old, and a hold lasts
-/// seconds.
+/// OS releases the lock at process exit. No path is ever unlinked, so a
+/// holder can never remove another holder's lock.
 pub struct Lock {
     file: File,
 }
@@ -25,10 +23,10 @@ impl Drop for Lock {
 }
 
 /// The file is created once and never removed; `try_lock` is the one
-/// atomic step. It is touched on every acquisition so the proxy sweep,
-/// which removes session files by age, reads a held lock as fresh. A
-/// filesystem that cannot lock at all (`Error`, not `WouldBlock`) gets the
-/// unserialized fetch it had before, rather than none.
+/// atomic step. It is touched on every acquisition, so a directory listing
+/// shows when a lock was last taken. A filesystem that cannot lock at all
+/// (`Error`, not `WouldBlock`) gets the unserialized fetch it had before,
+/// rather than none.
 pub fn try_acquire(path: &Path) -> Option<Lock> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -88,8 +86,7 @@ mod tests {
 
     #[test]
     fn acquiring_touches_the_file() {
-        // The proxy sweep removes session files a day old by mtime, so a
-        // held lock has to read as fresh.
+        // The mtime is the only record of when a lock was last taken.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.lock");
         std::fs::write(&path, "").unwrap();

@@ -566,11 +566,11 @@ pub(crate) fn sweep_sessions(dir: &Path) {
         }
         let path = entry.path();
         // `write_json_atomic` writes `<id>.<pid>.tmp` before it renames, so a child killed in
-        // between leaves one behind that no rename will ever claim.
-        if path
-            .extension()
-            .is_none_or(|e| e != "json" && e != "tmp" && e != "lock")
-        {
+        // between leaves one behind that no rename will ever claim. Lock files are never
+        // removed: an age check cannot tell a leftover from a lock a child acquired a moment
+        // after the check, and unlinking a held lock lets a second child lock a fresh file at
+        // the same path.
+        if path.extension().is_none_or(|e| e != "json" && e != "tmp") {
             continue;
         }
         let old = entry
@@ -845,8 +845,8 @@ mod tests {
             "a temporary a killed child left behind ages out with the session files"
         );
         assert!(
-            !old_lock.exists() && young_lock.exists(),
-            "a lock file ages out with its session file"
+            old_lock.exists() && young_lock.exists(),
+            "a lock file is never removed, whatever its age"
         );
     }
 
