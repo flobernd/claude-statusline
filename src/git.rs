@@ -163,7 +163,7 @@ fn dir_info(dir: &Path, out: Option<String>) -> Option<(PathBuf, PathBuf)> {
 /// The branch from the HEAD file, for when the status call ran out of its
 /// budget on a slow tree: `ref: refs/heads/<name>` on a branch, unborn or
 /// not, a raw object id when detached. The reftable backend keeps a
-/// placeholder here and gets no fallback.
+/// placeholder here and is answered by `branch_from_refs` instead.
 fn head_from_file(git_dir: &Path) -> Option<String> {
     let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let head = head.trim();
@@ -171,6 +171,26 @@ fn head_from_file(git_dir: &Path) -> Option<String> {
         return (!name.is_empty() && name != ".invalid").then(|| name.to_string());
     }
     (head.len() >= 40 && head.bytes().all(|b| b.is_ascii_hexdigit())).then(|| "HEAD".to_string())
+}
+
+/// The branch through the ref store, for a HEAD file that names nothing:
+/// `symbolic-ref` prints the branch on an unborn head too and fails when
+/// detached, which `rev-parse` then names `HEAD`. Both work without a
+/// work tree.
+fn branch_from_refs(dir: &Path) -> Option<String> {
+    if let Some(name) = run_git(dir, &["symbolic-ref", "--short", "-q", "HEAD"]) {
+        let name = name.trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    run_git(dir, &["rev-parse", "--verify", "-q", "HEAD"]).map(|_| "HEAD".to_string())
+}
+
+/// Unmerged index entries, read without touching the work tree, for when
+/// the status call could not answer.
+fn index_has_unmerged(dir: &Path) -> bool {
+    run_git(dir, &["ls-files", "--unmerged"]).is_some_and(|out| !out.trim().is_empty())
 }
 
 /// Porcelain v2 with `--branch --untracked-files=all`: the branch header
@@ -400,8 +420,10 @@ pub fn collect(dir: &Path) -> GitInfo {
         let branch = match &status {
             Some(s) => s.branch.clone(),
             // A status that ran out of budget, or cannot run at all as in a bare
-            // repository, must not cost the branch chip.
-            None => head_from_file(&git_dir),
+            // repository, must not cost the branch chip: the HEAD file answers on
+            // the files backend, and the ref store answers where HEAD is a
+            // placeholder, as on reftable.
+            None => head_from_file(&git_dir).or_else(|| branch_from_refs(dir)),
         };
         if let Some(branch) = branch {
             info.on_default_branch = on_default_branch(&common_dir, &branch);
@@ -409,7 +431,13 @@ pub fn collect(dir: &Path) -> GitInfo {
         }
         info.linked_worktree = git_dir != common_dir;
         info.repo_name_fallback = repo_name(dir, &common_dir);
-        info.state = detect_state(&git_dir, status.as_ref().is_some_and(|s| s.unmerged));
+        // Without a status the index is asked directly: a slow untracked scan
+        // must not turn a conflict into a plain operation label.
+        let unmerged = match &status {
+            Some(s) => s.unmerged,
+            None => index_has_unmerged(dir),
+        };
+        info.state = detect_state(&git_dir, unmerged);
     }
     if let Some(out) = sync {
         let mut parts = out.split_whitespace();
@@ -699,6 +727,74 @@ mod tests {
         std::fs::write(dir.path().join("HEAD"), "garbage\n").unwrap();
         assert!(head_from_file(dir.path()).is_none());
         assert!(head_from_file(&dir.path().join("missing")).is_none());
+    }
+
+    #[test]
+    fn refs_answer_the_branch_when_the_head_file_cannot() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        assert_eq!(branch_from_refs(dir.path()).as_deref(), Some("main"));
+        git(dir.path(), &["checkout", "-q", "--detach"]);
+        assert_eq!(branch_from_refs(dir.path()).as_deref(), Some("HEAD"));
+        let fresh = dir.path().join("fresh");
+        std::fs::create_dir(&fresh).unwrap();
+        git(&fresh, &["init", "-q", "-b", "main"]);
+        assert_eq!(branch_from_refs(&fresh).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn reftable_bare_repository_keeps_its_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        init_repo(&src);
+        let bare = dir.path().join("bare.git");
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                "--ref-format=reftable",
+                src.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            head_from_file(&bare).is_none(),
+            "reftable keeps a placeholder HEAD"
+        );
+        assert_eq!(collect(&bare).branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn the_index_reports_a_conflict_when_status_cannot() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        assert!(!index_has_unmerged(dir.path()));
+        git(dir.path(), &["checkout", "-q", "-b", "other"]);
+        std::fs::write(dir.path().join("f.txt"), "two\n").unwrap();
+        git(dir.path(), &["commit", "-qam", "two"]);
+        git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("f.txt"), "three\n").unwrap();
+        git(dir.path(), &["commit", "-qam", "three"]);
+        let _ = Command::new("git")
+            .args(["merge", "-q", "other"])
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        assert!(index_has_unmerged(dir.path()));
+        assert_eq!(
+            detect_state(&dir.path().join(".git"), index_has_unmerged(dir.path())),
+            Some(GitState::Conflict)
+        );
     }
 
     #[test]
