@@ -308,6 +308,32 @@ fn on_default_branch(common_dir: &Path, branch: &str) -> bool {
     }
 }
 
+/// A submodule's common dir is `.git/modules/<name>` under the
+/// superproject, nested once more per level for a submodule of a submodule.
+fn submodule_common_dir(common_dir: &Path) -> bool {
+    let is_named = |p: &Path, s: &str| p.file_name().is_some_and(|n| n == s);
+    common_dir
+        .ancestors()
+        .any(|a| is_named(a, "modules") && a.parent().is_some_and(|p| is_named(p, ".git")))
+}
+
+/// The common dir's parent names the repository: a linked worktree's
+/// common dir is the main repository's `.git`, and a bare common
+/// repository beside its checkouts is named by its own parent too. A
+/// submodule's parent would say `modules`, so its checkout root names it,
+/// looked up only then: `--show-toplevel` aborts the whole rev-parse in a
+/// bare repository or inside a `.git` directory, layouts that must keep
+/// their chips, so it cannot ride along with the directory lookup.
+fn repo_name(dir: &Path, common_dir: &Path) -> Option<String> {
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
+    if submodule_common_dir(common_dir) {
+        let out = run_git(dir, &["rev-parse", "--show-toplevel"])?;
+        name(&resolve(dir, out.trim()))
+    } else {
+        common_dir.parent().and_then(name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchLocation {
     pub repo: String,
@@ -315,16 +341,9 @@ pub struct BranchLocation {
     pub on_default_branch: bool,
 }
 
-/// Repo name comes from the common dir's parent, not the checkout directory,
-/// so a linked worktree reports the main repository rather than its own
-/// checkout folder.
 pub fn branch_location(dir: &Path) -> Option<BranchLocation> {
     let info = head_info(dir, run_git(dir, HEAD_ARGS))?;
-    let repo = info
-        .common_dir
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().into_owned())?;
+    let repo = repo_name(dir, &info.common_dir)?;
     Some(BranchLocation {
         on_default_branch: on_default_branch(&info.common_dir, &info.branch),
         repo,
@@ -373,10 +392,7 @@ pub fn collect(dir: &Path) -> GitInfo {
             info.branch = Some(branch);
         }
         info.linked_worktree = git_dir != common_dir;
-        info.repo_name_fallback = common_dir
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned());
+        info.repo_name_fallback = repo_name(dir, &common_dir);
         info.state = detect_state(&git_dir, status.as_ref().is_some_and(|s| s.unmerged));
     }
     if let Some(out) = sync {
@@ -747,6 +763,107 @@ mod tests {
                 branch: "feat/x".to_string(),
                 on_default_branch: false,
             })
+        );
+    }
+
+    #[test]
+    fn submodule_common_dirs_sit_under_a_git_modules_directory() {
+        assert!(!submodule_common_dir(Path::new("/w/repo/.git")));
+        assert!(!submodule_common_dir(Path::new("/w/project/.bare")));
+        assert!(!submodule_common_dir(Path::new("/w/modules/.git")));
+        assert!(submodule_common_dir(Path::new("/w/super/.git/modules/lib")));
+        assert!(submodule_common_dir(Path::new(
+            "/w/super/.git/modules/lib/modules/inner"
+        )));
+    }
+
+    #[test]
+    fn repo_name_takes_the_common_dir_parent_outside_a_submodule() {
+        let dir = Path::new("/nonexistent");
+        assert_eq!(
+            repo_name(dir, Path::new("/w/repo/.git")).as_deref(),
+            Some("repo")
+        );
+        // A bare common repository with checkouts beside it: the parent still names it.
+        assert_eq!(
+            repo_name(dir, Path::new("/w/project/.bare")).as_deref(),
+            Some("project")
+        );
+    }
+
+    #[test]
+    fn submodule_is_named_after_its_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        init_repo(&sub);
+        let sup = dir.path().join("super");
+        std::fs::create_dir(&sup).unwrap();
+        init_repo(&sup);
+        git(
+            &sup,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                sub.to_str().unwrap(),
+                "lib",
+            ],
+        );
+        let checkout = sup.join("lib");
+        assert_eq!(
+            collect(&checkout).repo_name_fallback.as_deref(),
+            Some("lib")
+        );
+        assert_eq!(
+            branch_location(&checkout).map(|l| l.repo).as_deref(),
+            Some("lib")
+        );
+    }
+
+    #[test]
+    fn bare_repository_keeps_its_branch_and_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        init_repo(&src);
+        let bare = dir.path().join("bare.git");
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                src.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        let info = collect(&bare);
+        assert_eq!(info.branch.as_deref(), Some("main"));
+        assert!(info.repo_name_fallback.is_some());
+        assert!(!info.linked_worktree);
+        assert_eq!(info.state, None);
+        assert_eq!(
+            branch_location(&bare).map(|l| l.branch).as_deref(),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn inside_the_git_dir_keeps_its_branch_and_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("myrepo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let inside = repo.join(".git");
+        let info = collect(&inside);
+        assert_eq!(info.branch.as_deref(), Some("main"));
+        assert_eq!(info.repo_name_fallback.as_deref(), Some("myrepo"));
+        assert_eq!(
+            branch_location(&inside).map(|l| l.repo).as_deref(),
+            Some("myrepo")
         );
     }
 
